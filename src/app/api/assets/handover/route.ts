@@ -113,7 +113,7 @@ export async function GET(req: NextRequest) {
     // Status badge
     const statusLabel = preview ? 'PREVIEW' : 'OFFICIAL'
     const badgeBg = preview ? rgb(0.722, 0.290, 0.161) : TEAL
-    page.drawRectangle({ x: W - 200, y: H - 68, width: 80, height: 18, color: badgeBg, borderRadius: 3 })
+    page.drawRectangle({ x: W - 200, y: H - 68, width: 80, height: 18, color: badgeBg })
     page.drawText(statusLabel, { x: W - 190, y: H - 62, size: 8, font: fontBold, color: WHITE })
 
     // ── Certificate title block ─────────────────────────────────
