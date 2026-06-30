@@ -1,0 +1,175 @@
+// src/app/api/groups/route.ts
+import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
+import prisma from '@/lib/prisma/client'
+
+const createGroupSchema = z.object({
+  name: z.string().min(3).max(100),
+  description: z.string().optional(),
+  currency: z.string().default('USD'),
+  contributionAmount: z.coerce.number().positive(),
+  contributionDay: z.coerce.number().min(1).max(28),
+  contributionFrequency: z.string().default('monthly'),
+  maxMembers: z.coerce.number().min(4).max(50).default(10),
+  penaltyRate: z.coerce.number().min(0).max(100).default(20),
+  insurancePoolPct: z.coerce.number().min(0).max(10).default(1.5),
+  payoutStrategy: z.enum(['RANDOM','SENIORITY','GROUP_VOTE']).default('SENIORITY'),
+  country: z.string().optional(),
+  region: z.string().optional(),
+})
+
+// GET /api/groups — list all groups
+export async function GET(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url)
+    const status = searchParams.get('status')
+
+    const groups = await prisma.group.findMany({
+      where: status ? { status: status as any } : {},
+      include: {
+        admin: { select: { fullName: true, email: true } },
+        _count: { select: { members: true } },
+        cycles: {
+          where: { status: 'ACTIVE' },
+          select: { id: true, cycleNumber: true, status: true, startDate: true, endDate: true, poolAmount: true },
+          take: 1,
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    })
+
+    return NextResponse.json({
+      success: true,
+      data: groups.map(g => ({
+        id: g.id,
+        name: g.name,
+        description: g.description,
+        status: g.status,
+        currency: g.currency,
+        contributionAmount: Number(g.contributionAmount),
+        contributionDay: g.contributionDay,
+        contributionFrequency: g.contributionFrequency,
+        maxMembers: g.maxMembers,
+        memberCount: g._count.members,
+        escrowBalance: Number(g.escrowBalance),
+        insurancePoolBalance: Number(g.insurancePoolBalance),
+        penaltyRate: Number(g.penaltyRate),
+        insurancePoolPct: Number(g.insurancePoolPct),
+        platformFeePct: Number(g.platformFeePct),
+        payoutStrategy: g.payoutStrategy,
+        country: g.country,
+        region: g.region,
+        adminName: g.admin.fullName,
+        activeCycle: g.cycles[0] || null,
+        createdAt: g.createdAt,
+      })),
+    })
+  } catch (error) {
+    console.error('GET /api/groups error:', error)
+    return NextResponse.json({ success: false, error: 'Failed to fetch groups' }, { status: 500 })
+  }
+}
+
+// POST /api/groups — create new group
+export async function POST(req: NextRequest) {
+  try {
+    const body = await req.json()
+    const data = createGroupSchema.parse(body)
+
+    // Find the first system admin to use as default admin
+    const adminUser = await prisma.user.findFirst({
+      where: { role: { in: ['SYSTEM_ADMIN', 'GROUP_ADMIN'] } },
+      orderBy: { createdAt: 'asc' },
+    })
+
+    if (!adminUser) {
+      return NextResponse.json({ success: false, error: 'No admin user found. Please seed the database first.' }, { status: 400 })
+    }
+
+    const group = await prisma.$transaction(async (tx) => {
+      // Create the group
+      const g = await tx.group.create({
+        data: {
+          name: data.name,
+          description: data.description,
+          adminUserId: adminUser.id,
+          status: 'DRAFT',
+          currency: data.currency as any,
+          contributionAmount: data.contributionAmount,
+          contributionDay: data.contributionDay,
+          contributionFrequency: data.contributionFrequency,
+          maxMembers: data.maxMembers,
+          penaltyRate: data.penaltyRate / 100, // Convert % to decimal
+          insurancePoolPct: data.insurancePoolPct / 100,
+          payoutStrategy: data.payoutStrategy,
+          country: data.country,
+          region: data.region,
+        },
+      })
+
+      // Add admin as first member
+      await tx.groupMember.create({
+        data: {
+          groupId: g.id,
+          userId: adminUser.id,
+          role: 'GROUP_ADMIN',
+          status: 'ACTIVE',
+          approvedAt: new Date(),
+          approvedById: adminUser.id,
+        },
+      })
+
+      // Create default chart of accounts
+      const accounts = [
+        { code: '1000', name: 'Cash & Escrow',           type: 'ASSET'     },
+        { code: '1100', name: 'EcoCash Account',          type: 'ASSET'     },
+        { code: '1200', name: 'Bank Account',             type: 'ASSET'     },
+        { code: '2000', name: 'Member Payouts Payable',   type: 'LIABILITY' },
+        { code: '3000', name: 'Member Equity',            type: 'EQUITY'    },
+        { code: '3100', name: 'Insurance Pool Reserve',   type: 'EQUITY'    },
+        { code: '4000', name: 'Contribution Income',      type: 'INCOME'    },
+        { code: '4100', name: 'Rental Income',            type: 'INCOME'    },
+        { code: '5000', name: 'Platform Fees',            type: 'EXPENSE'   },
+        { code: '5100', name: 'Bank Charges',             type: 'EXPENSE'   },
+      ]
+      await tx.ledgerAccount.createMany({
+        data: accounts.map(a => ({ ...a, groupId: g.id })),
+      })
+
+      // Audit log
+      await tx.auditLog.create({
+        data: {
+          userId: adminUser.id,
+          groupId: g.id,
+          action: 'CREATE',
+          entityType: 'Group',
+          entityId: g.id,
+          description: `Group "${g.name}" created`,
+        },
+      })
+
+      return g
+    })
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        id: group.id,
+        name: group.name,
+        status: group.status,
+      },
+      message: `Group "${group.name}" created successfully`,
+    }, { status: 201 })
+
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return NextResponse.json({
+        success: false,
+        error: 'Validation failed',
+        details: error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join(', '),
+      }, { status: 400 })
+    }
+    console.error('POST /api/groups error:', error)
+    return NextResponse.json({ success: false, error: 'Failed to create group. Please try again.' }, { status: 500 })
+  }
+}
