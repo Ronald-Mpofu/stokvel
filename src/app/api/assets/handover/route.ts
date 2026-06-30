@@ -57,7 +57,6 @@ export async function GET(req: NextRequest) {
         asset: {
           include: {
             group: { select: { name: true, country: true, region: true, admin: { select: { fullName: true, email: true } } } },
-            costingSheet: { select: { totals: true } },
           },
         },
       },
