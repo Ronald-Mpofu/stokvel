@@ -4,9 +4,9 @@ import SendInviteModal from '../invitations/SendInviteModal'
 import GroceryClubPanel from '../grocery/GroceryClubPanel'
 import InvestmentPanel  from '../investment/InvestmentPanel'
 import AssetsPage from '../assets/AssetsPage'
-import SavingsPage    from '../savings/page'
-import PropertyPage   from '../property/page'
-import LoansPage      from '../loans/page'
+import SavingsPage    from '../savings/SavingsPage'
+import PropertyPage   from '../property/PropertyPage'
+import LoansPage      from '../loans/LoansPage'
 import CountrySelector from '../../../components/CountrySelector'
 // Brand type → visual style map (replaces broken getStokvels static import)
 const STOKVEL_TYPE_COLORS: Record<string, { icon: string; color: string; bg: string }> = {
