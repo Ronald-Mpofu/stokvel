@@ -57,10 +57,10 @@ export async function POST(req: NextRequest) {
     // New owner not yet in ownerships
     const newOwnerPct = existing ? null : (data.amount / newRaised) * 100
 
-    // ── Minimal transaction — only writes, no reads ──────────
-    await prisma.$transaction([
+    // ── Interactive transaction — supports timeout ────────────
+    await prisma.$transaction(async (tx) => {
       // 1. Update asset raised amount + status
-      prisma.asset.update({
+      await tx.asset.update({
         where: { id: data.assetId },
         data: {
           raisedAmount:    newRaised,
@@ -68,34 +68,35 @@ export async function POST(req: NextRequest) {
           acquisitionCost: isFullyFunded ? newRaised  : undefined,
           acquiredAt:      isFullyFunded ? new Date() : undefined,
         },
-      }),
+      })
 
       // 2. Upsert this member's ownership record
-      existing
-        ? prisma.assetOwnership.update({
-            where: { id: existing.id },
-            data:  { amountContributed: myNewContrib, ownershipPct: myNewContrib / newRaised * 100 },
-          })
-        : prisma.assetOwnership.create({
-            data: {
-              assetId:           data.assetId,
-              userId:            data.userId,
-              amountContributed: data.amount,
-              ownershipPct:      newOwnerPct!,
-            },
-          }),
+      if (existing) {
+        await tx.assetOwnership.update({
+          where: { id: existing.id },
+          data:  { amountContributed: myNewContrib, ownershipPct: myNewContrib / newRaised * 100 },
+        })
+      } else {
+        await tx.assetOwnership.create({
+          data: {
+            assetId:           data.assetId,
+            userId:            data.userId,
+            amountContributed: data.amount,
+            ownershipPct:      newOwnerPct!,
+          },
+        })
+      }
 
       // 3. Recalculate existing OTHER owners' percentages in one batch
-      // Use raw SQL for a single-query update instead of N individual updates
-      prisma.$executeRaw`
+      await tx.$executeRaw`
         UPDATE "AssetOwnership"
         SET "ownershipPct" = ("amountContributed" / ${newRaised}::decimal) * 100
         WHERE "assetId" = ${data.assetId}
         AND "userId" != ${data.userId}
-      `,
+      `
 
       // 4. Transaction log
-      prisma.transaction.create({
+      await tx.transaction.create({
         data: {
           type:          'ASSET_CONTRIBUTION',
           status:        'COMPLETED',
@@ -107,8 +108,8 @@ export async function POST(req: NextRequest) {
           paymentMethod: data.paymentMethod as any,
           description:   `Asset contribution: ${asset.name}`,
         },
-      }),
-    ], { timeout: 15000 })
+      })
+    }, { timeout: 15000 })
 
     // ── Audit log — fire-and-forget, non-blocking ────────────
     prisma.auditLog.create({
