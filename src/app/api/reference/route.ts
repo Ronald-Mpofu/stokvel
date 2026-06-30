@@ -4,6 +4,7 @@
 // Payment methods mapped to schema PaymentMethod enum.
 
 import { NextRequest, NextResponse } from 'next/server';
+import prisma from '@/lib/prisma/client';
 
 const ok  = (data: unknown) => NextResponse.json({ success: true, data });
 const err = (error: string, s = 400) => NextResponse.json({ success: false, error }, { status: s });
@@ -290,14 +291,34 @@ const COUNTRIES: RefCountry[] = (() => {
 })();
 
 // ── GET /api/reference ────────────────────────────────────────────────────────
-// ?type=full       → full country list (default)
-// ?type=currencies → flat list of distinct schema-valid currencies
-// ?countryId=ZW    → single country record
+// ?type=full                           → full country list (default)
+// ?type=currencies                     → flat list of distinct schema-valid currencies
+// ?type=stokvel-brands                 → all active brands from RefStokvelBrand
+// ?type=stokvel-brands&countryId=ZW   → brands filtered by country
+// ?countryId=ZW                        → single country record
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = req.nextUrl;
     const type      = searchParams.get('type')      ?? 'full';
     const countryId = searchParams.get('countryId') ?? null;
+
+    // ── Stokvel brands from DB ──────────────────────────────────
+    // ?type=stokvel-brands              → all active brands
+    // ?type=stokvel-brands&countryId=ZW → filtered by country
+    if (type === 'stokvel-brands') {
+      const where = countryId
+        ? `WHERE "countryId" = $1 AND "isActive" = true ORDER BY "sortOrder" ASC`
+        : `WHERE "isActive" = true ORDER BY "countryId", "sortOrder" ASC`;
+      const brands = countryId
+        ? await prisma.$queryRawUnsafe<any[]>(
+            `SELECT id, "countryId", name, description, type, "sortOrder" FROM "RefStokvelBrand" ${where}`,
+            countryId.toUpperCase()
+          )
+        : await prisma.$queryRawUnsafe<any[]>(
+            `SELECT id, "countryId", name, description, type, "sortOrder" FROM "RefStokvelBrand" ${where}`
+          );
+      return ok(brands);
+    }
 
     if (countryId) {
       const country = COUNTRIES.find(c => c.id === countryId.toUpperCase());

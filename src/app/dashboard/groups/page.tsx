@@ -530,7 +530,6 @@ export default function GroupsPage() {
     e.preventDefault()
     setFormError('')
     if (!form.name.trim()) return setFormError('Group name is required')
-    if (!form.contributionAmount) return setFormError('Contribution amount is required')
     setSaving(true)
     try {
       const res = await fetch('/api/groups', {
@@ -540,7 +539,7 @@ export default function GroupsPage() {
           name:                form.name.trim(),
           description:         form.description.trim(),
           currency:            location.currency || form.currency,
-          contributionAmount:  parseFloat(form.contributionAmount),
+          contributionAmount:  0,
           contributionDay:     parseInt(form.contributionDay),
           contributionFrequency: form.contributionFrequency,
           maxMembers:          parseInt(form.maxMembers),
