@@ -794,7 +794,7 @@ function AssetDetail({ asset, members, groupMembers, onBack, onSuccess, fetchMem
 }
 
 // ── Main Page ─────────────────────────────────────────────────
-export default function AssetsPage({ groupId: propGroupId }: { groupId?: string }) {
+export function AssetsPage({ groupId: propGroupId }: { groupId?: string }) {
   const [view, setView]           = useState<'list'|'create'|'detail'>('list')
   const [assets, setAssets]       = useState<any[]>([])
   const [groups, setGroups]       = useState<any[]>([])
