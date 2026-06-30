@@ -675,7 +675,7 @@ function RepayModal({ repayment, onClose, onConfirm }: any) {
 }
 
 // ── Main Loans Page ───────────────────────────────────────────
-export default function LoansPage({ groupId: propGroupId }: { groupId?: string } = {}) {
+export default function LoansPage({ groupId: propGroupId }: { groupId?: string }) {
   const [data, setData]         = useState<any>(null)
   const [groups, setGroups]     = useState<any[]>([])
   const [members, setMembers]   = useState<any[]>([])

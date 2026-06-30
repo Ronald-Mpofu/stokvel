@@ -577,7 +577,7 @@ function VersionBadge({ label, ver }: { label: string; ver: string }) {
   )
 }
 
-export default function PropertyPage({ groupId: propGroupId }: { groupId?: string } = {}) {
+export default function PropertyPage({ groupId: propGroupId }: { groupId?: string }) {
   const [data, setData]       = useState<any>(null)
   const [groups, setGroups]   = useState<any[]>([])
   const [members, setMembers] = useState<any[]>([])

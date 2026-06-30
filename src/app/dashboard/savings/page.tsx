@@ -875,7 +875,7 @@ function VersionBadge() {
   )
 }
 
-export default function SavingsPage({ groupId: propGroupId }: { groupId?: string } = {}) {
+export default function SavingsPage({ groupId: propGroupId }: { groupId?: string }) {
   const [data, setData]       = useState<any>(null)
   const [groups, setGroups]   = useState<any[]>([])
   const [members, setMembers] = useState<any[]>([])
