@@ -43,7 +43,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       success: true,
       data: {
-        contributions: contributions.map(c => ({
+        contributions: contributions.map((c: any) => ({
           id:            c.id,
           poolId:        c.poolId,
           userId:        c.userId,
