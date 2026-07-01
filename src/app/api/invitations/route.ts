@@ -268,7 +268,7 @@ async function handleAccept(body: any): Promise<NextResponse> {
           fullName:     data.fullName,
           role:         'MEMBER',
           status:       'ACTIVE',
-          kycStatus:    'NOT_SUBMITTED',
+          kycStatus:    'PENDING',
           country:      data.country || inv.group.country || 'Zimbabwe',
           city:         data.city,
           reputationScore: 50,
