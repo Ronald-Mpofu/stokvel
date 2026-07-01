@@ -438,27 +438,19 @@ export default function BackersPanel({ asset, onClose }: { asset: any; onClose: 
 
   async function handleAction(action: string, backerId: string) {
     try {
-      let body: any = { action: action.startsWith('KYC') ? 'KYC' : action, backerId }
-      if (action === 'KYC_VERIFY') body = { action: 'KYC', backerId, action2: 'VERIFY' }
-      if (action === 'KYC_REJECT') body = { action: 'KYC', backerId, action2: 'REJECT', rejectionNote: 'Documents unclear — please resubmit' }
-
-      // Map KYC sub-actions
-      if (action === 'KYC_VERIFY') body = { action: 'KYC', backerId }
-
-      let apiBody: any = { backerId }
-      if (action === 'APPROVE')    apiBody = { action:'APPROVE',    backerId }
-      if (action === 'REJECT')     apiBody = { action:'REJECT',     backerId, reason:'Application rejected by admin' }
-      if (action === 'SUSPEND')    apiBody = { action:'SUSPEND',    backerId }
-      if (action === 'REINSTATE')  apiBody = { action:'REINSTATE',  backerId }
-      // Re-build properly
-      if (action === 'KYC_VERIFY') { apiBody = { backerId }; apiBody.action = 'KYC'; apiBody.kycAction = 'VERIFY' }
-
-      // Simpler approach
       const payload = action === 'KYC_VERIFY'
-        ? { action:'KYC',     backerId, action:'VERIFY' }
+        ? { action:'KYC', kycAction:'VERIFY',  backerId }
         : action === 'KYC_REJECT'
-        ? { action:'KYC',     backerId, action:'REJECT', rejectionNote:'Please resubmit clearer documents' }
-        : { action,           backerId }
+        ? { action:'KYC', kycAction:'REJECT',  backerId, rejectionNote:'Please resubmit clearer documents' }
+        : action === 'APPROVE'
+        ? { action:'APPROVE',   backerId }
+        : action === 'REJECT'
+        ? { action:'REJECT',    backerId, reason:'Application rejected by admin' }
+        : action === 'SUSPEND'
+        ? { action:'SUSPEND',   backerId }
+        : action === 'REINSTATE'
+        ? { action:'REINSTATE', backerId }
+        : { action,             backerId }
 
       const res  = await fetch('/api/assets/backers', {
         method:'POST', headers:{'Content-Type':'application/json'},
