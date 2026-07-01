@@ -281,9 +281,8 @@ export default function ContributionsPage() {
               const count = item?.count || 0
               const [bg, color] = STATUS_COLORS[s]
               return (
-                <div key={s} style={{ background: bg, borderRadius: '10px', padding: '14px', textAlign: 'center' }}
-                  onClick={() => { setFilterStatus(s); setTab('tracker') }}
-                  style={{ background: bg, borderRadius: '10px', padding: '14px', textAlign: 'center', cursor: 'pointer' }}>
+                <div key={s} style={{ background: bg, borderRadius: '10px', padding: '14px', textAlign: 'center', cursor: 'pointer' }}
+                  onClick={() => { setFilterStatus(s); setTab('tracker') }}>
                   <div style={{ fontSize: '22px', fontWeight: '700', color }}>{count}</div>
                   <div style={{ fontSize: '10px', color, fontWeight: '600', marginTop: '4px' }}>{s.replace('_', ' ')}</div>
                   {item && <div style={{ fontSize: '10px', color, opacity: 0.7, marginTop: '2px' }}>${Number(item.totalPaid || 0).toFixed(0)} paid</div>}
