@@ -443,7 +443,7 @@ export default function BackersPanel({ asset, onClose }: { asset: any; onClose: 
       if (action === 'KYC_REJECT') body = { action: 'KYC', backerId, action2: 'REJECT', rejectionNote: 'Documents unclear — please resubmit' }
 
       // Map KYC sub-actions
-      if (action === 'KYC_VERIFY') body = { action: 'KYC', backerId, action: 'KYC' }
+      if (action === 'KYC_VERIFY') body = { action: 'KYC', backerId }
 
       let apiBody: any = { backerId }
       if (action === 'APPROVE')    apiBody = { action:'APPROVE',    backerId }
