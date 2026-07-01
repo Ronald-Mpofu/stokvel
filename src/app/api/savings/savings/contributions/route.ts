@@ -33,10 +33,10 @@ export async function GET(req: NextRequest) {
     const now   = new Date()
     const stats = {
       total:   contributions.length,
-      paid:    contributions.filter(c => c.status === 'PAID').length,
-      pending: contributions.filter(c => c.status === 'PENDING').length,
-      late:    contributions.filter(c => c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now).length,
-      totalCollected: contributions.filter(c => c.status === 'PAID').reduce((s,c) => s + Number(c.amountPaid), 0),
+      paid:    contributions.filter((c: any) => c.status === 'PAID').length,
+      pending: contributions.filter((c: any) => c.status === 'PENDING').length,
+      late:    contributions.filter((c: any) => c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now).length,
+      totalCollected: contributions.filter((c: any) => c.status === 'PAID').reduce((s,c) => s + Number(c.amountPaid), 0),
       totalDue:       contributions.reduce((s,c) => s + Number(c.amountDue), 0),
     }
 
