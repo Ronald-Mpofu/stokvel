@@ -241,7 +241,7 @@ async function handleAccept(body: any): Promise<NextResponse> {
 
     const inv = await prisma.memberInvitation.findUnique({
       where:   { token: data.token },
-      include: { group: { select: { id: true, name: true, contributionAmount: true, currency: true } } },
+      include: { group: { select: { id: true, name: true, contributionAmount: true, currency: true, country: true } } },
     })
 
     if (!inv)                    return NextResponse.json({ success: false, error: 'Invitation not found.' }, { status: 404 })
