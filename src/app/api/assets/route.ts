@@ -63,7 +63,7 @@ export async function GET(req: NextRequest) {
         status:          a.status,
         targetAmount:    Number(a.targetAmount),
         raisedAmount:    Number(a.raisedAmount),
-        fundingProgress: a.targetAmount > 0 ? Math.min(100, Math.round(Number(a.raisedAmount) / Number(a.targetAmount) * 100)) : 0,
+        fundingProgress: Number(a.targetAmount) > 0 ? Math.min(100, Math.round(Number(a.raisedAmount) / Number(a.targetAmount) * 100)) : 0,
         currency:        a.group.currency,
         fundingDeadline: a.fundingDeadline,
         acquisitionCost: Number(a.acquisitionCost || 0),
