@@ -103,6 +103,7 @@ export async function checkPayoutGates(payoutId: string): Promise<{
     include: {
       cycle: { include: { group: true } },
       recipient: { include: { agreementSignatures: true } },
+      schedule: true,
     },
   })
 
