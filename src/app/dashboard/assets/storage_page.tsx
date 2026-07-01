@@ -1,7 +1,7 @@
 'use client'
 import { useState, useEffect, useCallback } from 'react'
-import CostingSheet from './costing/page'
-import RoundRobinQueue from './queue/page'
+import CostingSheet from './CostingPanel'
+import RoundRobinQueue from './QueuePanel'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
