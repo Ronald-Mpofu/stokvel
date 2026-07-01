@@ -356,7 +356,7 @@ function CreateAssetForm({ groups, groupMembers, onBack, onSuccess, defaultGroup
                   onClick={() => setForm(p => ({ ...p, memberIds:
                     p.memberIds.length === groupMembers.length ? [] : groupMembers.map((m:any) => m.userId||m.id)
                   }))}
-                  style={{ fontSize:'11px', color:TEAL, background:'none', border:'none', cursor:'pointer', fontWeight:'600', padding:'2px 8px', borderRadius:'4px', background:'#F0FDF4' }}>
+                  style={{ fontSize:'11px', color:TEAL, background:'#F0FDF4', border:'none', cursor:'pointer', fontWeight:'600', padding:'2px 8px', borderRadius:'4px' }}>
                   {form.memberIds.length === groupMembers.length ? 'Deselect all' : 'Select all'}
                 </button>
               </div>
