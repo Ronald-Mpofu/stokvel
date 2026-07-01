@@ -36,8 +36,8 @@ export async function GET(req: NextRequest) {
       paid:    contributions.filter((c: any) => c.status === 'PAID').length,
       pending: contributions.filter((c: any) => c.status === 'PENDING').length,
       late:    contributions.filter((c: any) => c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now).length,
-      totalCollected: contributions.filter((c: any) => c.status === 'PAID').reduce((s,c) => s + Number(c.amountPaid), 0),
-      totalDue:       contributions.reduce((s,c) => s + Number(c.amountDue), 0),
+      totalCollected: contributions.filter((c: any) => c.status === 'PAID').reduce((s: number, c: any) => s + Number(c.amountPaid), 0),
+      totalDue:       contributions.reduce((s: number, c: any) => s + Number(c.amountDue), 0),
     }
 
     return NextResponse.json({
