@@ -582,7 +582,7 @@ function CreateCampaignForm({ groups, members, onBack, onSuccess }: any) {
 }
 
 // ── Asset Detail ───────────────────────────────────────────────
-function AssetDetail({ asset, members, onBack, onSuccess, onCosting }: any) {
+function AssetDetail({ asset, members, onBack, onSuccess, onCosting, onQueue }: any) {
   const [showContribute, setShowContribute] = useState(false)
   const typeInfo  = ASSET_TYPES.find(t => t.value === asset.type)
   const ct        = CAMPAIGN_TYPES.find(c => c.value === (asset.campaignType || 'SHARED_OWNERSHIP'))!
