@@ -141,9 +141,9 @@ export async function GET(req: NextRequest) {
 
     const summary = {
       total:       pools.length,
-      active:      pools.filter(p => p.status === 'ACTIVE').length,
-      matured:     pools.filter(p => p.status === 'MATURED').length,
-      totalValue:  pools.reduce((s, p) => s + Number(p.totalPoolValue), 0),
+      active:      pools.filter((p: any) => p.status === 'ACTIVE').length,
+      matured:     pools.filter((p: any) => p.status === 'MATURED').length,
+      totalValue:  pools.reduce((s: number, p: any) => s + Number(p.totalPoolValue), 0),
     }
 
     return NextResponse.json({ success: true, data: { pools: pools.map(formatPool), summary } })
@@ -205,7 +205,7 @@ export async function POST(req: NextRequest) {
       message: `"${data.name}" savings pool created. Add members and click Activate to start.`,
     }, { status: 201 })
   } catch (e: any) {
-    if (e instanceof z.ZodError) return NextResponse.json({ success: false, error: e.errors.map(x => x.message).join('; ') }, { status: 400 })
+    if (e instanceof z.ZodError) return NextResponse.json({ success: false, error: e.errors.map((x: any) => x.message).join('; ') }, { status: 400 })
     return NextResponse.json({ success: false, error: e.message }, { status: 500 })
   }
 }
@@ -273,7 +273,7 @@ async function handleDistribute(body: any): Promise<NextResponse> {
   // Delete any existing draft payouts
   await (prisma as any).savingsPoolPayout.deleteMany({ where: { poolId: body.poolId, status: 'PENDING' } })
 
-  const payouts = pool.members.filter(m => m.isActive).map(m => {
+  const payouts = pool.members.filter((m: any) => m.isActive).map((m: any) => {
     const share    = Number(m.totalContributed) / Number(pool.totalContributed)
     const gross    = totalPool * share
     const deduct   = Number(m.loanBalance)

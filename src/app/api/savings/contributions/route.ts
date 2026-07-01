@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
     const contributions = await sql(query, params)
     const now = new Date()
 
-    const mapped = contributions.map(c => ({
+    const mapped = contributions.map((c: any) => ({
       id:            c.id,
       poolId:        c.poolId,
       userId:        c.userId,
@@ -58,11 +58,11 @@ export async function GET(req: NextRequest) {
 
     const stats = {
       total:          mapped.length,
-      paid:           mapped.filter(c => c.status === 'PAID').length,
-      pending:        mapped.filter(c => c.status === 'PENDING').length,
-      late:           mapped.filter(c => c.isOverdue).length,
-      totalCollected: mapped.filter(c => c.status === 'PAID').reduce((s,c) => s + c.amountPaid, 0),
-      totalDue:       mapped.reduce((s,c) => s + c.amountDue, 0),
+      paid:           mapped.filter((c: any) => c.status === 'PAID').length,
+      pending:        mapped.filter((c: any) => c.status === 'PENDING').length,
+      late:           mapped.filter((c: any) => c.isOverdue).length,
+      totalCollected: mapped.filter((c: any) => c.status === 'PAID').reduce((s: number, c: any) => s + c.amountPaid, 0),
+      totalDue:       mapped.reduce((s: number, c: any) => s + c.amountDue, 0),
     }
 
     return NextResponse.json({ success: true, data: { contributions: mapped, stats } })
@@ -129,7 +129,7 @@ export async function POST(req: NextRequest) {
       message: isFullPaid ? `✅ Period #${contrib.periodNumber} paid in full` : 'Partial payment recorded',
     })
   } catch (e: any) {
-    if (e instanceof z.ZodError) return NextResponse.json({ success: false, error: e.errors.map(x => x.message).join('; ') }, { status: 400 })
+    if (e instanceof z.ZodError) return NextResponse.json({ success: false, error: e.errors.map((x: any) => x.message).join('; ') }, { status: 400 })
     console.error('POST /api/savings/contributions error:', e)
     return NextResponse.json({ success: false, error: e.message }, { status: 500 })
   }
