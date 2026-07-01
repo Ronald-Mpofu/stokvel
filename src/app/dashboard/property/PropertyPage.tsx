@@ -522,7 +522,7 @@ function PropertyDetail({ propertyId, members, onClose, onAction }: any) {
                           style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'6px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}/>
                       </div>
                     </div>
-                    <button onClick={()=>handleAction('UPDATE_STATUS',{propertyGroupId:prop.id,status:'ACQUIRED',...statusForm,purchasePrice:statusForm.purchasePrice?parseFloat(statusForm.purchasePrice):undefined})}
+                    <button onClick={()=>handleAction('UPDATE_STATUS',{propertyGroupId:prop.id,...statusForm,status:'ACQUIRED',purchasePrice:statusForm.purchasePrice?parseFloat(statusForm.purchasePrice):undefined})}
                       disabled={saving} style={{padding:'8px 18px',background:PURPLE,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>🏠 Mark as Acquired</button>
                   </div>
                 )}
