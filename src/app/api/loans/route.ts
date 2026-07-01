@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
           borrower:   { select: { id: true, fullName: true, email: true, phone: true, reputationScore: true, tier: true } },
           guarantors: { include: { user: { select: { id: true, fullName: true, email: true } } } },
           repayments: { orderBy: { installmentNo: 'asc' } },
-          group:      { select: { name: true, currency: true, maxLoanAmount: true } },
+          group:      { select: { name: true, currency: true } },
         },
       })
       if (!loan) return NextResponse.json({ success: false, error: 'Loan not found' }, { status: 404 })
