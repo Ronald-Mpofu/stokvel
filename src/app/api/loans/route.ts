@@ -142,10 +142,21 @@ export async function POST(req: NextRequest) {
         },
       })
 
-      // Add guarantors
+      // Add guarantors — fetch user details required by LoanGuarantor model
       if (data.guarantorIds?.length) {
+        const guarantorUsers = await tx.user.findMany({
+          where: { id: { in: data.guarantorIds } },
+          select: { id: true, fullName: true, email: true, phone: true },
+        })
         await tx.loanGuarantor.createMany({
-          data: data.guarantorIds.map(userId => ({ loanId: loan.id, userId })),
+          data: guarantorUsers.map(u => ({
+            loanId:        loan.id,
+            userId:        u.id,
+            fullName:      u.fullName,
+            email:         u.email || '',
+            phone:         u.phone || '',
+            tokenExpiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+          })),
         })
       }
 
