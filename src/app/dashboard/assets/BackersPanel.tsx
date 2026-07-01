@@ -450,7 +450,6 @@ export default function BackersPanel({ asset, onClose }: { asset: any; onClose: 
       if (action === 'REJECT')     apiBody = { action:'REJECT',     backerId, reason:'Application rejected by admin' }
       if (action === 'SUSPEND')    apiBody = { action:'SUSPEND',    backerId }
       if (action === 'REINSTATE')  apiBody = { action:'REINSTATE',  backerId }
-      if (action === 'KYC_VERIFY') apiBody = { action:'KYC', backerId, action: undefined }
       // Re-build properly
       if (action === 'KYC_VERIFY') { apiBody = { backerId }; apiBody.action = 'KYC'; apiBody.kycAction = 'VERIFY' }
 
