@@ -646,7 +646,7 @@ function CertModal({ entry, onClose }: any) {
 }
 
 // ── Version Badge (remove before production) ─────────────────
-function VersionBadge() {
+function VersionBadge({ label, ver }: { label: string; ver: string }) {
   return (
     <div style={{ position:'fixed', bottom:'12px', right:'12px', background:'rgba(13,33,55,0.85)', color:'white', fontSize:'10px', padding:'4px 10px', borderRadius:'999px', zIndex:9998, fontFamily:'monospace', backdropFilter:'blur(4px)', display:'flex', alignItems:'center', gap:'6px' }}>
       <span style={{ opacity:0.5 }}>DEV</span>
