@@ -435,6 +435,7 @@ model Group {
   announcements   Announcement[]
   auditLogs       AuditLog[]
   savingsPools    SavingsPool[]          @relation("GroupSavingsPools")
+  invitations     MemberInvitation[]     @relation("GroupInvitations")
 
   @@index([adminUserId])
   @@index([status])

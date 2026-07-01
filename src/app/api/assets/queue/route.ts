@@ -21,7 +21,7 @@ export async function GET(req: NextRequest) {
           include: { user: { select: { fullName: true, email: true, phone: true, reputationScore: true, tier: true } } },
           orderBy: { position: 'asc' },
         },
-        costingSheet: { select: { totals: true, status: true } },
+        costingSheet: { select: { status: true } },
       },
     })
 
@@ -251,24 +251,24 @@ export async function PATCH(req: NextRequest) {
     const fundingPct    = Math.min(100, Math.round(newRaised / Number(currentEntry.targetAmount) * 100))
     const ref           = data.paymentRef || `RR-${Date.now()}`
 
-    // ── Parallel batch transaction — all 3 writes fire at once ──
-    await prisma.$transaction([
+    // ── Interactive transaction with timeout ────────────────────
+    await prisma.$transaction(async (tx) => {
       // 1. Update queue entry
-      prisma.assetQueueEntry.update({
+      await tx.assetQueueEntry.update({
         where: { id: currentEntry.id },
         data: {
           raisedAmount: newRaised,
           status:       isFullyFunded ? 'SOURCING' : 'FUNDING',
           orderedAt:    isFullyFunded ? new Date() : undefined,
         },
-      }),
+      })
       // 2. Increment asset raised amount
-      prisma.asset.update({
+      await tx.asset.update({
         where: { id: data.assetId },
         data:  { raisedAmount: { increment: data.amount } },
-      }),
+      })
       // 3. Transaction log
-      prisma.transaction.create({
+      await tx.transaction.create({
         data: {
           type:          'ASSET_CONTRIBUTION',
           status:        'COMPLETED',
@@ -280,8 +280,8 @@ export async function PATCH(req: NextRequest) {
           paymentMethod: data.paymentMethod as any,
           description:   `Round Robin contribution: ${currentEntry.asset.name} — Position ${currentEntry.position}`,
         },
-      }),
-    ], { timeout: 15000 })
+      })
+    }, { timeout: 15000 })
 
     // ── Audit log — fire-and-forget, non-blocking ────────────
     prisma.auditLog.create({
