@@ -113,7 +113,7 @@ export default function Dashboard() {
     router.push('/login')
   }
 
-  const initials = user.name.split(' ').map(n => n[0]).join('').slice(0, 2)
+  const initials = user.name.split(' ').map((n: string) => n[0]).join('').slice(0, 2)
 
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
@@ -428,7 +428,7 @@ function MembersPage() {
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       fontSize: '11px', fontWeight: '600',
                     }}>
-                      {m.name.split(' ').map(n => n[0]).join('')}
+                      {m.name.split(' ').map((n: string) => n[0]).join('')}
                     </div>
                     <span style={{ fontSize: '13px', fontWeight: '500', color: '#1E293B' }}>{m.name}</span>
                   </div>
