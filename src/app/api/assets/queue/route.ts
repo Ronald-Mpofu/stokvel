@@ -31,7 +31,7 @@ export async function GET(req: NextRequest) {
     // Calculate per-queue-entry progress
     const currentEntry = asset.queue.find(e => e.status === 'FUNDING')
     const nextEntry    = asset.queue.find(e => e.status === 'WAITING')
-    const unitCost     = Number(asset.unitCost || asset.targetAmount / Math.max(1, asset.unitsTotal))
+    const unitCost     = Number(asset.unitCost || Number(asset.targetAmount) / Math.max(1, Number(asset.unitsTotal)))
 
     // Summary stats
     const delivered  = asset.queue.filter(e => e.status === 'DELIVERED').length
@@ -158,7 +158,7 @@ export async function POST(req: NextRequest) {
       ordered = data.memberIds.map(id => memberMap[id]).filter(Boolean)
     }
 
-    const unitCost = Number(asset.unitCost || asset.targetAmount / Math.max(1, asset.unitsTotal))
+    const unitCost = Number(asset.unitCost || Number(asset.targetAmount) / Math.max(1, Number(asset.unitsTotal)))
 
     await prisma.$transaction(async (tx) => {
       // Create queue entries
