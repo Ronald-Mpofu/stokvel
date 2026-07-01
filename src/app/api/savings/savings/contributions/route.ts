@@ -167,7 +167,7 @@ async function recalcPoolTotals(poolId: string) {
       by: ['userId'], where: { poolId, status: 'PAID' },
       _sum: { amountPaid: true },
     })
-    const contribMap = Object.fromEntries(memberContribs.map(c => [c.userId, Number(c._sum.amountPaid || 0)]))
+    const contribMap = Object.fromEntries(memberContribs.map((c: any) => [c.userId, Number(c._sum.amountPaid || 0)]))
 
     for (const m of members) {
       const mc = contribMap[m.userId] || 0
