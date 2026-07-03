@@ -12,6 +12,7 @@ import PropertyPage from './property/PropertyPage'
 import SavingsPage from './savings/SavingsPage'
 import NotificationBell from './notifications/NotificationBell'
 import GroceryClubPanel from './grocery/GroceryClubPanel'
+import UserManagement from './users/UserManagement'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
@@ -20,6 +21,7 @@ const NAV_ITEMS = [
   { id: 'overview',      icon: '📊', label: 'Overview'        },
   { id: 'groups',        icon: '👥', label: 'Groups'          },
   { id: 'membership',    icon: '🏦', label: 'Membership Pool' },
+  { id: 'users',         icon: '🧑‍💼', label: 'User Management' },
   { id: 'notifications', icon: '🔔', label: 'Notifications'   },
   { id: 'portal',        icon: '👤', label: 'Member Portal'   },
   { id: 'settings',      icon: '⚙️',  label: 'Settings'       },
@@ -255,6 +257,7 @@ export default function Dashboard() {
           {active === 'savings'       && <SavingsPage />}
           {active === 'members'       && <MembersPage />}
           {active === 'payouts'       && <PayoutsPage />}
+          {active === 'users'         && <UserManagement />}
           {active === 'portal' && (
             <div style={{ textAlign: 'center', padding: '48px 24px' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>👤</div>
@@ -269,10 +272,10 @@ export default function Dashboard() {
             </div>
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
-           active !== 'groups' && active !== 'contributions' && active !== 'assets' &&
-           active !== 'suppliers' && active !== 'membership' && active !== 'notifications' &&
-           active !== 'loans' && active !== 'property' && active !== 'savings' &&
-           active !== 'portal' && (
+           active !== 'users' && active !== 'groups' && active !== 'contributions' &&
+           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'notifications' && active !== 'loans' && active !== 'property' &&
+           active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
           )}
         </div>
@@ -408,6 +411,7 @@ export default function Dashboard() {
           {active === 'savings'       && <SavingsPage />}
           {active === 'members'       && <MembersPage />}
           {active === 'payouts'       && <PayoutsPage />}
+          {active === 'users'         && <UserManagement />}
           {active === 'portal' && (
             <div style={{ textAlign: 'center', padding: '60px 40px' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>👤</div>
@@ -423,10 +427,10 @@ export default function Dashboard() {
             </div>
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
-           active !== 'groups' && active !== 'contributions' && active !== 'assets' &&
-           active !== 'suppliers' && active !== 'membership' && active !== 'notifications' &&
-           active !== 'loans' && active !== 'property' && active !== 'savings' &&
-           active !== 'portal' && (
+           active !== 'users' && active !== 'groups' && active !== 'contributions' &&
+           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'notifications' && active !== 'loans' && active !== 'property' &&
+           active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
           )}
         </div>

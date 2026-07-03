@@ -1,6 +1,4 @@
 // src/lib/prisma/client.ts
-// Singleton Prisma client — prevents connection pool exhaustion in dev
-
 import { PrismaClient } from '@prisma/client'
 
 const globalForPrisma = globalThis as unknown as {
@@ -13,8 +11,12 @@ export const prisma =
     log: process.env.NODE_ENV === 'development'
       ? ['query', 'error', 'warn']
       : ['error'],
+    datasources: {
+      db: {
+        url: process.env.DATABASE_URL,
+      },
+    },
   })
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prisma
-
 export default prisma
