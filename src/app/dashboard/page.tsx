@@ -118,10 +118,12 @@ function tierBadge(tier: string) {
 export default function Dashboard() {
   const router   = useRouter()
   const isMobile = useIsMobile()
-  const [active, setActive]         = useState('overview')
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [active, setActive]           = useState('overview')
+  const [sidebarOpen, setSidebarOpen]   = useState(true)
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-  const [user, setUser] = useState<any>({ id: '', name: 'Administrator', role: 'SYSTEM_ADMIN' })
+  const [user, setUser]               = useState<any>({ id: '', name: 'Administrator', role: 'SYSTEM_ADMIN' })
+  const [showLogoutModal, setShowLogoutModal] = useState(false)
+  const [loggingOut, setLoggingOut]   = useState(false)
 
   useEffect(() => {
     fetch('/api/auth/me').then(r => r.json()).then(d => {
@@ -135,10 +137,16 @@ export default function Dashboard() {
     setMobileMenuOpen(false)
   }
 
-  async function handleLogout() {
+  function handleLogout() {
+    setShowLogoutModal(true)
+    setMobileMenuOpen(false)
+  }
+
+  async function confirmLogout() {
+    setLoggingOut(true)
     try {
       await fetch('/api/auth/logout', { method: 'POST' })
-    } catch { /* ignore network errors */ }
+    } catch { /* ignore */ }
     finally {
       document.cookie = 'access_token=; Max-Age=0; path=/'
       document.cookie = 'refresh_token=; Max-Age=0; path=/'
@@ -153,6 +161,37 @@ export default function Dashboard() {
   if (isMobile) {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
+
+        {/* ── Logout Confirmation Modal ─────────────────────── */}
+        {showLogoutModal && (
+          <div style={{ position:'fixed', inset:0, background:'rgba(0,0,0,0.6)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999, padding:'24px' }}>
+            <div style={{ background:'white', borderRadius:'16px', padding:'28px', width:'100%', maxWidth:'360px', boxShadow:'0 25px 50px rgba(0,0,0,0.3)', textAlign:'center' }}>
+              <div style={{ fontSize:'48px', marginBottom:'12px' }}>👋</div>
+              <h3 style={{ fontSize:'18px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Sign out?</h3>
+              <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 24px', lineHeight:1.5 }}>
+                You are signed in as <strong>{user.name}</strong>.<br/>
+                Are you sure you want to sign out?
+              </p>
+              <div style={{ display:'flex', gap:'10px' }}>
+                <button
+                  onClick={() => setShowLogoutModal(false)}
+                  disabled={loggingOut}
+                  style={{ flex:1, padding:'11px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'500', cursor:'pointer', color:'#475569' }}>
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmLogout}
+                  disabled={loggingOut}
+                  style={{ flex:1, padding:'11px', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'600',
+                    cursor: loggingOut ? 'not-allowed' : 'pointer',
+                    background: loggingOut ? '#94A3B8' : 'linear-gradient(135deg,#0D2137,#0F6E56)',
+                    color:'white' }}>
+                  {loggingOut ? '⏳ Signing out...' : '↩ Sign out'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Mobile topbar */}
         <div style={{
@@ -365,20 +404,20 @@ export default function Dashboard() {
           ))}
         </nav>
 
-        {/* User */}
+        {/* User + Logout — always visible */}
         <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.1)', display: 'flex', alignItems: 'center', gap: '10px' }}>
           <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: TEAL, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'white', fontSize: '12px', fontWeight: '600', flexShrink: 0 }}>{initials}</div>
           {sidebarOpen && (
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ color: 'white', fontSize: '12px', fontWeight: '500', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{user.name}</div>
-              <div style={{ color: '#9CA3AF', fontSize: '10px' }}>{user.role.replace('_', ' ')}</div>
+              <div style={{ color: '#9CA3AF', fontSize: '10px' }}>{user.role.replace(/_/g, ' ')}</div>
             </div>
           )}
           <button
             onClick={handleLogout}
-            title="Logout"
-            style={{ background: 'rgba(255,255,255,0.08)', border: 'none', color: '#9CA3AF', cursor: 'pointer', fontSize: '16px', borderRadius: '6px', padding: '6px 8px', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-            ↩
+            title="Sign out"
+            style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)', color: '#9CA3AF', cursor: 'pointer', fontSize: '14px', borderRadius: '8px', padding: '6px 10px', flexShrink: 0, display: 'flex', alignItems: 'center', gap: '4px', whiteSpace: 'nowrap' }}>
+            ↩{sidebarOpen ? ' Sign out' : ''}
           </button>
         </div>
       </div>
