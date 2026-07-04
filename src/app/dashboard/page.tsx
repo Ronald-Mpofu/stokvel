@@ -361,9 +361,42 @@ export default function Dashboard() {
     )
   }
 
-  // ── DESKTOP LAYOUT (unchanged) ────────────────────────────
+  // ── DESKTOP LAYOUT ────────────────────────────────────────
   return (
     <div style={{ display: 'flex', height: '100vh', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
+
+      {/* ── Logout Confirmation Modal (desktop) ──────────────── */}
+      {showLogoutModal && (
+        <div style={{ position:'fixed', inset:0, background:'rgba(13,33,55,0.75)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999, padding:'24px' }}>
+          <div style={{ background:'white', borderRadius:'20px', padding:'32px 28px', width:'100%', maxWidth:'360px', boxShadow:'0 32px 64px rgba(0,0,0,0.35)', textAlign:'center' }}>
+            {loggingOut ? (
+              <>
+                <div style={{ fontSize:'48px', marginBottom:'16px' }}>⏳</div>
+                <h3 style={{ fontSize:'18px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Signing out...</h3>
+                <p style={{ fontSize:'14px', color:'#64748B', margin:0 }}>Please wait while we securely sign you out.</p>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize:'48px', marginBottom:'16px' }}>👋</div>
+                <h3 style={{ fontSize:'18px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Sign out?</h3>
+                <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 6px', lineHeight:1.5 }}>You are signed in as</p>
+                <p style={{ fontSize:'15px', fontWeight:'600', color:'#0D2137', margin:'0 0 24px' }}>{user.name}</p>
+                <div style={{ display:'flex', gap:'10px' }}>
+                  <button onClick={() => setShowLogoutModal(false)}
+                    style={{ flex:1, padding:'12px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'500', cursor:'pointer', color:'#475569' }}>
+                    Cancel
+                  </button>
+                  <button onClick={confirmLogout}
+                    style={{ flex:1, padding:'12px', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'600', cursor:'pointer',
+                      background:'linear-gradient(135deg,#0D2137,#0F6E56)', color:'white' }}>
+                    ↩ Sign out
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Sidebar */}
       <div style={{

@@ -16,7 +16,7 @@ const JWT_SECRET = new TextEncoder().encode(
 const PUBLIC_ROUTES   = ['/', '/login', '/invite', '/guarantor']
 const ADMIN_ROUTES    = ['/dashboard']
 const MEMBER_ROUTES   = ['/portal']
-const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh']
+const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout']
 
 // ── Helpers ───────────────────────────────────────────────────
 function isPublic(pathname: string): boolean {
