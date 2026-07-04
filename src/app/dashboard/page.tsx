@@ -12,6 +12,7 @@ import PropertyPage from './property/PropertyPage'
 import SavingsPage from './savings/SavingsPage'
 import NotificationBell from './notifications/NotificationBell'
 import GroceryClubPanel from './grocery/GroceryClubPanel'
+import UserManagement from './users/UserManagement'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
@@ -20,6 +21,7 @@ const NAV_ITEMS = [
   { id: 'overview',      icon: '📊', label: 'Overview'        },
   { id: 'groups',        icon: '👥', label: 'Groups'          },
   { id: 'membership',    icon: '🏦', label: 'Membership Pool' },
+  { id: 'users',         icon: '🧑‍💼', label: 'User Management' },
   { id: 'notifications', icon: '🔔', label: 'Notifications'   },
   { id: 'portal',        icon: '👤', label: 'Member Portal'   },
   { id: 'settings',      icon: '⚙️',  label: 'Settings'       },
@@ -165,7 +167,8 @@ export default function Dashboard() {
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
 
-        {/* ── Logout Confirmation Modal ──────────────────────────── */}
+
+        {/* ── Logout Confirmation Modal ──────────────────────── */}
         {showLogoutModal && (
           <div style={{ position:'fixed', inset:0, background:'rgba(13,33,55,0.75)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:9999, padding:'24px' }}>
             <div style={{ background:'white', borderRadius:'20px', padding:'32px 28px', width:'100%', maxWidth:'360px', boxShadow:'0 32px 64px rgba(0,0,0,0.35)', textAlign:'center' }}>
@@ -179,20 +182,14 @@ export default function Dashboard() {
                 <>
                   <div style={{ fontSize:'48px', marginBottom:'16px' }}>👋</div>
                   <h3 style={{ fontSize:'18px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Sign out?</h3>
-                  <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 6px', lineHeight:1.5 }}>
-                    You are signed in as
-                  </p>
-                  <p style={{ fontSize:'15px', fontWeight:'600', color:'#0D2137', margin:'0 0 24px' }}>
-                    {user.name}
-                  </p>
+                  <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 6px', lineHeight:1.5 }}>You are signed in as</p>
+                  <p style={{ fontSize:'15px', fontWeight:'600', color:'#0D2137', margin:'0 0 24px' }}>{user.name}</p>
                   <div style={{ display:'flex', gap:'10px' }}>
-                    <button
-                      onClick={() => setShowLogoutModal(false)}
+                    <button onClick={() => setShowLogoutModal(false)}
                       style={{ flex:1, padding:'12px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'500', cursor:'pointer', color:'#475569' }}>
                       Cancel
                     </button>
-                    <button
-                      onClick={confirmLogout}
+                    <button onClick={confirmLogout}
                       style={{ flex:1, padding:'12px', border:'none', borderRadius:'10px', fontSize:'14px', fontWeight:'600', cursor:'pointer',
                         background:'linear-gradient(135deg,#0D2137,#0F6E56)', color:'white' }}>
                       ↩ Sign out
@@ -310,6 +307,7 @@ export default function Dashboard() {
           {active === 'savings'       && <SavingsPage />}
           {active === 'members'       && <MembersPage />}
           {active === 'payouts'       && <PayoutsPage />}
+          {active === 'users'         && <UserManagement />}
           {active === 'portal' && (
             <div style={{ textAlign: 'center', padding: '48px 24px' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>👤</div>
@@ -324,10 +322,10 @@ export default function Dashboard() {
             </div>
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
-           active !== 'groups' && active !== 'contributions' && active !== 'assets' &&
-           active !== 'suppliers' && active !== 'membership' && active !== 'notifications' &&
-           active !== 'loans' && active !== 'property' && active !== 'savings' &&
-           active !== 'portal' && (
+           active !== 'users' && active !== 'groups' && active !== 'contributions' &&
+           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'notifications' && active !== 'loans' && active !== 'property' &&
+           active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
           )}
         </div>
@@ -467,6 +465,7 @@ export default function Dashboard() {
           {active === 'savings'       && <SavingsPage />}
           {active === 'members'       && <MembersPage />}
           {active === 'payouts'       && <PayoutsPage />}
+          {active === 'users'         && <UserManagement />}
           {active === 'portal' && (
             <div style={{ textAlign: 'center', padding: '60px 40px' }}>
               <div style={{ fontSize: '48px', marginBottom: '16px' }}>👤</div>
@@ -482,10 +481,10 @@ export default function Dashboard() {
             </div>
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
-           active !== 'groups' && active !== 'contributions' && active !== 'assets' &&
-           active !== 'suppliers' && active !== 'membership' && active !== 'notifications' &&
-           active !== 'loans' && active !== 'property' && active !== 'savings' &&
-           active !== 'portal' && (
+           active !== 'users' && active !== 'groups' && active !== 'contributions' &&
+           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'notifications' && active !== 'loans' && active !== 'property' &&
+           active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
           )}
         </div>
