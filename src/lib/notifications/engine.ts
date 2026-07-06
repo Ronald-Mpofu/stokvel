@@ -104,26 +104,30 @@ export async function sendBulkNotifications(payloads: NotificationPayload[]) {
   return results
 }
 
-// ── Email sender ──────────────────────────────────────────────
+// ── Email sender (Resend) ─────────────────────────────────────
 async function sendEmail({ to, subject, html, text }: { to: string; subject: string; html: string; text: string }) {
-  const nodemailer = await import('nodemailer')
+  const apiKey = process.env.RESEND_API_KEY
 
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[DEV] Email not configured. Would send to ${to}: ${subject}`)
+  if (!apiKey) {
+    console.log(`[DEV — no RESEND_API_KEY] Email not configured. Would send to ${to}: ${subject}`)
     return
   }
 
-  const transporter = nodemailer.default.createTransport({
-    host:   process.env.SMTP_HOST   || 'smtp.gmail.com',
-    port:   parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  const from = process.env.FROM_EMAIL || 'Windfall Community Deals <noreply@thecommunitydeals.com>'
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ from, to: [to], subject, html, text }),
   })
 
-  await transporter.sendMail({
-    from:    `"Stokvel Platform" <${process.env.SMTP_USER}>`,
-    to, subject, html, text,
-  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({} as any))
+    throw new Error(err?.message || `Email provider error (${res.status})`)
+  }
 }
 
 // ── SMS sender ────────────────────────────────────────────────
@@ -167,7 +171,7 @@ export function textToHtml(body: string, title: string): string {
     </div>
     <div style="padding:28px 36px">${lines}</div>
     <div style="background:#F8FAFC;padding:16px 36px;border-top:1px solid #E2E8F0;text-align:center">
-      <p style="font-size:11px;color:#94A3B8;margin:0">Stokvel Platform · You're receiving this because you're a member.</p>
+      <p style="font-size:11px;color:#94A3B8;margin:0">Windfall Community Deals · You're receiving this because you're a member.</p>
     </div>
   </div>
 </body></html>`
@@ -224,7 +228,7 @@ export const templates = {
   welcome(member: string, group: string, contribution: number, currency: string) {
     const curr = currency === 'USD' ? '$' : currency
     return {
-      subject: `Welcome to ${group} on Stokvel Platform! 🎉`,
+      subject: `Welcome to ${group} on Windfall Community Deals! 🎉`,
       body: `Hi ${member.split(' ')[0]},\n\nWelcome to ${group}! You're now an official member.\n\nYour monthly contribution is ${curr}${contribution}. Your first payment will be collected on the group's regular collection date.\n\nLog in to your member portal to track your contributions, payout position, and more.\n\nWe're glad to have you!`,
     }
   },
