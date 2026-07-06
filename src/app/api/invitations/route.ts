@@ -383,22 +383,10 @@ async function handleResend(body: any): Promise<NextResponse> {
 
 // ── Email sender ──────────────────────────────────────────────
 async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memberName, contribution, currency, personalMessage, expiresAt, isReminder = false }: any) {
-  const nodemailer = await import('nodemailer')
-
-  const transporter = nodemailer.default.createTransport({
-    host:   process.env.SMTP_HOST     || 'smtp.gmail.com',
-    port:   parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE   === 'true',
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
-  })
-
   const currencySymbol = currency === 'USD' ? '$' : currency
   const greeting = memberName ? `Hi ${memberName.split(' ')[0]},` : 'Hi there,'
   const subject  = isReminder
-    ? `Reminder: You're invited to join ${groupName} on Stokvel Platform`
+    ? `Reminder: You're invited to join ${groupName} on Windfall Community Deals`
     : `${inviterName} has invited you to join ${groupName}`
 
   const html = `
@@ -411,8 +399,8 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
     <!-- Header -->
     <div style="background:linear-gradient(135deg,#0D2137,#0F6E56);padding:32px 40px;text-align:center">
       <div style="font-size:28px;margin-bottom:8px">🔄</div>
-      <h1 style="color:white;font-size:22px;font-weight:700;margin:0">Stokvel Platform</h1>
-      <p style="color:rgba(255,255,255,0.7);font-size:13px;margin:6px 0 0">Community Wealth Building</p>
+      <h1 style="color:white;font-size:22px;font-weight:700;margin:0">Windfall Community Deals</h1>
+      <p style="color:rgba(255,255,255,0.7);font-size:13px;margin:6px 0 0">Your community. Your savings. Your future.</p>
     </div>
 
     <!-- Body -->
@@ -420,7 +408,7 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
       <p style="font-size:16px;color:#0D2137;font-weight:600;margin:0 0 8px">${greeting}</p>
       <p style="font-size:14px;color:#475569;line-height:1.6;margin:0 0 24px">
         ${isReminder ? `This is a reminder that` : ''} <strong>${inviterName}</strong> has invited you to join
-        <strong>${groupName}</strong> — a savings and investment group on the Stokvel Platform.
+        <strong>${groupName}</strong> — a savings and investment group on the Windfall Community Deals.
       </p>
 
       ${personalMessage ? `
@@ -471,8 +459,7 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
 </body>
 </html>`
 
-  await transporter.sendMail({
-    from:    `"Stokvel Platform" <${process.env.SMTP_USER}>`,
+  await sendViaResend({
     to,
     subject,
     html,
@@ -482,18 +469,9 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
 
 // ── Welcome email ─────────────────────────────────────────────
 async function sendWelcomeEmail({ to, fullName, groupName, contribution, currency, loginUrl }: any) {
-  const nodemailer = await import('nodemailer')
-  const transporter = nodemailer.default.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.gmail.com',
-    port: parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-  })
-
   const currencySymbol = currency === 'USD' ? '$' : currency
 
-  await transporter.sendMail({
-    from:    `"Stokvel Platform" <${process.env.SMTP_USER}>`,
+  await sendViaResend({
     to,
     subject: `Welcome to ${groupName} — Your account is ready`,
     html: `
@@ -527,7 +505,7 @@ async function sendInvitationSMS({ to, inviteUrl, groupName, inviterName, contri
   }
 
   const currencySymbol = currency === 'USD' ? '$' : currency
-  const message = `${inviterName} invited you to join ${groupName} on Stokvel Platform. Contribute ${currencySymbol}${contribution}/mo. Accept here: ${inviteUrl}`
+  const message = `${inviterName} invited you to join ${groupName} on Windfall Community Deals. Contribute ${currencySymbol}${contribution}/mo. Accept here: ${inviteUrl}`
 
   const response = await fetch('https://api.sandbox.africastalking.com/version1/messaging', {
     method:  'POST',
@@ -567,5 +545,27 @@ function formatInvitation(inv: any) {
     daysLeft:        Math.max(0, Math.ceil((new Date(inv.expiresAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24))),
     inviteUrl:       `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/invite/${inv.token}`,
     createdAt:       inv.createdAt,
+  }
+}
+
+// ── Resend transport (replaces SMTP/nodemailer) ───────────────
+async function sendViaResend({ to, subject, html, text }: { to: string; subject: string; html: string; text?: string }) {
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) throw new Error('Email not configured — add RESEND_API_KEY to environment variables')
+
+  const from = process.env.FROM_EMAIL || 'Windfall Community Deals <noreply@thecommunitydeals.com>'
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ from, to: [to], subject, html, text: text || undefined }),
+  })
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({} as any))
+    throw new Error(err?.message || `Email provider error (${res.status})`)
   }
 }
