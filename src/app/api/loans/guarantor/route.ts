@@ -242,14 +242,14 @@ async function sendGuarantorEmail(guarantor: any, loan: any) {
     <div style="background:linear-gradient(135deg,#0D2137,#0F6E56);padding:32px 40px;text-align:center">
       <div style="font-size:32px;margin-bottom:8px">🤝</div>
       <h1 style="color:white;font-size:20px;font-weight:700;margin:0">Loan Guarantee Request</h1>
-      <p style="color:rgba(255,255,255,0.7);font-size:13px;margin:6px 0 0">Windfall Community Centre</p>
+      <p style="color:rgba(255,255,255,0.7);font-size:13px;margin:6px 0 0">Windfall Community Deals</p>
     </div>
 
     <div style="padding:32px 40px">
       <p style="font-size:15px;color:#0D2137;font-weight:600;margin:0 0 8px">Hi ${guarantor.fullName},</p>
       <p style="font-size:14px;color:#475569;line-height:1.6;margin:0 0 24px">
         <strong>${loan.borrower.fullName}</strong> has applied for a loan through <strong>${loan.group.name}</strong>
-        on the Windfall Community Centre and has listed you as a guarantor. Your approval is required to proceed.
+        on the Windfall Community Deals and has listed you as a guarantor. Your approval is required to proceed.
       </p>
 
       <div style="background:#F8FAFC;border-radius:12px;padding:20px;margin-bottom:28px;border:1px solid #E2E8F0">
@@ -296,25 +296,33 @@ async function sendGuarantorEmail(guarantor: any, loan: any) {
   </div>
 </body></html>`
 
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.log(`[DEV] Guarantor email to ${guarantor.email}: ${approveUrl}`)
+  const apiKey = process.env.RESEND_API_KEY
+  if (!apiKey) {
+    console.log(`[DEV — no RESEND_API_KEY] Guarantor email to ${guarantor.email}: ${approveUrl}`)
     return
   }
 
-  const nodemailer = await import('nodemailer')
-  const transporter = nodemailer.default.createTransport({
-    host:   process.env.SMTP_HOST   || 'smtp.gmail.com',
-    port:   parseInt(process.env.SMTP_PORT || '587'),
-    secure: process.env.SMTP_SECURE === 'true',
-    auth:   { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  const from = process.env.FROM_EMAIL || 'Windfall Community Deals <noreply@thecommunitydeals.com>'
+
+  const res = await fetch('https://api.resend.com/emails', {
+    method:  'POST',
+    headers: {
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      from,
+      to:      [guarantor.email],
+      subject,
+      html,
+      text: `Hi ${guarantor.fullName}, ${loan.borrower.fullName} has requested your guarantee for a loan of ${curr}${loan.amount}. Review and respond here: ${approveUrl}`,
+    }),
   })
 
-  await transporter.sendMail({
-    from:    `"Windfall Community Centre" <${process.env.SMTP_USER}>`,
-    to:      guarantor.email,
-    subject, html,
-    text: `Hi ${guarantor.fullName}, ${loan.borrower.fullName} has requested your guarantee for a loan of ${curr}${loan.amount}. Review and respond here: ${approveUrl}`,
-  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({} as any))
+    throw new Error(err?.message || `Email provider error (${res.status})`)
+  }
 }
 
 function formatGuarantor(g: any) {
