@@ -201,6 +201,36 @@ function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: (
   const [tab, setTab]       = useState<'overview'|'actions'|'security'>('overview')
   const [saving, setSaving] = useState(false)
   const [form, setForm]     = useState({ role: user.role, status: user.status, kycStatus: user.kycStatus, tier: user.tier })
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [deleteCheck, setDeleteCheck]         = useState<{ canDelete: boolean; blockers: string[] } | null>(null)
+  const [deleting, setDeleting]               = useState(false)
+
+  async function openDeleteModal() {
+    setShowDeleteModal(true)
+    setDeleteCheck(null)
+    try {
+      const res  = await fetch(`/api/users/${user.id}/deletion-check`)
+      const data = await res.json()
+      if (data.success) setDeleteCheck(data.data)
+      else { onUpdate('Could not check deletion eligibility'); setShowDeleteModal(false) }
+    } catch { onUpdate('Network error'); setShowDeleteModal(false) }
+  }
+
+  async function confirmDelete() {
+    setDeleting(true)
+    try {
+      const res  = await fetch(`/api/users/${user.id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (data.success) {
+        onUpdate(data.message || `${user.fullName} deleted`)
+        onBack()
+      } else {
+        onUpdate(data.error || 'Deletion failed')
+        setShowDeleteModal(false)
+      }
+    } catch { onUpdate('Network error during deletion') }
+    finally { setDeleting(false) }
+  }
 
   async function handleUpdate() {
     setSaving(true)
@@ -418,6 +448,77 @@ function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: (
                   📧 Send Email
                 </button>
               </div>
+            </div>
+
+            {/* Danger Zone — Rule 1: delete from User Management UI */}
+            <div style={{ background:'#FEF2F2', borderRadius:'12px', border:'1px solid #FECACA', padding:'20px' }}>
+              <div style={{ fontSize:'13px', fontWeight:'600', color:'#991B1B', marginBottom:'8px' }}>🗑️ Danger Zone</div>
+              <p style={{ fontSize:'12px', color:'#991B1B', margin:'0 0 14px', lineHeight:1.6 }}>
+                Permanently delete this user account. Only possible if the user has no group memberships,
+                no payment transactions or contributions, and no Windfall scheme participation. This cannot be undone.
+              </p>
+              <button onClick={openDeleteModal}
+                style={{ padding:'9px 18px', background:'#DC2626', border:'none', borderRadius:'8px', fontSize:'12px', cursor:'pointer', color:'white', fontWeight:'600' }}>
+                🗑️ Delete User Account
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ── Delete Confirmation Modal ─────────────────────────── */}
+        {showDeleteModal && (
+          <div style={{ position:'fixed', inset:0, background:'rgba(13,33,55,0.75)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:1100, padding:'24px' }}>
+            <div style={{ background:'white', borderRadius:'18px', padding:'28px', width:'100%', maxWidth:'440px', boxShadow:'0 32px 64px rgba(0,0,0,0.35)' }}>
+              {!deleteCheck ? (
+                <div style={{ textAlign:'center', padding:'20px' }}>
+                  <div style={{ fontSize:'32px', marginBottom:'12px' }}>⏳</div>
+                  <p style={{ color:'#64748B', fontSize:'14px' }}>Checking deletion eligibility...</p>
+                </div>
+              ) : deleteCheck.canDelete ? (
+                <>
+                  <div style={{ textAlign:'center', marginBottom:'20px' }}>
+                    <div style={{ fontSize:'44px', marginBottom:'10px' }}>⚠️</div>
+                    <h3 style={{ fontSize:'17px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Permanently delete {user.fullName}?</h3>
+                    <p style={{ fontSize:'13px', color:'#64748B', margin:0, lineHeight:1.6 }}>
+                      This user has no groups, transactions, or scheme participation, so deletion is allowed.
+                      This action <strong>cannot be undone</strong>.
+                    </p>
+                  </div>
+                  <div style={{ display:'flex', gap:'10px' }}>
+                    <button onClick={() => setShowDeleteModal(false)} disabled={deleting}
+                      style={{ flex:1, padding:'11px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'13px', fontWeight:'500', cursor:'pointer', color:'#475569' }}>
+                      Cancel
+                    </button>
+                    <button onClick={confirmDelete} disabled={deleting}
+                      style={{ flex:1, padding:'11px', border:'none', borderRadius:'10px', fontSize:'13px', fontWeight:'600',
+                        cursor: deleting ? 'not-allowed' : 'pointer',
+                        background: deleting ? '#94A3B8' : '#DC2626', color:'white' }}>
+                      {deleting ? '⏳ Deleting...' : '🗑️ Delete Permanently'}
+                    </button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div style={{ textAlign:'center', marginBottom:'16px' }}>
+                    <div style={{ fontSize:'44px', marginBottom:'10px' }}>🚫</div>
+                    <h3 style={{ fontSize:'17px', fontWeight:'700', color:'#0D2137', margin:'0 0 8px' }}>Cannot delete {user.fullName}</h3>
+                    <p style={{ fontSize:'13px', color:'#64748B', margin:0 }}>
+                      This user has active records that must be resolved first:
+                    </p>
+                  </div>
+                  <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'10px', padding:'14px 16px', marginBottom:'18px', maxHeight:'220px', overflowY:'auto' }}>
+                    {deleteCheck.blockers.map((b, i) => (
+                      <div key={i} style={{ fontSize:'12px', color:'#991B1B', padding:'4px 0', display:'flex', gap:'8px' }}>
+                        <span>•</span><span>{b}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={() => setShowDeleteModal(false)}
+                    style={{ width:'100%', padding:'11px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'13px', fontWeight:'500', cursor:'pointer', color:'#475569' }}>
+                    Close
+                  </button>
+                </>
+              )}
             </div>
           </div>
         )}
