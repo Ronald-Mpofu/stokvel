@@ -1,6 +1,6 @@
 // src/app/login/page.tsx — role-aware redirect after login
 'use client'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
 
 const TEAL = '#0F6E56'
@@ -8,7 +8,7 @@ const NAVY = '#0D2137'
 
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR']
 
-export default function LoginPage() {
+function LoginForm() {
   const router       = useRouter()
   const searchParams = useSearchParams()
   const redirectTo   = searchParams.get('redirect')
@@ -170,5 +170,18 @@ export default function LoginPage() {
         </div>
       </div>
     </div>
+  )
+}
+
+// Next.js 14 requires useSearchParams() to be wrapped in a Suspense boundary
+export default function LoginPage() {
+  return (
+    <Suspense fallback={
+      <div style={{ height:'100vh', display:'flex', alignItems:'center', justifyContent:'center', background:'#F8FAFC' }}>
+        <div style={{ fontSize:'24px' }}>⏳</div>
+      </div>
+    }>
+      <LoginForm />
+    </Suspense>
   )
 }
