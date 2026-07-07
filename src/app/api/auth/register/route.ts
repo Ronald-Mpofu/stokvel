@@ -87,6 +87,7 @@ export async function POST(req: NextRequest) {
       kycStatus: user.kycStatus as any,
       reputationScore: Number(user.reputationScore),
       profilePhotoUrl: user.profilePhotoUrl,
+      joiningFeePaid: false, // brand-new users have never paid
     }
 
     // Auto-login: same token pair as the login route

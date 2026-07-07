@@ -42,6 +42,12 @@ function isApiRoute(pathname: string): boolean {
 // ── Admin roles — can access dashboard ───────────────────────
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR']
 
+// ── Joining fee gate ──────────────────────────────────────────
+// Staff roles never pay. Community roles (MEMBER, GROUP_ADMIN,
+// TREASURER, INVESTMENT_MANAGER) must pay before using the platform.
+const FEE_EXEMPT_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'AUDITOR']
+const FEE_PAGE = '/dashboard/join-fee'
+
 // ── Middleware ────────────────────────────────────────────────
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
@@ -64,16 +70,24 @@ export async function middleware(req: NextRequest) {
   const token = req.cookies.get('access_token')?.value
   let role: string | null = null
   let userId: string | null = null
+  let feePaid: boolean | undefined = undefined
 
   if (token) {
     try {
       const { payload } = await jwtVerify(token, JWT_SECRET)
-      role   = (payload.role as string) || null
-      userId = (payload.sub as string) || null
+      role    = (payload.role as string) || null
+      userId  = (payload.sub as string) || null
+      // Claim added by login/register. Older tokens won't carry it —
+      // undefined means "unknown", and the gate deliberately fails open
+      // for unknown so pre-existing sessions are not locked out.
+      feePaid = typeof payload.joiningFeePaid === 'boolean'
+        ? (payload.joiningFeePaid as boolean)
+        : undefined
     } catch {
       // Token invalid or expired
-      role   = null
-      userId = null
+      role    = null
+      userId  = null
+      feePaid = undefined
     }
   }
 
@@ -97,6 +111,21 @@ export async function middleware(req: NextRequest) {
       )
     }
 
+    // Joining fee gate for APIs — unpaid users may only reach auth
+    // and joining-fee endpoints. Prevents bypassing the page gate by
+    // calling APIs directly.
+    if (
+      feePaid === false &&
+      !FEE_EXEMPT_ROLES.includes(role) &&
+      !pathname.startsWith('/api/auth/') &&
+      !pathname.startsWith('/api/joining-fee')
+    ) {
+      return NextResponse.json(
+        { success: false, error: 'Joining fee payment required before using the platform.' },
+        { status: 402 }
+      )
+    }
+
     return NextResponse.next()
   }
 
@@ -105,6 +134,21 @@ export async function middleware(req: NextRequest) {
     const loginUrl = new URL('/login', req.url)
     loginUrl.searchParams.set('redirect', pathname)
     return NextResponse.redirect(loginUrl)
+  }
+
+  // ── Joining fee page — reachable by EVERY authenticated user ──
+  // Must come BEFORE the admin check: MEMBERs would otherwise be
+  // bounced to /portal and could never reach the payment page.
+  if (pathname === FEE_PAGE || pathname.startsWith(FEE_PAGE + '/')) {
+    return NextResponse.next()
+  }
+
+  // ── Joining fee gate ──────────────────────────────────────
+  // Explicitly-unpaid community users go to the fee page first.
+  // feePaid === undefined (older token) passes — refresh/login
+  // will pick up the claim.
+  if (feePaid === false && !FEE_EXEMPT_ROLES.includes(role)) {
+    return NextResponse.redirect(new URL(FEE_PAGE, req.url))
   }
 
   // ── Dashboard route — admin roles only ───────────────────

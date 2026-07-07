@@ -17,14 +17,18 @@ export async function POST(req: NextRequest) {
     const body = await req.json()
     const { email, password } = loginSchema.parse(body)
 
-    const user = await prisma.user.findUnique({
-      where: { email: email.toLowerCase() },
-      select: {
-        id: true, email: true, fullName: true, passwordHash: true,
-        role: true, tier: true, kycStatus: true, reputationScore: true,
-        status: true, profilePhotoUrl: true, isBlacklisted: true,
-      },
-    })
+    // Raw SQL (single round trip): "joiningFeePaid" is a raw-SQL column
+    // NOT in schema.prisma, so it cannot go through findUnique's select.
+    const rows: any[] = await prisma.$queryRawUnsafe(
+      `SELECT "id","email","fullName","passwordHash","role","tier",
+              "kycStatus","reputationScore","status","profilePhotoUrl",
+              "isBlacklisted","joiningFeePaid"
+       FROM "User"
+       WHERE "email" = $1 AND "deletedAt" IS NULL
+       LIMIT 1`,
+      email.toLowerCase()
+    )
+    const user = rows[0] || null
 
     if (!user || !(await verifyPassword(password, user.passwordHash))) {
       return NextResponse.json(
@@ -46,6 +50,7 @@ export async function POST(req: NextRequest) {
       kycStatus: user.kycStatus as any,
       reputationScore: Number(user.reputationScore),
       profilePhotoUrl: user.profilePhotoUrl,
+      joiningFeePaid: user.joiningFeePaid === true,
     }
 
     const [accessToken, refreshToken] = await Promise.all([
