@@ -146,6 +146,11 @@ function LoginForm() {
             </button>
           </form>
 
+          <p style={{ textAlign:'center', fontSize:'13px', color:'#64748B', margin:'20px 0 0' }}>
+            New to Community Deals?{' '}
+            <a href="/register" style={{ color:TEAL, fontWeight:'600', textDecoration:'none' }}>Create account</a>
+          </p>
+
           {/* Role guide */}
           <div style={{ marginTop:'32px', padding:'16px', background:'#F8FAFC', borderRadius:'10px', border:'1px solid #E2E8F0' }}>
             <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748B', marginBottom:'10px', textTransform:'uppercase', letterSpacing:'0.05em' }}>After login you will be directed to</div>
