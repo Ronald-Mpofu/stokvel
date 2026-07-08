@@ -32,6 +32,7 @@ const METHOD_LABELS: Record<string, string> = {
 };
 
 const MOBILE_MONEY = ['ECOCASH', 'MPESA', 'MTN_MOMO'];
+const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR'];
 
 // Module-level (never inside render — prevents cursor-focus loss)
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
@@ -58,6 +59,7 @@ export default function JoinFeePage() {
   const router = useRouter();
 
   const [userId, setUserId] = useState('');
+  const [role, setRole] = useState('');
   const [config, setConfig] = useState<FeeConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [countryCode, setCountryCode] = useState('');
@@ -91,6 +93,7 @@ export default function JoinFeePage() {
           return;
         }
         setUserId(me.data.id);
+        setRole(me.data.role || '');
         if (me.data.joiningFeePaid === true) setPaid(true);
         if (cfg.success) setConfig(cfg.data);
         else showToast('error', 'Could not load joining fee options');
@@ -116,8 +119,17 @@ export default function JoinFeePage() {
         const res = await fetch(`/api/joining-fee?userId=${uid}`);
         const json = await res.json();
         if (json.success && json.data?.status === 'PAID') {
-          setPaid(true);
           if (pollRef.current) clearInterval(pollRef.current);
+          // CRITICAL: re-issue the JWT before the member navigates.
+          // The webhook flipped joiningFeePaid in the DB, but the
+          // token in this browser still says false — without this
+          // refresh the middleware gate bounces them straight back.
+          try {
+            await fetch('/api/auth/refresh', { method: 'POST' });
+          } catch {
+            // If refresh fails, the Continue button retries it.
+          }
+          setPaid(true);
           showToast('success', 'Payment confirmed — welcome to Community Deals!');
         }
       } catch {
@@ -171,7 +183,32 @@ export default function JoinFeePage() {
         <div style={{ background: '#ecfdf5', border: `1px solid ${TEAL}`, borderRadius: 12, padding: 24, textAlign: 'center' }}>
           <div style={{ fontSize: 40 }}>✅</div>
           <h2 style={{ color: TEAL, margin: '8px 0' }}>Membership active</h2>
-          <p style={{ color: NAVY, fontSize: 14, margin: 0 }}>Your joining fee is paid. You can now join groups and Windfall Schemes.</p>
+          <p style={{ color: NAVY, fontSize: 14, margin: '0 0 20px' }}>Your joining fee is paid. You can now join groups and Windfall Schemes.</p>
+          <button
+            type="button"
+            onClick={async () => {
+              // Belt-and-braces: ensure the token carries the paid claim
+              // before crossing the middleware gate.
+              try {
+                await fetch('/api/auth/refresh', { method: 'POST' });
+              } catch {
+                // Middleware fails open on missing claim; proceed anyway.
+              }
+              router.push(ADMIN_ROLES.includes(role) ? '/dashboard' : '/portal');
+            }}
+            style={{
+              padding: '12px 28px',
+              background: TEAL,
+              color: '#fff',
+              border: 'none',
+              borderRadius: 8,
+              fontSize: 15,
+              fontWeight: 600,
+              cursor: 'pointer',
+            }}
+          >
+            Continue →
+          </button>
         </div>
       ) : (
         <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 24 }}>

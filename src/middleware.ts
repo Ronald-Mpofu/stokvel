@@ -13,10 +13,10 @@ const JWT_SECRET = new TextEncoder().encode(
 )
 
 // ── Route rules ───────────────────────────────────────────────
-const PUBLIC_ROUTES   = ['/', '/login', '/register', '/invite', '/guarantor']
+const PUBLIC_ROUTES   = ['/', '/login', '/register', '/setup', '/invite', '/guarantor']
 const ADMIN_ROUTES    = ['/dashboard']
 const MEMBER_ROUTES   = ['/portal']
-const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout']
+const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout', '/api/auth/setup-password']
 
 // ── Helpers ───────────────────────────────────────────────────
 function isPublic(pathname: string): boolean {
