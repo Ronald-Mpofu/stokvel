@@ -1,6 +1,7 @@
 'use client'
-// src/components/CountrySelector.tsx — v2.0
-// Countries sourced from RefCountry DB table via /api/reference?type=countries
+// src/components/CountrySelector.tsx — v2.1
+// Countries + currencies sourced from /api/reference — each country record
+// carries a currencies[] array; the isDefault entry is that country's currency.
 // Provinces/cities remain static (not stored in DB)
 // Stokvel brands sourced from RefStokvelBrand DB table
 import { useState, useEffect, useRef } from 'react'
@@ -8,28 +9,11 @@ import { useState, useEffect, useRef } from 'react'
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 
-// ── Currency map (RefCountry has no currency column) ──────────
-const COUNTRY_CURRENCY: Record<string, { code: string; symbol: string }> = {
-  ZW: { code: 'ZWG', symbol: 'ZiG' },
-  ZA: { code: 'ZAR', symbol: 'R'   },
-  ZM: { code: 'ZMW', symbol: 'K'   },
-  MW: { code: 'MWK', symbol: 'MK'  },
-  BW: { code: 'BWP', symbol: 'P'   },
-  KE: { code: 'KES', symbol: 'KSh' },
-  TZ: { code: 'TZS', symbol: 'TSh' },
-  UG: { code: 'UGX', symbol: 'USh' },
-  MZ: { code: 'USD', symbol: '$'   },
-  NA: { code: 'USD', symbol: '$'   },
-  SZ: { code: 'ZAR', symbol: 'R'   },
-  LS: { code: 'ZAR', symbol: 'R'   },
-  NG: { code: 'USD', symbol: '$'   },
-  GH: { code: 'USD', symbol: '$'   },
-  US: { code: 'USD', symbol: '$'   },
-  GB: { code: 'GBP', symbol: '£'   },
-  EU: { code: 'EUR', symbol: '€'   },
-}
-function getCurrency(code: string) {
-  return COUNTRY_CURRENCY[code] || { code: 'USD', symbol: '$' }
+// ── Currency comes from the fetched country record ────────────
+// Shape from /api/reference: currencies: [{ id, name, symbol, isDefault }]
+function defaultCurrencyOf(country: any): { code: string; symbol: string } {
+  const def = country?.currencies?.find((c: any) => c.isDefault) || country?.currencies?.[0]
+  return def ? { code: def.id, symbol: def.symbol } : { code: 'USD', symbol: '$' }
 }
 
 // ── Static province/city data (not in DB) ────────────────────
@@ -262,7 +246,7 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
 
   function handleCountryChange(code: string) {
     const c        = countries.find((x: any) => x.id === code)
-    const currency = getCurrency(code)
+    const currency = defaultCurrencyOf(c)
     onChange({
       countryCode:   code,
       countryName:   c?.name || '',
@@ -335,7 +319,7 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
               <span style={{ fontSize:'16px' }}>{country?.flagEmoji}</span>
               <div>
                 <div style={{ fontSize:'13px', fontWeight:'700', color:TEAL }}>{value.currency}</div>
-                <div style={{ fontSize:'10px', color:'#64748B' }}>{getCurrency(value.countryCode).symbol}</div>
+                <div style={{ fontSize:'10px', color:'#64748B' }}>{defaultCurrencyOf(country).symbol}</div>
               </div>
             </div>
           </div>

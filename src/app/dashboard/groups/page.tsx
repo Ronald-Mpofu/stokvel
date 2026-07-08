@@ -20,6 +20,7 @@ const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 const BLUE = '#1A5EA8'
 
+// Fallback only — full currency list is lazily fetched from /api/reference?type=currencies
 const CURRENCIES = ['USD','ZAR','ZWG','KES','TZS','UGX','ZMW','BWP','MWK','EUR','GBP']
 const STRATEGIES = [
   { value: 'SENIORITY',  label: 'Seniority Based', desc: 'Longer-standing members get earlier payout positions' },
@@ -344,6 +345,16 @@ export default function GroupsPage() {
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const [openAccordion, setOpenAccordion]  = useState<string[]>(['group-details'])
   const [allBrands, setAllBrands]          = useState<any[]>([])
+  const [refCurrencies, setRefCurrencies]  = useState<any[]>([])
+
+  // Lazy-load the full currency list only when the Settings tab first opens
+  useEffect(() => {
+    if (detailTab !== 'settings' || refCurrencies.length > 0) return
+    fetch('/api/reference?type=currencies')
+      .then(r => r.json())
+      .then(d => { if (d.success) setRefCurrencies([...d.data].sort((a:any,b:any)=>a.id.localeCompare(b.id))) })
+      .catch(() => {})
+  }, [detailTab, refCurrencies.length])
 
   // ── Update group ─────────────────────────────────────────────
   async function handleUpdate(e: React.FormEvent) {
@@ -1620,9 +1631,18 @@ export default function GroupsPage() {
                               <div>
                                 <label style={LABEL}>Group Currency</label>
                                 <select value={ef.currency} onChange={e=>setEf('currency')(e.target.value)} style={{...INPUT, background:'white'}}>
-                                  {['USD','ZAR','ZWG','KES','TZS','UGX','ZMW','BWP','MWK','EUR','GBP'].map(c=>(
-                                    <option key={c} value={c}>{c}</option>
-                                  ))}
+                                  {refCurrencies.length > 0
+                                    ? refCurrencies.map((c:any)=>(
+                                        <option key={c.id} value={c.id}>{c.id} — {c.name}</option>
+                                      ))
+                                    : CURRENCIES.map(c=>(
+                                        <option key={c} value={c}>{c}</option>
+                                      ))}
+                                  {ef.currency
+                                    && !refCurrencies.some((c:any)=>c.id===ef.currency)
+                                    && (refCurrencies.length > 0 || !CURRENCIES.includes(ef.currency)) && (
+                                    <option value={ef.currency}>{ef.currency}</option>
+                                  )}
                                 </select>
                                 {ef.currency && (
                                   <div style={{ marginTop:'10px', padding:'10px 14px', background:'#F0FDF4', borderRadius:'8px', fontSize:'12px', color:'#166534', display:'flex', alignItems:'center', gap:'8px' }}>
