@@ -36,43 +36,6 @@ const BOTTOM_NAV = [
   { id: 'menu',          icon: '☰',  label: 'More'     },
 ]
 
-const STATS = [
-  { label: 'Active Groups',         value: '1',      sub: 'Harare Builders Circle', color: TEAL       },
-  { label: 'Total Members',         value: '12',     sub: '10 active this cycle',   color: '#1A5EA8'  },
-  { label: 'Escrow Balance',        value: '$600',   sub: 'Held securely',          color: '#B45309'  },
-  { label: 'Monthly Pool',          value: '$1,000', sub: '10 members × $100',      color: '#7C3AED'  },
-  { label: 'Payouts Completed',     value: '6',      sub: '4 remaining this cycle', color: TEAL       },
-  { label: 'Community Deals Revenue', value: '$120', sub: '2% fee this month',      color: '#059669'  },
-  { label: 'Active Loans',          value: '0',      sub: 'No active loans',        color: '#DC2626'  },
-  { label: 'Insurance Pool',        value: '$90',    sub: '1.5% reserve',           color: '#B45309'  },
-]
-
-const MEMBERS = [
-  { name: 'Tariro Moyo',     pos: 1,  status: 'PAID',     score: 142, tier: 'GOLD'     },
-  { name: 'Chiedza Mutasa',  pos: 6,  status: 'RECEIVED', score: 118, tier: 'GOLD'     },
-  { name: 'Farai Khumalo',   pos: 2,  status: 'PAID',     score: 134, tier: 'GOLD'     },
-  { name: 'Simba Ndlovu',    pos: 4,  status: 'DUE',      score: 89,  tier: 'SILVER'   },
-  { name: 'Paidamoyo Mhaka', pos: 7,  status: 'LATE',     score: 76,  tier: 'SILVER'   },
-  { name: 'Rudo Zimuto',     pos: 3,  status: 'PAID',     score: 156, tier: 'PLATINUM' },
-  { name: 'Kudzi Sithole',   pos: 5,  status: 'PAID',     score: 121, tier: 'GOLD'     },
-  { name: 'Nomsa Dube',      pos: 8,  status: 'PAID',     score: 98,  tier: 'SILVER'   },
-  { name: 'Muchaneta Choto', pos: 9,  status: 'PENDING',  score: 103, tier: 'GOLD'     },
-  { name: 'Blessing Mlilo',  pos: 10, status: 'PENDING',  score: 87,  tier: 'SILVER'   },
-]
-
-const PAYOUT_SCHEDULE = [
-  { month: 'Jan', name: 'Tariro Moyo',     status: 'DONE',    amount: '$1,000' },
-  { month: 'Feb', name: 'Farai Khumalo',   status: 'DONE',    amount: '$1,000' },
-  { month: 'Mar', name: 'Rudo Zimuto',     status: 'DONE',    amount: '$1,000' },
-  { month: 'Apr', name: 'Simba Ndlovu',    status: 'DONE',    amount: '$1,000' },
-  { month: 'May', name: 'Kudzi Sithole',   status: 'DONE',    amount: '$1,000' },
-  { month: 'Jun', name: 'Chiedza Mutasa',  status: 'CURRENT', amount: '$1,000' },
-  { month: 'Jul', name: 'Paidamoyo Mhaka', status: 'NEXT',   amount: '$1,000' },
-  { month: 'Aug', name: 'Nomsa Dube',      status: 'FUTURE',  amount: '$1,000' },
-  { month: 'Sep', name: 'Muchaneta Choto', status: 'FUTURE',  amount: '$1,000' },
-  { month: 'Oct', name: 'Blessing Mlilo',  status: 'FUTURE',  amount: '$1,000' },
-]
-
 // ── Hook: detect screen width ─────────────────────────────────
 function useIsMobile() {
   const [isMobile, setIsMobile] = useState(false)
@@ -83,37 +46,6 @@ function useIsMobile() {
     return () => window.removeEventListener('resize', check)
   }, [])
   return isMobile
-}
-
-function statusPill(status: string) {
-  const map: Record<string, [string, string]> = {
-    PAID:     ['#DCFCE7', '#166534'],
-    RECEIVED: ['#DBEAFE', '#1E40AF'],
-    DUE:      ['#FEF9C3', '#854D0E'],
-    LATE:     ['#FEE2E2', '#991B1B'],
-    PENDING:  ['#F1F5F9', '#475569'],
-  }
-  const [bg, color] = map[status] || ['#F1F5F9', '#475569']
-  return (
-    <span style={{ background: bg, color, fontSize: '11px', fontWeight: '600', padding: '2px 8px', borderRadius: '999px' }}>
-      {status}
-    </span>
-  )
-}
-
-function tierBadge(tier: string) {
-  const map: Record<string, [string, string]> = {
-    PLATINUM: ['#E9D5FF', '#5B21B6'],
-    GOLD:     ['#FEF3C7', '#92400E'],
-    SILVER:   ['#F1F5F9', '#475569'],
-    BRONZE:   ['#FEE2E2', '#7F1D1D'],
-  }
-  const [bg, color] = map[tier] || ['#F1F5F9', '#475569']
-  return (
-    <span style={{ background: bg, color, fontSize: '10px', fontWeight: '600', padding: '2px 6px', borderRadius: '4px' }}>
-      {tier}
-    </span>
-  )
 }
 
 // ── Main Dashboard ────────────────────────────────────────────
@@ -527,14 +459,67 @@ export default function Dashboard() {
 }
 
 // ── Overview Page ─────────────────────────────────────────────
+// Live data — ONE request (/api/dashboard) on mount, aggregated server-side.
+const fmtMoney = (n: number) => '$' + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })
+const fmtAgo = (d: string) => {
+  const mins = Math.max(0, Math.floor((Date.now() - new Date(d).getTime()) / 60000))
+  if (mins < 1) return 'Just now'
+  if (mins < 60) return `${mins} min ago`
+  const hrs = Math.floor(mins / 60)
+  if (hrs < 24) return `${hrs} hr${hrs > 1 ? 's' : ''} ago`
+  const days = Math.floor(hrs / 24)
+  return days === 1 ? 'Yesterday' : `${days} days ago`
+}
+const ACTIVITY_ICONS: Record<string, string> = {
+  CREATE: '👤', UPDATE: '✏️', DELETE: '🗑️', LOGIN: '🔑', LOGOUT: '🚪',
+  APPROVE: '✅', REJECT: '❌', DISBURSE: '💰', TRANSFER: '🔁', EXPORT: '📤', VIEW_SENSITIVE: '👁️',
+}
+
 function OverviewPage() {
   const isMobile = useIsMobile()
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/dashboard')
+      .then(r => r.json())
+      .then(d => { if (!cancelled && d.success) setData(d.data) })
+      .catch(() => {})
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (loading) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '40vh', color: '#94A3B8', fontSize: '14px' }}>
+        ⏳ Loading overview...
+      </div>
+    )
+  }
+
+  const stats = data?.stats || {}
+  const health = data?.escrowHealth || {}
+  const activity: any[] = data?.recentActivity || []
+  const schedule: any[] = data?.payoutSchedule || []
+
+  const statCards = [
+    { label: 'Active Groups',           value: String(stats.activeGroups ?? 0),      sub: stats.activeGroups ? 'Across the platform' : 'Create your first group', color: TEAL      },
+    { label: 'Total Members',           value: String(stats.totalMembers ?? 0),      sub: 'Active group members',    color: '#1A5EA8' },
+    { label: 'Escrow Balance',          value: fmtMoney(stats.escrowBalance),        sub: 'Held securely',           color: '#B45309' },
+    { label: 'Monthly Pool',            value: fmtMoney(stats.monthlyPool),          sub: 'Active cycles combined',  color: '#7C3AED' },
+    { label: 'Payouts Completed',       value: String(stats.payoutsCompleted ?? 0),  sub: 'All time',                color: TEAL      },
+    { label: 'Community Deals Revenue', value: fmtMoney(stats.platformRevenue),      sub: 'Fees collected',          color: '#059669' },
+    { label: 'Active Loans',            value: String(stats.activeLoans ?? 0),       sub: stats.activeLoans ? 'Currently running' : 'No active loans', color: '#DC2626' },
+    { label: 'Insurance Pool',          value: fmtMoney(stats.insurancePool),        sub: 'Reserve balance',         color: '#B45309' },
+  ]
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: isMobile ? '14px' : '20px' }}>
 
       {/* Stats grid — 2 cols on mobile, 4 on desktop */}
       <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: isMobile ? '10px' : '12px' }}>
-        {STATS.map(s => (
+        {statCards.map(s => (
           <div key={s.label} style={{ background: 'white', borderRadius: '12px', padding: isMobile ? '12px' : '16px', border: '1px solid #E2E8F0' }}>
             <div style={{ fontSize: '11px', color: '#64748B', marginBottom: '4px' }}>{s.label}</div>
             <div style={{ fontSize: isMobile ? '20px' : '24px', fontWeight: '700', color: s.color }}>{s.value}</div>
@@ -548,40 +533,42 @@ function OverviewPage() {
 
         {/* Payout schedule */}
         <div style={{ background: 'white', borderRadius: '12px', padding: isMobile ? '14px' : '20px', border: '1px solid #E2E8F0' }}>
-          <h3 style={{ fontSize: '14px', fontWeight: '600', color: NAVY, margin: '0 0 14px' }}>📅 Payout Schedule — Cycle 1</h3>
-          {PAYOUT_SCHEDULE.map(p => (
-            <div key={p.month} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px solid #F1F5F9' }}>
-              <span style={{ fontSize: '11px', color: '#94A3B8', width: '28px', flexShrink: 0 }}>{p.month}</span>
-              <span style={{ fontSize: '12px', color: p.status === 'CURRENT' ? TEAL : '#374151', fontWeight: p.status === 'CURRENT' ? '600' : '400', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
-              <div style={{ width: isMobile ? '40px' : '80px', height: '6px', background: '#F1F5F9', borderRadius: '3px', overflow: 'hidden', flexShrink: 0 }}>
-                <div style={{ height: '100%', borderRadius: '3px', width: p.status === 'DONE' ? '100%' : p.status === 'CURRENT' ? '60%' : '0%', background: p.status === 'DONE' ? '#9FE1CB' : p.status === 'CURRENT' ? TEAL : 'transparent' }} />
+          <h3 style={{ fontSize: '14px', fontWeight: '600', color: NAVY, margin: '0 0 14px' }}>📅 Payout Schedule</h3>
+          {schedule.length === 0 ? (
+            <p style={{ fontSize: '13px', color: '#94A3B8', margin: 0 }}>No active cycle yet. Payout schedules appear here once a group locks its first cycle.</p>
+          ) : (
+            schedule.map(p => (
+              <div key={`${p.groupName}-${p.monthNumber}`} style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 0', borderBottom: '1px solid #F1F5F9' }}>
+                <span style={{ fontSize: '11px', color: '#94A3B8', width: '52px', flexShrink: 0 }}>
+                  {new Date(p.scheduledDate).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                </span>
+                <span style={{ fontSize: '12px', color: '#374151', flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.recipientName}</span>
+                <span style={{ fontSize: '11px', color: p.status === 'COMPLETED' ? TEAL : '#94A3B8', flexShrink: 0 }}>
+                  {p.status === 'COMPLETED' ? '✓' : fmtMoney(p.amount)}
+                </span>
               </div>
-              <span style={{ fontSize: '11px', color: p.status === 'DONE' ? TEAL : p.status === 'CURRENT' ? TEAL : '#94A3B8', width: '36px', textAlign: 'right', flexShrink: 0 }}>
-                {p.status === 'DONE' ? '✓' : p.status === 'CURRENT' ? 'Live' : p.amount}
-              </span>
-            </div>
-          ))}
+            ))
+          )}
         </div>
 
         {/* Recent Activity */}
         <div style={{ background: 'white', borderRadius: '12px', padding: isMobile ? '14px' : '20px', border: '1px solid #E2E8F0' }}>
           <h3 style={{ fontSize: '14px', fontWeight: '600', color: NAVY, margin: '0 0 14px' }}>⚡ Recent Activity</h3>
-          {[
-            { icon: '✅', text: 'Payout $1,000 released to C. Mutasa',          time: '2 min ago',  color: '#DCFCE7' },
-            { icon: '💳', text: 'Pre-escrow $200 collected from C. Mutasa',      time: '2 min ago',  color: '#DBEAFE' },
-            { icon: '⚠️', text: 'P. Mhaka payment retry #2 failed',              time: '1 hr ago',   color: '#FEF9C3' },
-            { icon: '👤', text: 'New group Byo Savers created',                  time: '3 hrs ago',  color: '#DBEAFE' },
-            { icon: '💰', text: 'Kudzi Sithole contribution received',            time: 'Yesterday',  color: '#DCFCE7' },
-            { icon: '📋', text: 'Monthly statement generated',                    time: 'Yesterday',  color: '#F1F5F9' },
-          ].map((a, i) => (
-            <div key={i} style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
-              <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: a.color, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', flexShrink: 0 }}>{a.icon}</div>
-              <div style={{ minWidth: 0 }}>
-                <div style={{ fontSize: '12px', color: '#374151' }}>{a.text}</div>
-                <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '2px' }}>{a.time}</div>
+          {activity.length === 0 ? (
+            <p style={{ fontSize: '13px', color: '#94A3B8', margin: 0 }}>No activity yet.</p>
+          ) : (
+            activity.map((a, i) => (
+              <div key={i} style={{ display: 'flex', gap: '10px', marginBottom: '12px' }}>
+                <div style={{ width: '28px', height: '28px', borderRadius: '50%', background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', flexShrink: 0 }}>
+                  {ACTIVITY_ICONS[a.action] || '📋'}
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: '12px', color: '#374151' }}>{a.description}</div>
+                  <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '2px' }}>{fmtAgo(a.createdAt)}</div>
+                </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
       </div>
 
@@ -590,10 +577,10 @@ function OverviewPage() {
         <h3 style={{ fontSize: '14px', fontWeight: '600', color: NAVY, margin: '0 0 14px' }}>🏦 Escrow Health</h3>
         <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
           {[
-            { label: 'Total Collected', value: '$6,000', note: '6 months × $1,000' },
-            { label: 'Paid Out',        value: '$5,000', note: '5 completed payouts' },
-            { label: 'Held in Escrow',  value: '$600',   note: 'Current balance'    },
-            { label: 'Insurance Pool',  value: '$90',    note: '1.5% reserve'       },
+            { label: 'Total Collected', value: fmtMoney(health.totalCollected), note: 'All contributions'   },
+            { label: 'Paid Out',        value: fmtMoney(health.paidOut),        note: 'Completed payouts'   },
+            { label: 'Held in Escrow',  value: fmtMoney(health.heldInEscrow),   note: 'Current balance'     },
+            { label: 'Insurance Pool',  value: fmtMoney(health.insurancePool),  note: 'Reserve'             },
           ].map(item => (
             <div key={item.label} style={{ background: '#F8FAFC', borderRadius: '8px', padding: '12px', border: '1px solid #E2E8F0' }}>
               <div style={{ fontSize: '11px', color: '#64748B' }}>{item.label}</div>
@@ -607,173 +594,22 @@ function OverviewPage() {
   )
 }
 
-// ── Members Page ──────────────────────────────────────────────
+// ── Members Page (moved) ─────────────────────────────────────
 function MembersPage() {
-  const isMobile = useIsMobile()
-  const [search, setSearch] = useState('')
-  const filtered = MEMBERS.filter(m => m.name.toLowerCase().includes(search.toLowerCase()))
-
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px', flexWrap: 'wrap' }}>
-        <input
-          placeholder="Search members..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-          style={{ padding: '8px 14px', border: '1.5px solid #E2E8F0', borderRadius: '8px', fontSize: '13px', width: isMobile ? '100%' : '280px', outline: 'none', boxSizing: 'border-box' as any }}
-        />
-        {!isMobile && (
-          <button style={{ background: TEAL, color: 'white', border: 'none', borderRadius: '8px', padding: '8px 16px', fontSize: '13px', fontWeight: '500', cursor: 'pointer' }}>
-            + Invite Member
-          </button>
-        )}
-      </div>
-
-      {/* Mobile: card list */}
-      {isMobile ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          {filtered.map(m => (
-            <div key={m.name} style={{ background: 'white', borderRadius: '10px', border: '1px solid #E2E8F0', padding: '12px 14px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '8px' }}>
-                <div style={{ width: '36px', height: '36px', borderRadius: '50%', background: '#E1F5EE', color: TEAL, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '600', flexShrink: 0 }}>
-                  {m.name.split(' ').map((n: string) => n[0]).join('')}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '14px', fontWeight: '600', color: '#1E293B' }}>{m.name}</div>
-                  <div style={{ fontSize: '11px', color: '#64748B' }}>Position #{m.pos} · Score: {m.score}</div>
-                </div>
-                {statusPill(m.status)}
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                {tierBadge(m.tier)}
-                <span style={{ fontSize: '12px', color: '#374151' }}>${(m.pos * 100).toLocaleString()} contributed</span>
-                <button style={{ background: '#F1F5F9', border: 'none', borderRadius: '6px', padding: '4px 12px', fontSize: '11px', cursor: 'pointer', color: '#475569' }}>View</button>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        /* Desktop: table */
-        <div style={{ background: 'white', borderRadius: '12px', border: '1px solid #E2E8F0', overflow: 'hidden' }}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F8FAFC' }}>
-                {['Member', 'Position', 'Tier', 'Score', 'Status', 'Contributed', 'Action'].map(h => (
-                  <th key={h} style={{ padding: '12px 16px', textAlign: 'left', fontSize: '11px', fontWeight: '600', color: '#64748B', borderBottom: '1px solid #E2E8F0', textTransform: 'uppercase' as any }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map(m => (
-                <tr key={m.name} style={{ borderBottom: '1px solid #F1F5F9' }}>
-                  <td style={{ padding: '12px 16px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: '#E1F5EE', color: TEAL, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: '600' }}>
-                        {m.name.split(' ').map((n: string) => n[0]).join('')}
-                      </div>
-                      <span style={{ fontSize: '13px', fontWeight: '500', color: '#1E293B' }}>{m.name}</span>
-                    </div>
-                  </td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', color: '#374151' }}>#{m.pos}</td>
-                  <td style={{ padding: '12px 16px' }}>{tierBadge(m.tier)}</td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', color: TEAL, fontWeight: '600' }}>{m.score}</td>
-                  <td style={{ padding: '12px 16px' }}>{statusPill(m.status)}</td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', color: '#374151' }}>${(m.pos * 100).toLocaleString()}</td>
-                  <td style={{ padding: '12px 16px' }}>
-                    <button style={{ background: '#F1F5F9', border: 'none', borderRadius: '6px', padding: '4px 10px', fontSize: '11px', cursor: 'pointer', color: '#475569' }}>View</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </div>
-  )
+  return <ModuleMoved title="Members" note="Members are now managed inside each Group — open Groups and pick a group to view and invite its members." />
 }
 
-// ── Payouts Page ──────────────────────────────────────────────
+// ── Payouts Page (moved) ─────────────────────────────────────
 function PayoutsPage() {
-  const isMobile = useIsMobile()
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(3, 1fr)' : 'repeat(3, 1fr)', gap: '10px' }}>
-        {[
-          { label: 'Completed', value: '6', color: TEAL },
-          { label: 'Remaining', value: '4', color: '#1A5EA8' },
-          { label: 'Next',      value: 'Aug 1', color: '#B45309' },
-        ].map(s => (
-          <div key={s.label} style={{ background: 'white', borderRadius: '12px', padding: isMobile ? '12px' : '20px', border: '1px solid #E2E8F0' }}>
-            <div style={{ fontSize: '11px', color: '#64748B' }}>{s.label}</div>
-            <div style={{ fontSize: isMobile ? '20px' : '28px', fontWeight: '700', color: s.color, marginTop: '4px' }}>{s.value}</div>
-          </div>
-        ))}
-      </div>
+  return <ModuleMoved title="Payouts" note="Payout schedules now live inside each Group's cycle. Open Groups and select a group to manage its cycle and payouts." />
+}
 
-      {/* Mobile: card list */}
-      {isMobile ? (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-          <div style={{ fontSize: '13px', fontWeight: '600', color: NAVY, padding: '4px 0' }}>Full Payout Schedule</div>
-          {PAYOUT_SCHEDULE.map((p, i) => (
-            <div key={p.month} style={{ background: p.status === 'CURRENT' ? '#F0FDF4' : 'white', borderRadius: '10px', border: `1px solid ${p.status === 'CURRENT' ? '#BBF7D0' : '#E2E8F0'}`, padding: '12px 14px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
-                <div>
-                  <span style={{ fontSize: '11px', color: '#94A3B8', marginRight: '8px' }}>{p.month} 2025</span>
-                  <span style={{ fontSize: '13px', fontWeight: p.status === 'CURRENT' ? '700' : '500', color: p.status === 'CURRENT' ? TEAL : '#374151' }}>{p.name}</span>
-                </div>
-                <span style={{ fontSize: '13px', fontWeight: '600', color: '#1E293B' }}>{p.amount}</span>
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <span style={{ fontSize: '11px', fontWeight: '600', padding: '2px 8px', borderRadius: '999px', background: p.status === 'DONE' ? '#DCFCE7' : p.status === 'CURRENT' ? '#BBF7D0' : '#F1F5F9', color: p.status === 'DONE' ? '#166534' : p.status === 'CURRENT' ? '#166534' : '#64748B' }}>
-                  {p.status === 'DONE' ? '✓ Completed' : p.status === 'CURRENT' ? '⚡ Processing' : '⏳ Scheduled'}
-                </span>
-                {p.status === 'CURRENT' && (
-                  <button style={{ background: TEAL, color: 'white', border: 'none', borderRadius: '6px', padding: '5px 14px', fontSize: '12px', cursor: 'pointer', fontWeight: '600' }}>Release</button>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        /* Desktop: table */
-        <div style={{ background: 'white', borderRadius: '12px', border: '1px solid #E2E8F0', overflow: 'hidden' }}>
-          <div style={{ padding: '16px 20px', borderBottom: '1px solid #E2E8F0' }}>
-            <h3 style={{ fontSize: '14px', fontWeight: '600', color: NAVY, margin: 0 }}>Full Payout Schedule</h3>
-          </div>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
-            <thead>
-              <tr style={{ background: '#F8FAFC' }}>
-                {['Month', 'Recipient', 'Amount', 'Date', 'Status', 'Gates', 'Action'].map(h => (
-                  <th key={h} style={{ padding: '10px 16px', textAlign: 'left', fontSize: '11px', fontWeight: '600', color: '#64748B', borderBottom: '1px solid #E2E8F0', textTransform: 'uppercase' as any }}>{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {PAYOUT_SCHEDULE.map((p, i) => (
-                <tr key={p.month} style={{ borderBottom: '1px solid #F1F5F9', background: p.status === 'CURRENT' ? '#F0FDF4' : 'white' }}>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', color: '#64748B' }}>{p.month} 2025</td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', fontWeight: p.status === 'CURRENT' ? '600' : '400', color: p.status === 'CURRENT' ? TEAL : '#374151' }}>{p.name}</td>
-                  <td style={{ padding: '12px 16px', fontSize: '13px', fontWeight: '600', color: '#1E293B' }}>{p.amount}</td>
-                  <td style={{ padding: '12px 16px', fontSize: '12px', color: '#64748B' }}>{`${i + 1} ${p.month} 2025`}</td>
-                  <td style={{ padding: '12px 16px' }}>
-                    <span style={{ fontSize: '11px', fontWeight: '600', padding: '2px 8px', borderRadius: '999px', background: p.status === 'DONE' ? '#DCFCE7' : p.status === 'CURRENT' ? '#BBF7D0' : '#F1F5F9', color: p.status === 'DONE' ? '#166534' : p.status === 'CURRENT' ? '#166534' : '#64748B' }}>
-                      {p.status === 'DONE' ? '✓ Completed' : p.status === 'CURRENT' ? '⚡ Processing' : '⏳ Scheduled'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '12px 16px' }}>
-                    {p.status === 'DONE' ? <span style={{ fontSize: '12px', color: TEAL }}>✓✓✓✓</span> : p.status === 'CURRENT' ? <span style={{ fontSize: '12px', color: '#B45309' }}>3/4 passed</span> : <span style={{ fontSize: '12px', color: '#94A3B8' }}>Pending</span>}
-                  </td>
-                  <td style={{ padding: '12px 16px' }}>
-                    {p.status === 'CURRENT' && (
-                      <button style={{ background: TEAL, color: 'white', border: 'none', borderRadius: '6px', padding: '5px 12px', fontSize: '11px', cursor: 'pointer', fontWeight: '500' }}>Release</button>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
+function ModuleMoved({ title, note }: { title: string; note: string }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '50vh', textAlign: 'center', padding: '24px' }}>
+      <div style={{ fontSize: '48px', marginBottom: '12px' }}>👥</div>
+      <h2 style={{ fontSize: '18px', fontWeight: '600', color: NAVY, margin: '0 0 8px' }}>{title}</h2>
+      <p style={{ color: '#64748B', fontSize: '14px', maxWidth: '420px', margin: 0 }}>{note}</p>
     </div>
   )
 }
