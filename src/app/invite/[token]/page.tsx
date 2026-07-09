@@ -144,7 +144,7 @@ export default function InvitePage({ params }: { params: { token: string } }) {
 
     setSubmitting(true)
     try {
-      const res = await fetch('/api/invitations', {
+      const res = await fetch('/api/invitations?action=accept', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

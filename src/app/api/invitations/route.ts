@@ -3,6 +3,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import bcrypt from 'bcryptjs'
+import { getSessionFromRequest, unauthorized } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
 
 const sendSchema = z.object({
   groupId:         z.string().uuid(),
@@ -103,7 +106,19 @@ export async function GET(req: NextRequest) {
 // ── POST — send invitation or accept ─────────────────────────
 export async function POST(req: NextRequest) {
   try {
+    // The public accept lane is signalled by ?action=accept (middleware only
+    // lets THAT query through unauthenticated). On this lane, the ONLY allowed
+    // operation is accepting an invitation — the invitee has no session yet.
+    const isPublicAccept = req.nextUrl.searchParams.get('action') === 'accept'
     const body = await req.json()
+
+    if (isPublicAccept) return handleAccept(body)
+
+    // Every other operation (send / cancel / resend) is admin-only.
+    // Enforced independently of middleware so a forged ?action query can't
+    // reach these branches without a valid session.
+    const session = await getSessionFromRequest(req)
+    if (!session) return unauthorized()
 
     if (body.action === 'ACCEPT') return handleAccept(body)
     if (body.action === 'CANCEL') return handleCancel(body)

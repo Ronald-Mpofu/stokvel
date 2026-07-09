@@ -35,6 +35,20 @@ function isPublicApi(pathname: string): boolean {
   return API_PUBLIC.some(r => pathname.startsWith(r))
 }
 
+// Public invitation operations reachable WITHOUT a session:
+//   GET  /api/invitations?token=...      → invitee validates the link
+//   POST /api/invitations?action=accept  → invitee creates account + joins
+// The ?action=accept query lets us whitelist the accept POST here without
+// reading the request body in middleware. The route handler independently
+// enforces that this public surface can ONLY run the accept path.
+function isPublicInvitationApi(req: NextRequest): boolean {
+  const { pathname, searchParams } = req.nextUrl
+  if (pathname !== '/api/invitations') return false
+  if (req.method === 'GET'  && searchParams.get('token')) return true
+  if (req.method === 'POST' && searchParams.get('action') === 'accept') return true
+  return false
+}
+
 function isApiRoute(pathname: string): boolean {
   return pathname.startsWith('/api/')
 }
@@ -53,7 +67,7 @@ export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
 
   // Always allow public pages and public API routes
-  if (isPublic(pathname) || isPublicApi(pathname)) {
+  if (isPublic(pathname) || isPublicApi(pathname) || isPublicInvitationApi(req)) {
     return NextResponse.next()
   }
 
