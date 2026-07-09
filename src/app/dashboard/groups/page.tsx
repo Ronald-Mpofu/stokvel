@@ -346,6 +346,10 @@ export default function GroupsPage() {
   const [openAccordion, setOpenAccordion]  = useState<string[]>(['group-details'])
   const [allBrands, setAllBrands]          = useState<any[]>([])
   const [refCurrencies, setRefCurrencies]  = useState<any[]>([])
+  const [statusChangingId, setStatusChangingId] = useState<string | null>(null)
+  const [invitations, setInvitations]      = useState<any[]>([])
+  const [invitesLoading, setInvitesLoading] = useState(false)
+  const [inviteActionId, setInviteActionId] = useState<string | null>(null)
 
   // Lazy-load the full currency list only when the Settings tab first opens
   useEffect(() => {
@@ -460,11 +464,59 @@ export default function GroupsPage() {
     finally { setMembersLoading(false) }
   }, [])
 
+  // ── Invitations: lazy-load list for a group ─────────────────
+  const fetchInvitations = useCallback(async (groupId: string) => {
+    setInvitesLoading(true)
+    try {
+      const res  = await fetch(`/api/invitations?groupId=${groupId}`)
+      const data = await res.json()
+      setInvitations(data.success ? (data.data || []) : [])
+    } catch { setInvitations([]) }
+    finally { setInvitesLoading(false) }
+  }, [])
+
+  // Resend an invitation (extends expiry 7 days, re-sends email)
+  async function handleResendInvite(invitationId: string, groupId: string) {
+    if (inviteActionId) return
+    setInviteActionId(invitationId)
+    try {
+      const res  = await fetch('/api/invitations', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ action: 'RESEND', invitationId }),
+      })
+      const data = await res.json()
+      if (data.success) { showToast(data.message || 'Invitation resent'); fetchInvitations(groupId) }
+      else showToast(data.error || 'Resend failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setInviteActionId(null) }
+  }
+
+  // Cancel an invitation (revokes the link)
+  async function handleCancelInvite(invitationId: string, email: string, groupId: string) {
+    if (inviteActionId) return
+    if (!window.confirm(`Cancel the invitation for ${email}? The link will stop working.`)) return
+    setInviteActionId(invitationId)
+    try {
+      const res  = await fetch('/api/invitations', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ action: 'CANCEL', invitationId }),
+      })
+      const data = await res.json()
+      if (data.success) { showToast(data.message || 'Invitation cancelled'); fetchInvitations(groupId) }
+      else showToast(data.error || 'Cancel failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setInviteActionId(null) }
+  }
+
   // ── Change group status ─────────────────────────────────────
   async function handleStatusChange(groupId: string, newStatus: string, groupName: string) {
+    const group = groups.find(g => g.id === groupId)
+    if (!group) return
+    if (statusChangingId) return   // guard against double-clicks
+    setStatusChangingId(groupId)
     try {
-      const group = groups.find(g => g.id === groupId)
-      if (!group) return
       const res  = await fetch('/api/groups', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -484,13 +536,19 @@ export default function GroupsPage() {
       })
       const data = await res.json()
       if (data.success) {
-        showToast(`"${groupName}" is now ${newStatus}`)
+        const msg = newStatus === 'ACTIVE'
+          ? `✅ "${groupName}" has been activated`
+          : newStatus === 'PAUSED'
+          ? `"${groupName}" has been paused`
+          : `"${groupName}" is now ${newStatus}`
+        showToast(msg)
         setSelectedGroup((prev: any) => prev ? { ...prev, status: newStatus } : prev)
         fetchGroups()
       } else {
         showToast(data.error || 'Status change failed', 'error')
       }
     } catch { showToast('Network error', 'error') }
+    finally { setStatusChangingId(null) }
   }
 
   // ── Fetch groups ─────────────────────────────────────────────
@@ -521,6 +579,7 @@ export default function GroupsPage() {
   useEffect(() => {
     if (selectedGroup) {
       setGroupMembers([])
+      setInvitations([])
       fetchGroupMembers(selectedGroup.id)
     }
   }, [selectedGroup?.id])
@@ -1027,8 +1086,9 @@ export default function GroupsPage() {
           <button onClick={() => setView('list')} style={{ background:'#F1F5F9', border:'none', borderRadius:'8px', padding:'8px 14px', cursor:'pointer', fontSize:'13px', color:'#475569' }}>← Back</button>
           {g.status === 'DRAFT' && (
             <button onClick={() => handleStatusChange(g.id, 'ACTIVE', g.name)}
-              style={{ padding:'8px 16px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
-              ▶️ Activate Group
+              disabled={statusChangingId === g.id}
+              style={{ padding:'8px 16px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor: statusChangingId === g.id ? 'wait' : 'pointer', opacity: statusChangingId === g.id ? 0.6 : 1, transition:'opacity 0.15s' }}>
+              {statusChangingId === g.id ? '⏳ Activating…' : '▶️ Activate Group'}
             </button>
           )}
           {g.status === 'ACTIVE' && (
@@ -1061,7 +1121,7 @@ export default function GroupsPage() {
         {/* Tabs */}
         <div style={{ display:'flex', gap:'0', borderBottom:'1px solid #E2E8F0' }}>
           {TABS.map(t => (
-            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id) }} style={{
+            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id); if (t === 'members') fetchInvitations(g.id) }} style={{
               padding:'10px 18px', background:'none', border:'none',
               borderBottom: detailTab===t?`2px solid ${TEAL}`:'2px solid transparent',
               color: detailTab===t?TEAL:'#64748B', fontWeight: detailTab===t?'600':'400',
@@ -1134,8 +1194,9 @@ export default function GroupsPage() {
                   <div style={{ fontSize:'12px', color:'#64748B' }}>Add members, configure settings, then activate the group to start collecting contributions and running schemes.</div>
                 </div>
                 <button onClick={() => handleStatusChange(g.id, 'ACTIVE', g.name)}
-                  style={{ padding:'9px 18px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer', flexShrink:0 }}>
-                  ▶️ Activate Now
+                  disabled={statusChangingId === g.id}
+                  style={{ padding:'9px 18px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor: statusChangingId === g.id ? 'wait' : 'pointer', flexShrink:0, opacity: statusChangingId === g.id ? 0.6 : 1, transition:'opacity 0.15s' }}>
+                  {statusChangingId === g.id ? '⏳ Activating…' : '▶️ Activate Now'}
                 </button>
               </div>
             )}
@@ -1343,6 +1404,56 @@ export default function GroupsPage() {
                 </div>
               </div>
             )}
+
+            {/* ── Pending Invitations ── */}
+            {(() => {
+              const pending = invitations.filter((i: any) => i.status === 'PENDING' || i.status === 'EXPIRED')
+              if (invitesLoading && invitations.length === 0) return (
+                <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', padding:'18px', textAlign:'center', color:'#94A3B8', fontSize:'12px' }}>
+                  ⏳ Loading invitations...
+                </div>
+              )
+              if (pending.length === 0) return null
+              return (
+                <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', overflow:'hidden' }}>
+                  <div style={{ padding:'12px 16px', background:'#F8FAFC', borderBottom:'1px solid #E2E8F0', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <span style={{ fontSize:'12px', fontWeight:'700', color:NAVY, textTransform:'uppercase', letterSpacing:'0.03em' }}>
+                      ✉️ Pending Invitations ({pending.length})
+                    </span>
+                    <button onClick={() => fetchInvitations(g.id)} style={{ padding:'5px 10px', background:'white', border:'1px solid #E2E8F0', borderRadius:'6px', fontSize:'11px', cursor:'pointer', color:'#475569' }}>↻ Refresh</button>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column' }}>
+                    {pending.map((inv: any) => {
+                      const isExpired = inv.status === 'EXPIRED'
+                      const busy = inviteActionId === inv.id
+                      return (
+                        <div key={inv.id} style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 16px', borderBottom:'1px solid #F1F5F9' }}>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {inv.fullName || inv.email || inv.phone || 'Invited member'}
+                            </div>
+                            <div style={{ fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {inv.email || inv.phone} · {inv.role || 'MEMBER'}
+                            </div>
+                          </div>
+                          <span style={{ fontSize:'10px', fontWeight:'600', padding:'3px 9px', borderRadius:'6px', whiteSpace:'nowrap', background: isExpired ? '#FEE2E2' : '#FEF9C3', color: isExpired ? '#991B1B' : '#854D0E' }}>
+                            {isExpired ? '⌛ Expired' : '⏳ Pending'}
+                          </span>
+                          <button onClick={() => handleResendInvite(inv.id, g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:TEAL, color:'white', border:'none', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            {busy ? '…' : '↻ Resend'}
+                          </button>
+                          <button onClick={() => handleCancelInvite(inv.id, inv.email || inv.phone || 'this member', g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            Cancel
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
 
             {/* Loading */}
             {membersLoading && (
