@@ -437,6 +437,15 @@ const COUNTRIES: RefCountry[] = (() => {
 // ── GET /api/reference ────────────────────────────────────────────────────────
 // ?type=full                           → full country list (default)
 // ?type=currencies                     → flat list of distinct schema-valid currencies
+// ── Generic brandings offered in EVERY country ────────────────
+// Appended to the RefStokvelBrand results so every country always has at
+// least these three options, without seeding 3 rows per country in the DB.
+const GENERIC_BRANDS = [
+  { id: 'generic-savings-circle', name: 'Savings Circle', description: 'A group saving together in a rotating circle',   type: 'GENERAL', sortOrder: 900 },
+  { id: 'generic-savings-club',   name: 'Savings Club',   description: 'A club pooling regular member contributions',     type: 'GENERAL', sortOrder: 901 },
+  { id: 'generic-money-pool',     name: 'Money Pool',     description: 'A shared pool of member contributions',           type: 'GENERAL', sortOrder: 902 },
+]
+
 // ?type=stokvel-brands                 → all active brands from RefStokvelBrand
 // ?type=stokvel-brands&countryId=ZW   → brands filtered by country
 // ?countryId=ZW                        → single country record
@@ -453,7 +462,7 @@ export async function GET(req: NextRequest) {
       const where = countryId
         ? `WHERE "countryId" = $1 AND "isActive" = true ORDER BY "sortOrder" ASC`
         : `WHERE "isActive" = true ORDER BY "countryId", "sortOrder" ASC`;
-      const brands = countryId
+      const dbBrands = countryId
         ? await prisma.$queryRawUnsafe<any[]>(
             `SELECT id, "countryId", name, description, type, "sortOrder" FROM "RefStokvelBrand" ${where}`,
             countryId.toUpperCase()
@@ -461,7 +470,15 @@ export async function GET(req: NextRequest) {
         : await prisma.$queryRawUnsafe<any[]>(
             `SELECT id, "countryId", name, description, type, "sortOrder" FROM "RefStokvelBrand" ${where}`
           );
-      return ok(brands);
+
+      // Append the generic brandings available in every country. Skip any
+      // whose name a country already defines, so there are no duplicates.
+      const existingNames = new Set(dbBrands.map(b => String(b.name).toLowerCase()));
+      const generics = GENERIC_BRANDS
+        .filter(b => !existingNames.has(b.name.toLowerCase()))
+        .map(b => ({ ...b, countryId: countryId ? countryId.toUpperCase() : null }));
+
+      return ok([...dbBrands, ...generics]);
     }
 
     if (countryId) {
