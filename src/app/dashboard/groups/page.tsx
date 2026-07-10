@@ -732,14 +732,13 @@ export default function GroupsPage() {
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr style={{ background:'#F8FAFC', borderBottom:'1px solid #E2E8F0' }}>
-                {['Group','Location','Type','Status','Members','Contribution','Pool','Escrow','Strategy','Cycle','Actions'].map(h => (
+                {['Group Name','Country','City','Type','Status','Members','Date Created','Actions'].map(h => (
                   <th key={h} style={{ padding:'10px 14px', textAlign:'left', fontSize:'11px', fontWeight:'600', color:'#64748B', textTransform:'uppercase', letterSpacing:'0.04em', whiteSpace:'nowrap' }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {filtered.map((g: any, i: number) => {
-                const curr = g.currency === 'USD' ? '$' : g.currency
                 return (
                   <tr key={g.id}
                     onClick={() => { setSelectedGroup(g); setView('detail'); setDetailTab('overview') }}
@@ -758,9 +757,14 @@ export default function GroupsPage() {
                       </div>
                     </td>
 
-                    {/* Location */}
+                    {/* Country */}
                     <td style={{ padding:'12px 14px', fontSize:'12px', color:'#475569', whiteSpace:'nowrap' }}>
-                      {g.region && g.country ? `${g.region}, ${g.country}` : g.country || '—'}
+                      {g.country || '—'}
+                    </td>
+
+                    {/* City */}
+                    <td style={{ padding:'12px 14px', fontSize:'12px', color:'#475569', whiteSpace:'nowrap' }}>
+                      {g.city || '—'}
                     </td>
 
                     {/* Group Type */}
@@ -781,35 +785,9 @@ export default function GroupsPage() {
                       </div>
                     </td>
 
-                    {/* Contribution */}
-                    <td style={{ padding:'12px 14px', fontSize:'13px', fontWeight:'600', color:TEAL, whiteSpace:'nowrap' }}>
-                      {curr}{g.contributionAmount}/mo
-                    </td>
-
-                    {/* Monthly pool */}
-                    <td style={{ padding:'12px 14px', fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap' }}>
-                      {curr}{(g.contributionAmount * g.memberCount).toLocaleString()}
-                    </td>
-
-                    {/* Escrow */}
+                    {/* Date Created */}
                     <td style={{ padding:'12px 14px', fontSize:'12px', color:'#475569', whiteSpace:'nowrap' }}>
-                      {curr}{g.escrowBalance.toLocaleString()}
-                    </td>
-
-                    {/* Strategy */}
-                    <td style={{ padding:'12px 14px', fontSize:'11px', color:'#64748B', whiteSpace:'nowrap' }}>
-                      {g.payoutStrategy?.replace(/_/g,' ')}
-                    </td>
-
-                    {/* Cycle */}
-                    <td style={{ padding:'12px 14px', whiteSpace:'nowrap' }}>
-                      {g.activeCycle ? (
-                        <span style={{ background:'#DCFCE7', color:'#166534', fontSize:'10px', fontWeight:'600', padding:'2px 7px', borderRadius:'4px' }}>
-                          Cycle {g.activeCycle.cycleNumber}
-                        </span>
-                      ) : (
-                        <span style={{ fontSize:'11px', color:'#94A3B8' }}>No cycle</span>
-                      )}
+                      {g.createdAt ? new Date(g.createdAt).toLocaleDateString(undefined, { day:'2-digit', month:'short', year:'numeric' }) : '—'}
                     </td>
 
                     {/* Actions */}
