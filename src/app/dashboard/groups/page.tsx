@@ -22,6 +22,24 @@ const BLUE = '#1A5EA8'
 
 // Fallback only — full currency list is lazily fetched from /api/reference?type=currencies
 const CURRENCIES = ['USD','ZAR','ZWG','KES','TZS','UGX','ZMW','BWP','MWK','EUR','GBP']
+
+// ISO-3166 alpha-2 code → full country name, via the browser's built-in
+// Intl.DisplayNames (no data table, no network). Falls back to the raw value
+// for legacy rows that already store a name or a non-2-letter code.
+const REGION_NAMES: any =
+  typeof Intl !== 'undefined' && (Intl as any).DisplayNames
+    ? new (Intl as any).DisplayNames(['en'], { type: 'region' })
+    : null
+
+function countryName(code?: string | null): string {
+  if (!code) return '—'
+  const c = code.trim().toUpperCase()
+  if (REGION_NAMES && /^[A-Z]{2}$/.test(c)) {
+    try { return REGION_NAMES.of(c) || code } catch { return code }
+  }
+  return code
+}
+
 const STRATEGIES = [
   { value: 'SENIORITY',  label: 'Seniority Based', desc: 'Longer-standing members get earlier payout positions' },
   { value: 'RANDOM',     label: 'Random Draw',     desc: 'Cryptographically secure random shuffle at cycle start' },
@@ -759,7 +777,7 @@ export default function GroupsPage() {
 
                     {/* Country */}
                     <td style={{ padding:'12px 14px', fontSize:'12px', color:'#475569', whiteSpace:'nowrap' }}>
-                      {g.country || '—'}
+                      {countryName(g.country)}
                     </td>
 
                     {/* City */}
