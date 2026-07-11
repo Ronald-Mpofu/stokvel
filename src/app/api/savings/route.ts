@@ -1,7 +1,10 @@
-// src/app/api/savings/route.ts — v2.2 (raw SQL — bypasses Prisma client model generation)
+// src/app/api/savings/route.ts — v2.3 (raw SQL — bypasses Prisma client model generation)
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
+import { randomUUID } from 'crypto'
+
+export const dynamic = 'force-dynamic'
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -186,7 +189,7 @@ export async function POST(req: NextRequest) {
 
     const startDate    = new Date(data.startDate)
     const maturityDate = calcMaturityDate(startDate, data.periodMonths)
-    const poolId       = crypto.randomUUID()
+    const poolId       = randomUUID()
 
     await exec(
       `INSERT INTO "SavingsPool" (
@@ -206,7 +209,7 @@ export async function POST(req: NextRequest) {
 
     if (data.memberIds.length > 0) {
       for (const userId of data.memberIds) {
-        const memberId = crypto.randomUUID()
+        const memberId = randomUUID()
         await exec(
           `INSERT INTO "SavingsPoolMember" (id,"poolId","userId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
            VALUES ($1,$2,$3,0,0,0,true,NOW(),NOW()) ON CONFLICT ("poolId","userId") DO NOTHING`,
@@ -246,7 +249,7 @@ async function handleActivate(body: any): Promise<NextResponse> {
 
   for (const member of members) {
     for (let p = 1; p <= periodCount; p++) {
-      const cId = crypto.randomUUID()
+      const cId = randomUUID()
       const due = calcDueDate(new Date(pool.startDate), p, pool.contributionFrequency)
       try {
         await exec(
@@ -293,7 +296,7 @@ async function handleDistribute(body: any): Promise<NextResponse> {
     const gross  = totalPool * share
     const deduct = Number(m.loanBalance)
     const net    = Math.max(0, gross - deduct)
-    const pyId   = crypto.randomUUID()
+    const pyId   = randomUUID()
     await exec(
       `INSERT INTO "SavingsPoolPayout" (id,"poolId","userId","grossShare","loanDeduction","netPayout","sharePercent",currency,status,"createdAt")
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::"CurrencyCode",'PENDING'::"SavingsPayoutStatus",NOW()) ON CONFLICT ("poolId","userId") DO NOTHING`,
@@ -331,7 +334,7 @@ async function handleAddMember(body: any): Promise<NextResponse> {
   const pool = pools[0]
   if (pool.status === 'CLOSED') return NextResponse.json({ success: false, error: 'Cannot add members to a closed pool' }, { status: 400 })
 
-  const memberId = crypto.randomUUID()
+  const memberId = randomUUID()
   await exec(
     `INSERT INTO "SavingsPoolMember" (id,"poolId","userId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
      VALUES ($1,$2,$3,0,0,0,true,NOW(),NOW())
@@ -345,7 +348,7 @@ async function handleAddMember(body: any): Promise<NextResponse> {
     for (let p = 1; p <= periodCount; p++) {
       const due = calcDueDate(new Date(pool.startDate), p, pool.contributionFrequency)
       if (due >= now) {
-        const cId = crypto.randomUUID()
+        const cId = randomUUID()
         try {
           await exec(
             `INSERT INTO "SavingsContribution" (id,"poolId","userId","periodNumber","dueDate","amountDue","amountPaid",currency,status,"createdAt","updatedAt")
