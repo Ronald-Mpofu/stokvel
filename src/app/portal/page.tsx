@@ -1,6 +1,7 @@
 'use client'
 import { useState, useEffect, useCallback } from 'react'
 import NotificationBell from '../dashboard/notifications/NotificationBell'
+import LogoutButton from '../../components/LogoutButton'
 
 const TEAL   = '#0F6E56'
 const NAVY   = '#0D2137'
@@ -737,6 +738,7 @@ export default function MemberPortal() {
                 {data.user?.fullName?.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
               </div>
               <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.75)' }}>{data.user?.fullName?.split(' ')[0]}</div>
+              <LogoutButton style={{ background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', padding: '7px 13px', marginLeft: '4px' }} />
             </div>
           )}
         </div>

@@ -104,6 +104,10 @@ export default function InvitePage({ params }: { params: { token: string } }) {
   const [submitting, setSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState('')
   const [showPassword, setShowPassword] = useState(false)
+  const [sessionUser, setSessionUser]   = useState<any>(null)
+  const [existingMode, setExistingMode] = useState(false)
+  const [existingPassword, setExistingPassword] = useState('')
+  const [existingError, setExistingError] = useState('')
 
   const [form, setForm] = useState({
     fullName: '', phone: '', password: '', confirmPassword: '',
@@ -112,6 +116,12 @@ export default function InvitePage({ params }: { params: { token: string } }) {
   const set = (k: string) => (v: any) => setForm(p => ({ ...p, [k]: v }))
 
   useEffect(() => {
+    // Detect an existing logged-in session (enables one-click join for the invitee)
+    fetch('/api/auth/me')
+      .then(r => r.json())
+      .then(d => { if (d.success && d.data) setSessionUser(d.data) })
+      .catch(() => {})
+
     fetch(`/api/invitations?token=${params.token}`)
       .then(r => r.json())
       .then(data => {
@@ -162,11 +172,57 @@ export default function InvitePage({ params }: { params: { token: string } }) {
       const data = await res.json()
       if (data.success) {
         setSuccess({ memberName: form.fullName, groupName: invitation.groupName })
+      } else if (data.code === 'EXISTING_USER') {
+        // This email already has an account — switch to the log-in-and-join flow
+        setExistingMode(true)
+        setSubmitError('')
       } else {
         setSubmitError(data.error || 'Failed to create account')
       }
     } catch {
       setSubmitError('Network error. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // One-click join for a member who's already signed in as the invitee
+  async function handleSessionJoin() {
+    setSubmitError('')
+    if (!form.agreedToTerms) return setSubmitError('You must agree to the terms to join.')
+    setSubmitting(true)
+    try {
+      const res = await fetch('/api/invitations?action=accept', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ACCEPT', token: params.token, agreedToTerms: true }),
+      })
+      const data = await res.json()
+      if (data.success) setSuccess({ memberName: sessionUser?.fullName || sessionUser?.email || 'Member', groupName: invitation.groupName })
+      else setSubmitError(data.error || 'Failed to join group')
+    } catch {
+      setSubmitError('Network error. Please try again.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  // Existing account, not logged in — verify password, then join
+  async function handleExistingJoin() {
+    setExistingError('')
+    if (!existingPassword) return setExistingError('Please enter your account password.')
+    setSubmitting(true)
+    try {
+      const res = await fetch('/api/invitations?action=accept', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ACCEPT', token: params.token, password: existingPassword, agreedToTerms: true }),
+      })
+      const data = await res.json()
+      if (data.success) setSuccess({ memberName: invitation?.fullName || invitation?.email || 'Member', groupName: invitation.groupName })
+      else setExistingError(data.error || 'Could not join. Please check your password.')
+    } catch {
+      setExistingError('Network error. Please try again.')
     } finally {
       setSubmitting(false)
     }
@@ -178,6 +234,7 @@ export default function InvitePage({ params }: { params: { token: string } }) {
 
   const step1Error = step === 2 ? null : validateStep1()
   const inv = invitation
+  const sessionMatches = !!(sessionUser && inv?.email && (sessionUser.email || '').toLowerCase() === (inv.email || '').toLowerCase())
 
   return (
     <div style={{ minHeight: '100vh', background: 'linear-gradient(135deg, #0D2137 0%, #0F6E56 100%)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '20px', fontFamily: 'system-ui, sans-serif' }}>
@@ -215,6 +272,60 @@ export default function InvitePage({ params }: { params: { token: string } }) {
             </div>
           )}
 
+          {/* Quick-join — invitee is already signed in */}
+          {sessionMatches && (
+            <div style={{ padding: '22px 28px 28px' }}>
+              <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px', fontSize: '13px', color: '#166534' }}>
+                ✓ You're signed in as <strong>{sessionUser.email}</strong>. Join this group in one click — no new account needed.
+              </div>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: '12px', marginBottom: '18px', cursor: 'pointer' }} onClick={() => set('agreedToTerms')(!form.agreedToTerms)}>
+                <div style={{ width: '22px', height: '22px', borderRadius: '6px', border: `2px solid ${form.agreedToTerms ? TEAL : '#CBD5E1'}`, background: form.agreedToTerms ? TEAL : 'white', flexShrink: 0, marginTop: '1px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  {form.agreedToTerms && <span style={{ color: 'white', fontSize: '14px', fontWeight: '700' }}>✓</span>}
+                </div>
+                <span style={{ fontSize: '13px', color: '#374151', lineHeight: '1.5' }}>
+                  I agree to the membership terms and to contribute {inv.currency === 'USD' ? '$' : inv.currency}{inv.contributionAmount.toLocaleString()} monthly.<span style={{ color: '#DC2626' }}> *</span>
+                </span>
+              </div>
+              {submitError && (
+                <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', padding: '12px 14px', color: '#991B1B', fontSize: '13px', marginBottom: '14px' }}>❌ {submitError}</div>
+              )}
+              <button type="button" onClick={handleSessionJoin} disabled={submitting || !form.agreedToTerms}
+                style={{ width: '100%', padding: '13px', background: submitting || !form.agreedToTerms ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '10px', fontSize: '15px', fontWeight: '700', cursor: submitting || !form.agreedToTerms ? 'not-allowed' : 'pointer' }}>
+                {submitting ? '⏳ Joining...' : `🎉 Join ${inv.groupName}`}
+              </button>
+              <p style={{ fontSize: '12px', color: '#94A3B8', textAlign: 'center', margin: '12px 0 0' }}>
+                Not you? <a href="/login" style={{ color: TEAL, fontWeight: '500' }}>Log in as someone else</a>
+              </p>
+            </div>
+          )}
+
+          {/* Existing account — verify password, then join */}
+          {!sessionMatches && existingMode && (
+            <div style={{ padding: '22px 28px 28px' }}>
+              <div style={{ background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px', fontSize: '13px', color: '#3730A3' }}>
+                You already have an account for <strong>{inv.email}</strong>. Enter your password to join <strong>{inv.groupName}</strong> — your existing account and other groups stay as they are.
+              </div>
+              <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '13px', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Your Password</label>
+                <input type="password" value={existingPassword} onChange={e => setExistingPassword(e.target.value)} placeholder="Existing account password"
+                  style={{ width: '100%', padding: '11px 14px', border: '1.5px solid #E2E8F0', borderRadius: '10px', fontSize: '14px', outline: 'none', boxSizing: 'border-box' as any }} />
+              </div>
+              {existingError && (
+                <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '10px', padding: '12px 14px', color: '#991B1B', fontSize: '13px', marginBottom: '14px' }}>❌ {existingError}</div>
+              )}
+              <button type="button" onClick={handleExistingJoin} disabled={submitting}
+                style={{ width: '100%', padding: '13px', background: submitting ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '10px', fontSize: '15px', fontWeight: '700', cursor: submitting ? 'not-allowed' : 'pointer' }}>
+                {submitting ? '⏳ Joining...' : `🔓 Log in & Join ${inv.groupName}`}
+              </button>
+              <p style={{ fontSize: '12px', color: '#94A3B8', textAlign: 'center', margin: '12px 0 0' }}>
+                <a href="/login" style={{ color: TEAL, fontWeight: '500' }}>Go to the full login page →</a>
+              </p>
+            </div>
+          )}
+
+          {/* New-member create flow */}
+          {!sessionMatches && !existingMode && (
+          <>
           {/* Step indicator */}
           <div style={{ padding: '20px 28px 0', display: 'flex', alignItems: 'center', gap: '0' }}>
             {[['1','Your Details'], ['2','Review & Join']].map(([num, label], i) => (
@@ -344,6 +455,8 @@ export default function InvitePage({ params }: { params: { token: string } }) {
               )}
             </div>
           </form>
+          </>
+          )}
 
           {/* Footer */}
           <div style={{ padding: '14px 28px', background: '#F8FAFC', borderTop: '1px solid #E2E8F0', textAlign: 'center' }}>

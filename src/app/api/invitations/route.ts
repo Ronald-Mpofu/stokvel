@@ -20,13 +20,13 @@ const sendSchema = z.object({
 
 const acceptSchema = z.object({
   token:     z.string().uuid(),
-  fullName:  z.string().min(2),
-  phone:     z.string().min(7),
-  password:  z.string().min(8),
+  fullName:  z.string().optional(),
+  phone:     z.string().optional(),
+  password:  z.string().optional(),
   nationalId: z.string().optional(),
   city:      z.string().optional(),
   country:   z.string().optional(),
-  agreedToTerms: z.boolean().refine(v => v, 'Must agree to terms'),
+  agreedToTerms: z.boolean().optional(),
 })
 
 // ── GET — fetch invitations for a group ───────────────────────
@@ -112,7 +112,7 @@ export async function POST(req: NextRequest) {
     const isPublicAccept = req.nextUrl.searchParams.get('action') === 'accept'
     const body = await req.json()
 
-    if (isPublicAccept) return handleAccept(body)
+    if (isPublicAccept) return handleAccept(body, req)
 
     // Every other operation (send / cancel / resend) is admin-only.
     // Enforced independently of middleware so a forged ?action query can't
@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
     const session = await getSessionFromRequest(req)
     if (!session) return unauthorized()
 
-    if (body.action === 'ACCEPT') return handleAccept(body)
+    if (body.action === 'ACCEPT') return handleAccept(body, req)
     if (body.action === 'CANCEL') return handleCancel(body)
     if (body.action === 'RESEND') return handleResend(body)
 
@@ -250,7 +250,7 @@ export async function POST(req: NextRequest) {
 }
 
 // ── Accept invitation ─────────────────────────────────────────
-async function handleAccept(body: any): Promise<NextResponse> {
+async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> {
   try {
     const data = acceptSchema.parse(body)
 
@@ -264,13 +264,84 @@ async function handleAccept(body: any): Promise<NextResponse> {
     if (inv.status === 'CANCELLED') return NextResponse.json({ success: false, error: 'This invitation was cancelled.' }, { status: 410 })
     if (inv.expiresAt < new Date()) return NextResponse.json({ success: false, error: 'This invitation has expired.' }, { status: 410 })
 
-    // Check email not already registered
-    if (inv.email) {
-      const existing = await prisma.user.findUnique({ where: { email: inv.email } })
-      if (existing) return NextResponse.json({ success: false, error: `An account with ${inv.email} already exists. Please log in instead.`, code: 'EMAIL_EXISTS' }, { status: 409 })
+    // Does an account already exist for this invite's email?
+    const existingUser = inv.email
+      ? await prisma.user.findUnique({ where: { email: inv.email } })
+      : null
+
+    // ── EXISTING USER → add them to the new group (no new account) ──
+    if (existingUser) {
+      // Verify identity two ways: a matching logged-in session, or their password.
+      let verified = false
+      const session = await getSessionFromRequest(req)
+      if (session && session.id === existingUser.id) verified = true
+      else if (data.password) verified = await bcrypt.compare(data.password, existingUser.passwordHash)
+
+      if (!verified) {
+        return NextResponse.json({
+          success: false,
+          code:    'EXISTING_USER',
+          email:   inv.email,
+          error:   data.password
+            ? 'That password does not match the existing account for this email.'
+            : `You already have an account (${inv.email}). Enter your password to join this group, or log in first.`,
+        }, { status: 401 })
+      }
+
+      if (!data.agreedToTerms) {
+        return NextResponse.json({ success: false, code: 'EXISTING_USER', email: inv.email, error: 'Please agree to the membership terms to join.' }, { status: 400 })
+      }
+
+      // Idempotent: if already a member of this group, just close the invite.
+      const already = await prisma.groupMember.findUnique({
+        where: { groupId_userId: { groupId: inv.groupId, userId: existingUser.id } },
+      })
+      if (already) {
+        await prisma.memberInvitation.update({ where: { id: inv.id }, data: { status: 'ACCEPTED', acceptedAt: new Date(), acceptedUserId: existingUser.id } })
+        return NextResponse.json({ success: true, message: `You're already a member of ${inv.group.name}.`, data: { userId: existingUser.id, groupName: inv.group.name, loginUrl: '/login', existingUser: true } })
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.groupMember.create({
+          data: {
+            groupId:      inv.groupId,
+            userId:       existingUser.id,
+            role:         inv.role as any,
+            status:       'ACTIVE',
+            joinedAt:     new Date(),
+            approvedAt:   new Date(),
+            approvedById: inv.invitedById,
+          },
+        })
+        await tx.memberInvitation.update({ where: { id: inv.id }, data: { status: 'ACCEPTED', acceptedAt: new Date(), acceptedUserId: existingUser.id } })
+        await tx.auditLog.create({
+          data: {
+            userId:      existingUser.id,
+            groupId:     inv.groupId,
+            action:      'CREATE',
+            entityType:  'GroupMember',
+            entityId:    existingUser.id,
+            description: `${existingUser.fullName} accepted invitation and joined "${inv.group.name}"`,
+          },
+        })
+      })
+
+      return NextResponse.json({
+        success: true,
+        message: `Welcome to ${inv.group.name}, ${existingUser.fullName}! You've joined this group.`,
+        data: { userId: existingUser.id, groupName: inv.group.name, loginUrl: '/login', existingUser: true },
+      })
     }
 
-    const passwordHash = await bcrypt.hash(data.password, 12)
+    // ── NEW USER → create account + membership ──
+    const fieldErrs: string[] = []
+    if (!data.fullName || data.fullName.trim().length < 2) fieldErrs.push('Full name is required')
+    if (!data.phone || data.phone.trim().length < 7)       fieldErrs.push('A valid phone number is required')
+    if (!data.password || data.password.length < 8)        fieldErrs.push('Password must be at least 8 characters')
+    if (!data.agreedToTerms)                                fieldErrs.push('You must agree to the terms')
+    if (fieldErrs.length) return NextResponse.json({ success: false, error: fieldErrs.join('; ') }, { status: 400 })
+
+    const passwordHash = await bcrypt.hash(data.password as string, 12)
 
     // Create user + group member in one transaction
     const { user } = await prisma.$transaction(async (tx) => {
@@ -278,9 +349,9 @@ async function handleAccept(body: any): Promise<NextResponse> {
       const user = await tx.user.create({
         data: {
           email:        inv.email || `member_${Date.now()}@stokvel.local`,
-          phone:        data.phone,
+          phone:        data.phone!,
           passwordHash,
-          fullName:     data.fullName,
+          fullName:     data.fullName!,
           role:         'MEMBER',
           status:       'ACTIVE',
           kycStatus:    'PENDING',
