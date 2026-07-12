@@ -63,19 +63,48 @@ function EmptyState({ icon, text }: any) {
 
 // ── Pay Modal — record a contribution payment (member self-service) ──
 function PayModal({ item, userId, onClose, onPaid, onError }: any) {
-  const [method, setMethod]       = useState('ECOCASH')
+  const [method, setMethod]       = useState('')
   const [reference, setReference] = useState('')
   const [saving, setSaving]       = useState(false)
   const [err, setErr]             = useState('')
+  const [methods, setMethods]     = useState<{ code: string; name: string }[]>([])
+  const [methodsLoading, setMethodsLoading] = useState(true)
 
-  const METHODS: [string, string][] = [
-    ['ECOCASH', 'EcoCash'], ['MPESA', 'M-Pesa'], ['MTN_MOMO', 'MTN MoMo'],
-    ['BANK_TRANSFER', 'Bank'], ['CARD', 'Card'], ['USSD', 'USSD'],
+  // Fallback if the country has no configured methods or the lookup fails
+  const FALLBACK: { code: string; name: string }[] = [
+    { code: 'BANK_TRANSFER', name: 'Bank Transfer' },
+    { code: 'CARD',          name: 'Card' },
   ]
+
+  // Load the payment methods available in this contribution's country
+  useEffect(() => {
+    let alive = true
+    setMethodsLoading(true)
+    const finish = (list: { code: string; name: string }[], def?: string) => {
+      if (!alive) return
+      const m = list.length ? list : FALLBACK
+      setMethods(m)
+      setMethod(def || m[0]?.code || 'BANK_TRANSFER')
+      setMethodsLoading(false)
+    }
+    if (!item.country) { finish(FALLBACK); return () => { alive = false } }
+    fetch(`/api/reference?countryId=${encodeURIComponent(item.country)}`)
+      .then(r => r.json())
+      .then(d => {
+        const pms = (d?.success && d?.data?.paymentMethods) ? d.data.paymentMethods : []
+        const list = (pms as any[]).map(p => ({ code: p.code, name: p.name }))
+        const def  = (pms as any[]).find(p => p.isDefault)?.code
+        finish(list, def)
+      })
+      .catch(() => finish(FALLBACK))
+    return () => { alive = false }
+  }, [item.country])
+
   const sym = item.currency === 'USD' ? '$' : item.currency + ' '
 
   async function submit() {
     setErr('')
+    if (!method) { setErr('Select a payment method.'); return }
     if (!reference.trim()) { setErr('Enter the reference/confirmation code from your payment.'); return }
     setSaving(true)
     try {
@@ -109,15 +138,19 @@ function PayModal({ item, userId, onClose, onPaid, onError }: any) {
         </div>
 
         <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Payment method</label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '16px' }}>
-          {METHODS.map(([v, l]) => (
-            <div key={v} onClick={() => setMethod(v)}
-              style={{ padding: '9px 4px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '11px', fontWeight: '600',
-                border: `2px solid ${method === v ? TEAL : '#E2E8F0'}`, background: method === v ? '#F0FDF4' : 'white', color: NAVY }}>
-              {l}
-            </div>
-          ))}
-        </div>
+        {methodsLoading ? (
+          <div style={{ padding: '14px', textAlign: 'center', color: '#94A3B8', fontSize: '12px', marginBottom: '16px' }}>Loading methods…</div>
+        ) : (
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '16px' }}>
+            {methods.map(m => (
+              <div key={m.code} onClick={() => setMethod(m.code)}
+                style={{ padding: '9px 4px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '11px', fontWeight: '600',
+                  border: `2px solid ${method === m.code ? TEAL : '#E2E8F0'}`, background: method === m.code ? '#F0FDF4' : 'white', color: NAVY }}>
+                {m.name}
+              </div>
+            ))}
+          </div>
+        )}
 
         <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Payment reference</label>
         <input value={reference} onChange={e => setReference(e.target.value)} placeholder="e.g. EcoCash confirmation code"

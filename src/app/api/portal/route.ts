@@ -38,7 +38,7 @@ export async function GET(req: NextRequest) {
             id: true, name: true, currency: true,
             contributionAmount: true, contributionDay: true,
             maxMembers: true, status: true, payoutStrategy: true,
-            escrowBalance: true,
+            escrowBalance: true, country: true,
             _count: { select: { members: true } },
           },
         },
@@ -151,6 +151,7 @@ export async function GET(req: NextRequest) {
           periodKey,
           groupName: m.group.name,
           currency:  m.group.currency,
+          country:   m.group.country || null,
           amount:    Number(m.group.contributionAmount),
           dueDate:   next,
           daysUntil: Math.ceil((next.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)),
@@ -160,9 +161,10 @@ export async function GET(req: NextRequest) {
       // Savings pool contributions still owed (raw SQL — not in Prisma schema)
       const savingsRows = await safeQuery(() => prisma.$queryRawUnsafe(
         `SELECT sc.id, sc."poolId", sc."periodNumber", sc."dueDate", sc."amountDue", sc.currency,
-                sp.name AS "poolName"
+                sp.name AS "poolName", g.country AS "groupCountry"
          FROM "SavingsContribution" sc
          JOIN "SavingsPool" sp ON sp.id = sc."poolId"
+         JOIN "Group" g ON g.id = sp."groupId"
          WHERE sc."userId" = $1 AND sc.status <> 'PAID'
          ORDER BY sc."dueDate" ASC`, userId), [] as any[])
 
@@ -176,6 +178,7 @@ export async function GET(req: NextRequest) {
           periodNumber:   sc.periodNumber,
           groupName:      `${sc.poolName} · Savings`,
           currency:       sc.currency,
+          country:        sc.groupCountry || null,
           amount:         Number(sc.amountDue),
           dueDate:        due,
           daysUntil:      Math.ceil((due.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)),
