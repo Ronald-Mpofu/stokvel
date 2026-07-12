@@ -368,6 +368,9 @@ export default function GroupsPage() {
   const [invitations, setInvitations]      = useState<any[]>([])
   const [invitesLoading, setInvitesLoading] = useState(false)
   const [inviteActionId, setInviteActionId] = useState<string | null>(null)
+  const [pendingPayments, setPendingPayments] = useState<any[]>([])
+  const [paymentsLoading, setPaymentsLoading] = useState(false)
+  const [paymentActionId, setPaymentActionId] = useState<string | null>(null)
 
   // Lazy-load the full currency list only when the Settings tab first opens
   useEffect(() => {
@@ -526,6 +529,34 @@ export default function GroupsPage() {
       else showToast(data.error || 'Cancel failed', 'error')
     } catch { showToast('Network error', 'error') }
     finally { setInviteActionId(null) }
+  }
+
+  // ── Pending payments (treasurer confirmation) ───────────────
+  const fetchPendingPayments = useCallback(async (groupId: string) => {
+    setPaymentsLoading(true)
+    try {
+      const res  = await fetch(`/api/payments?groupId=${groupId}`)
+      const data = await res.json()
+      setPendingPayments(data.success ? (data.data || []) : [])
+    } catch { setPendingPayments([]) }
+    finally { setPaymentsLoading(false) }
+  }, [])
+
+  async function handlePaymentAction(transactionId: string, action: 'CONFIRM' | 'REJECT', groupId: string) {
+    if (paymentActionId) return
+    if (action === 'REJECT' && !window.confirm('Reject this payment? The member will need to resubmit.')) return
+    setPaymentActionId(transactionId)
+    try {
+      const res  = await fetch('/api/payments', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ action, transactionId }),
+      })
+      const data = await res.json()
+      if (data.success) { showToast(data.message || 'Done'); fetchPendingPayments(groupId) }
+      else showToast(data.error || 'Action failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setPaymentActionId(null) }
   }
 
   // ── Change group status ─────────────────────────────────────
@@ -1117,7 +1148,7 @@ export default function GroupsPage() {
         {/* Tabs */}
         <div style={{ display:'flex', gap:'0', borderBottom:'1px solid #E2E8F0' }}>
           {TABS.map(t => (
-            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id); if (t === 'members') fetchInvitations(g.id) }} style={{
+            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id); if (t === 'members') { fetchInvitations(g.id); fetchPendingPayments(g.id) } }} style={{
               padding:'10px 18px', background:'none', border:'none',
               borderBottom: detailTab===t?`2px solid ${TEAL}`:'2px solid transparent',
               color: detailTab===t?TEAL:'#64748B', fontWeight: detailTab===t?'600':'400',
@@ -1400,6 +1431,54 @@ export default function GroupsPage() {
                 </div>
               </div>
             )}
+
+            {/* ── Pending Payments (treasurer confirmation) ── */}
+            {(() => {
+              if (paymentsLoading && pendingPayments.length === 0) return (
+                <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', padding:'18px', textAlign:'center', color:'#94A3B8', fontSize:'12px' }}>
+                  ⏳ Loading payments...
+                </div>
+              )
+              if (pendingPayments.length === 0) return null
+              return (
+                <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', overflow:'hidden' }}>
+                  <div style={{ padding:'12px 16px', background:'#FFFBEB', borderBottom:'1px solid #FDE68A', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <span style={{ fontSize:'12px', fontWeight:'700', color:NAVY, textTransform:'uppercase', letterSpacing:'0.03em' }}>
+                      💳 Payments Awaiting Confirmation ({pendingPayments.length})
+                    </span>
+                    <button onClick={() => fetchPendingPayments(g.id)} style={{ padding:'5px 10px', background:'white', border:'1px solid #E2E8F0', borderRadius:'6px', fontSize:'11px', cursor:'pointer', color:'#475569' }}>↻ Refresh</button>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column' }}>
+                    {pendingPayments.map((p: any) => {
+                      const busy = paymentActionId === p.id
+                      return (
+                        <div key={p.id} style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 16px', borderBottom:'1px solid #F1F5F9' }}>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {p.memberName} · {p.currency === 'USD' ? '$' : p.currency + ' '}{Number(p.amount).toLocaleString()}
+                            </div>
+                            <div style={{ fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {(p.method || '').replace(/_/g,' ')} · Ref {p.reference || '—'}{p.description ? ` · ${p.description}` : ''}
+                            </div>
+                          </div>
+                          <span style={{ fontSize:'10px', fontWeight:'600', padding:'3px 9px', borderRadius:'6px', whiteSpace:'nowrap', background: p.kind === 'SAVINGS' ? '#EDE9FE' : '#DBEAFE', color: p.kind === 'SAVINGS' ? '#5B21B6' : '#1E40AF' }}>
+                            {p.kind === 'SAVINGS' ? '💰 Savings' : '📅 Group'}
+                          </span>
+                          <button onClick={() => handlePaymentAction(p.id, 'CONFIRM', g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:TEAL, color:'white', border:'none', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            {busy ? '…' : '✓ Confirm'}
+                          </button>
+                          <button onClick={() => handlePaymentAction(p.id, 'REJECT', g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            Reject
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
 
             {/* ── Pending Invitations ── */}
             {(() => {

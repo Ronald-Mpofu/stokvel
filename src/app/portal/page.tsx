@@ -61,8 +61,84 @@ function EmptyState({ icon, text }: any) {
   )
 }
 
+// ── Pay Modal — record a contribution payment (member self-service) ──
+function PayModal({ item, userId, onClose, onPaid, onError }: any) {
+  const [method, setMethod]       = useState('ECOCASH')
+  const [reference, setReference] = useState('')
+  const [saving, setSaving]       = useState(false)
+  const [err, setErr]             = useState('')
+
+  const METHODS: [string, string][] = [
+    ['ECOCASH', 'EcoCash'], ['MPESA', 'M-Pesa'], ['MTN_MOMO', 'MTN MoMo'],
+    ['BANK_TRANSFER', 'Bank'], ['CARD', 'Card'], ['USSD', 'USSD'],
+  ]
+  const sym = item.currency === 'USD' ? '$' : item.currency + ' '
+
+  async function submit() {
+    setErr('')
+    if (!reference.trim()) { setErr('Enter the reference/confirmation code from your payment.'); return }
+    setSaving(true)
+    try {
+      const payload: any = {
+        action: 'PAY', userId, type: item.type,
+        paymentMethod: method, reference: reference.trim(),
+        amount: item.amount, currency: item.currency,
+      }
+      if (item.type === 'GROUP')   { payload.groupId = item.groupId; payload.periodKey = item.periodKey; payload.groupName = item.groupName }
+      if (item.type === 'SAVINGS') { payload.contributionId = item.contributionId }
+      const res = await fetch('/api/portal', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      const d   = await res.json()
+      if (d.success) onPaid(d.message || 'Payment submitted')
+      else { setErr(d.error || 'Payment failed'); onError?.(d.error || 'Payment failed') }
+    } catch { setErr('Network error. Please try again.') }
+    finally { setSaving(false) }
+  }
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, padding: '20px' }}>
+      <div style={{ background: 'white', borderRadius: '16px', padding: '26px', width: '100%', maxWidth: '420px', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '4px' }}>
+          <h3 style={{ fontSize: '17px', fontWeight: '700', color: NAVY, margin: 0 }}>Pay Contribution</h3>
+          <button onClick={onClose} style={{ background: '#F1F5F9', border: 'none', borderRadius: '8px', width: '30px', height: '30px', cursor: 'pointer', fontSize: '17px', color: '#64748B' }}>×</button>
+        </div>
+        <p style={{ fontSize: '12px', color: '#64748B', margin: '0 0 16px' }}>{item.groupName}</p>
+
+        <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '10px', padding: '14px', marginBottom: '16px', textAlign: 'center' }}>
+          <div style={{ fontSize: '11px', color: '#166534', marginBottom: '2px' }}>Amount due</div>
+          <div style={{ fontSize: '24px', fontWeight: '800', color: TEAL }}>{sym}{fmt(item.amount)}</div>
+        </div>
+
+        <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Payment method</label>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', marginBottom: '16px' }}>
+          {METHODS.map(([v, l]) => (
+            <div key={v} onClick={() => setMethod(v)}
+              style={{ padding: '9px 4px', borderRadius: '8px', cursor: 'pointer', textAlign: 'center', fontSize: '11px', fontWeight: '600',
+                border: `2px solid ${method === v ? TEAL : '#E2E8F0'}`, background: method === v ? '#F0FDF4' : 'white', color: NAVY }}>
+              {l}
+            </div>
+          ))}
+        </div>
+
+        <label style={{ display: 'block', fontSize: '12px', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Payment reference</label>
+        <input value={reference} onChange={e => setReference(e.target.value)} placeholder="e.g. EcoCash confirmation code"
+          style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E2E8F0', borderRadius: '9px', fontSize: '13px', outline: 'none', boxSizing: 'border-box' as any, marginBottom: '6px' }} />
+        <p style={{ fontSize: '11px', color: '#94A3B8', margin: '0 0 16px' }}>Pay via your mobile-money or bank app, then enter the reference here. Your treasurer confirms receipt.</p>
+
+        {err && <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '9px', padding: '10px 12px', color: '#991B1B', fontSize: '12px', marginBottom: '14px' }}>❌ {err}</div>}
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button onClick={onClose} style={{ flex: 1, padding: '11px', background: '#F1F5F9', border: 'none', borderRadius: '9px', fontSize: '13px', cursor: 'pointer', color: '#475569', fontWeight: '500' }}>Cancel</button>
+          <button onClick={submit} disabled={saving} style={{ flex: 2, padding: '11px', background: saving ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '9px', fontSize: '14px', fontWeight: '700', cursor: saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? '⏳ Submitting…' : 'Submit Payment'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Overview Tab ──────────────────────────────────────────────
-function OverviewTab({ data, onViewCert }: any) {
+function OverviewTab({ data, onViewCert, onPay }: any) {
   const { user, memberships, summary, recentContributions, upcomingContributions, payoutPositions, assetOwnerships, queueEntries, recentIncome } = data
 
   const nextDue = upcomingContributions?.[0]
@@ -106,19 +182,22 @@ function OverviewTab({ data, onViewCert }: any) {
         {/* Upcoming contributions */}
         <SectionCard title="📅 Upcoming Contributions">
           {!upcomingContributions?.length ? <EmptyState icon="✅" text="No upcoming contributions" /> :
-            upcomingContributions.slice(0, 4).map((c: any) => (
-              <div key={c.groupId} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 0', borderBottom: '1px solid #F8FAFC' }}>
+            upcomingContributions.slice(0, 6).map((c: any) => (
+              <div key={c.payId} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 0', borderBottom: '1px solid #F8FAFC' }}>
                 <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: c.daysUntil <= 3 ? '#FEF9C3' : '#F0FDF4', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '18px', flexShrink: 0 }}>
-                  {c.daysUntil <= 3 ? '⚠️' : '📅'}
+                  {c.type === 'SAVINGS' ? '💰' : c.daysUntil <= 3 ? '⚠️' : '📅'}
                 </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: '13px', fontWeight: '500', color: NAVY }}>{c.groupName}</div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: '13px', fontWeight: '500', color: NAVY, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{c.groupName}</div>
                   <div style={{ fontSize: '11px', color: '#94A3B8' }}>
                     Due {new Date(c.dueDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-                    {c.daysUntil <= 7 && <span style={{ color: c.daysUntil <= 3 ? '#DC2626' : '#854D0E', marginLeft: '4px', fontWeight: '600' }}>({c.daysUntil === 0 ? 'TODAY' : `${c.daysUntil}d`})</span>}
+                    {c.daysUntil <= 7 && <span style={{ color: c.daysUntil <= 3 ? '#DC2626' : '#854D0E', marginLeft: '4px', fontWeight: '600' }}>({c.daysUntil <= 0 ? 'DUE' : `${c.daysUntil}d`})</span>}
                   </div>
                 </div>
-                <div style={{ fontSize: '14px', fontWeight: '700', color: TEAL }}>{c.currency === 'USD' ? '$' : c.currency}{fmt(c.amount)}</div>
+                <div style={{ fontSize: '14px', fontWeight: '700', color: TEAL, whiteSpace: 'nowrap' }}>{c.currency === 'USD' ? '$' : c.currency}{fmt(c.amount)}</div>
+                {c.paymentSubmitted
+                  ? <span style={{ fontSize: '11px', fontWeight: 600, color: '#1E40AF', background: '#DBEAFE', padding: '5px 10px', borderRadius: '7px', whiteSpace: 'nowrap' }}>⏳ Submitted</span>
+                  : <button onClick={() => onPay?.(c)} style={{ fontSize: '12px', fontWeight: 700, color: 'white', background: TEAL, border: 'none', padding: '7px 14px', borderRadius: '8px', cursor: 'pointer', whiteSpace: 'nowrap' }}>Pay</button>}
               </div>
             ))
           }
@@ -664,6 +743,13 @@ export default function MemberPortal() {
   const [tab, setTab]         = useState('overview')
   const [certEntry, setCertEntry] = useState<any>(null)
   const [userId, setUserId]   = useState<string>('')
+  const [payItem, setPayItem] = useState<any>(null)
+  const [toast, setToast]     = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
+
+  function showToast(msg: string, type: 'success' | 'error' = 'success') {
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 4000)
+  }
 
   useEffect(() => {
     // Support ?as=email for dev testing (e.g. /portal?as=tendai.moyo@test.com)
@@ -684,22 +770,20 @@ export default function MemberPortal() {
       .catch(e => { setError(`Network error: ${e.message}`); setLoading(false) })
   }, [])
 
-  useEffect(() => {
+  const fetchOverview = useCallback(() => {
     if (!userId) return
     setLoading(true)
     fetch(`/api/portal?userId=${userId}&section=overview`)
       .then(r => r.json())
       .then(d => {
-        if (d.success) {
-          setData(d.data)
-          setError('')
-        } else {
-          setError(`Portal API error: ${d.error}`)
-        }
+        if (d.success) { setData(d.data); setError('') }
+        else setError(`Portal API error: ${d.error}`)
       })
       .catch(e => setError(`Network error: ${e.message}`))
       .finally(() => setLoading(false))
   }, [userId])
+
+  useEffect(() => { fetchOverview() }, [fetchOverview])
 
   const TABS = [
     { id: 'overview',      icon: '🏠', label: 'Overview'      },
@@ -711,8 +795,22 @@ export default function MemberPortal() {
 
   return (
     <div style={{ fontFamily: 'system-ui, sans-serif', minHeight: '100vh', background: '#F8FAFC' }}>
-      <VersionBadge label="Member Portal" ver="v1.2" />
+      <VersionBadge label="Member Portal" ver="v1.3" />
       {certEntry && <CertModal entry={certEntry} onClose={() => setCertEntry(null)} />}
+      {payItem && (
+        <PayModal
+          item={payItem}
+          userId={userId}
+          onClose={() => setPayItem(null)}
+          onPaid={(msg: string) => { setPayItem(null); showToast(msg); fetchOverview() }}
+          onError={(msg: string) => showToast(msg, 'error')}
+        />
+      )}
+      {toast && (
+        <div style={{ position: 'fixed', top: '20px', right: '20px', zIndex: 3000, background: toast.type === 'success' ? '#065F46' : '#991B1B', color: 'white', padding: '12px 18px', borderRadius: '10px', fontSize: '13px', fontWeight: 600, boxShadow: '0 10px 30px rgba(0,0,0,0.2)', maxWidth: '360px' }}>
+          {toast.type === 'success' ? '✅ ' : '❌ '}{toast.msg}
+        </div>
+      )}
 
       {/* Top navigation */}
       <div style={{ background: `linear-gradient(135deg, ${NAVY}, #1A3A5C)`, padding: '0 24px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
@@ -760,7 +858,7 @@ export default function MemberPortal() {
           </div>
         ) : (
           <>
-            {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} />}
+            {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}
             {tab === 'assets'        && <AssetsTab data={data} onViewCert={setCertEntry} />}
             {tab === 'documents'     && <DocumentsTab userId={userId} />}
