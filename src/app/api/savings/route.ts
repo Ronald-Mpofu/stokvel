@@ -20,6 +20,8 @@ const createSchema = z.object({
   periodMonths:          z.coerce.number().int().min(1).max(120),
   contributionAmount:    z.coerce.number().positive(),
   contributionFrequency: z.enum(['WEEKLY','FORTNIGHTLY','MONTHLY']).default('MONTHLY'),
+  poolType:              z.enum(['MATURITY','ROTATING']).default('MATURITY'),
+  payoutStrategy:        z.enum(['SENIORITY','RANDOM','GROUP_VOTE']).default('SENIORITY'),
   startDate:             z.string(),
   interestRatePa:        z.coerce.number().min(0).max(1).default(0.24),
   maxLoanPct:            z.coerce.number().min(0).max(1).default(0.50),
@@ -64,6 +66,8 @@ function formatPool(p: any) {
     periodMonths:         Number(p.periodMonths),
     contributionAmount:   Number(p.contributionAmount),
     contributionFrequency: p.contributionFrequency,
+    poolType:             p.poolType || 'MATURITY',
+    payoutStrategy:       p.payoutStrategy || 'SENIORITY',
     startDate:            p.startDate,
     maturityDate:         p.maturityDate,
     status:               p.status,
@@ -83,6 +87,7 @@ function formatPool(p: any) {
     members:              p.members || [],
     loans:                p.loans   || [],
     payouts:              p.payouts || [],
+    rotationSchedule:     p.rotationSchedule || [],
   }
 }
 
@@ -105,7 +110,7 @@ export async function GET(req: NextRequest) {
       if (!pools.length) return NextResponse.json({ success: false, error: 'Pool not found' }, { status: 404 })
       const pool = pools[0]
 
-      const [members, loans, payouts] = await Promise.all([
+      const [members, loans, payouts, rotation] = await Promise.all([
         sql(`SELECT spm.*, u."fullName", u.email, u.tier
           FROM "SavingsPoolMember" spm
           JOIN "User" u ON u.id = spm."userId"
@@ -121,6 +126,11 @@ export async function GET(req: NextRequest) {
           JOIN "User" u ON u.id = spp."userId"
           WHERE spp."poolId" = $1
           ORDER BY spp."netPayout" DESC`, [poolId]),
+        sql(`SELECT srp.*, u."fullName"
+          FROM "SavingsRotationPayout" srp
+          JOIN "User" u ON u.id = srp."userId"
+          WHERE srp."poolId" = $1
+          ORDER BY srp.position ASC`, [poolId]).catch(() => []),
       ])
 
       pool.members = members.map(m => ({
@@ -139,6 +149,12 @@ export async function GET(req: NextRequest) {
         grossShare: Number(p.grossShare), loanDeduction: Number(p.loanDeduction),
         netPayout: Number(p.netPayout), sharePercent: Number(p.sharePercent),
         status: p.status, paidAt: p.paidAt,
+      }))
+      pool.rotationSchedule = (rotation as any[]).map((r: any) => ({
+        id: r.id, userId: r.userId, fullName: r.fullName,
+        position: Number(r.position), scheduledDate: r.scheduledDate,
+        amount: Number(r.amount), currency: r.currency,
+        status: r.status, paidAt: r.paidAt, paymentRef: r.paymentRef,
       }))
 
       return NextResponse.json({ success: true, data: formatPool(pool) })
@@ -177,6 +193,7 @@ export async function POST(req: NextRequest) {
     if (body.action === 'MATURE')      return handleMature(body)
     if (body.action === 'DISTRIBUTE')  return handleDistribute(body)
     if (body.action === 'PAYOUT_PAID') return handlePayoutPaid(body)
+    if (body.action === 'ROTATION_PAID') return handleRotationPaid(body)
     if (body.action === 'ADD_MEMBER')  return handleAddMember(body)
 
     const data = createSchema.parse(body)
@@ -196,15 +213,17 @@ export async function POST(req: NextRequest) {
         id, "groupId", name, description, "periodMonths", "contributionAmount",
         "contributionFrequency", "startDate", "maturityDate", status, currency,
         "interestRatePa", "maxLoanPct", "allowLoans", notes,
+        "poolType", "payoutStrategy",
         "totalContributed", "totalInterestEarned", "totalPoolValue",
         "createdAt", "updatedAt"
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7::"SavingsPoolFrequency",$8,$9,'SETUP'::"SavingsPoolStatus",$10::"CurrencyCode",$11,$12,$13,$14,0,0,0,NOW(),NOW()
+        $1,$2,$3,$4,$5,$6,$7::"SavingsPoolFrequency",$8,$9,'SETUP'::"SavingsPoolStatus",$10::"CurrencyCode",$11,$12,$13,$14,$15,$16,0,0,0,NOW(),NOW()
       )`,
       [poolId, data.groupId, data.name, data.description || null,
        data.periodMonths, data.contributionAmount, data.contributionFrequency,
        startDate, maturityDate, group.currency,
-       data.interestRatePa, data.maxLoanPct, data.allowLoans, data.notes || null]
+       data.interestRatePa, data.maxLoanPct, data.allowLoans, data.notes || null,
+       data.poolType, data.payoutStrategy]
     )
 
     if (data.memberIds.length > 0) {
@@ -244,7 +263,12 @@ async function handleActivate(body: any): Promise<NextResponse> {
   const members = await sql(`SELECT * FROM "SavingsPoolMember" WHERE "poolId"=$1`, [poolId])
   if (!members.length) return NextResponse.json({ success: false, error: 'Add at least one member before activating' }, { status: 400 })
 
-  const periodCount = calcPeriodCount(Number(pool.periodMonths), pool.contributionFrequency)
+  const isRotating = (pool.poolType || 'MATURITY') === 'ROTATING'
+  // Rotating pools run exactly one cycle per member (each member paid once);
+  // maturity pools run the schedule derived from periodMonths + frequency.
+  const periodCount = isRotating
+    ? members.length
+    : calcPeriodCount(Number(pool.periodMonths), pool.contributionFrequency)
   let inserted = 0
 
   for (const member of members) {
@@ -262,11 +286,43 @@ async function handleActivate(body: any): Promise<NextResponse> {
     }
   }
 
+  // ── Rotating pools: build the payout order and schedule ──
+  let rotationCount = 0
+  if (isRotating) {
+    const strategy = pool.payoutStrategy || 'SENIORITY'
+    const ordered  = [...members]
+    if (strategy === 'RANDOM') {
+      // Fisher–Yates shuffle
+      for (let i = ordered.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1))
+        ;[ordered[i], ordered[j]] = [ordered[j], ordered[i]]
+      }
+    } else {
+      // SENIORITY (and GROUP_VOTE default until votes are cast): longest-standing first
+      ordered.sort((a: any, b: any) => new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime())
+    }
+    const pot = Number(pool.contributionAmount) * members.length
+    for (let pos = 1; pos <= ordered.length; pos++) {
+      const recipient = ordered[pos - 1]
+      const sched     = calcDueDate(new Date(pool.startDate), pos, pool.contributionFrequency)
+      try {
+        await exec(
+          `INSERT INTO "SavingsRotationPayout" (id,"poolId","userId",position,"scheduledDate",amount,currency,status,"createdAt","updatedAt")
+           VALUES ($1,$2,$3,$4,$5,$6,$7,'SCHEDULED',NOW(),NOW()) ON CONFLICT ("poolId",position) DO NOTHING`,
+          [randomUUID(), poolId, recipient.userId, pos, sched, pot, pool.currency]
+        )
+        rotationCount++
+      } catch {}
+    }
+  }
+
   await exec(`UPDATE "SavingsPool" SET status='ACTIVE',"updatedAt"=NOW() WHERE id=$1`, [poolId])
 
   return NextResponse.json({
     success: true,
-    message: `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.`,
+    message: isRotating
+      ? `Pool activated! ${members.length}-member rotation scheduled (${rotationCount} payouts) and ${inserted} contribution records created.`
+      : `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.`,
   })
 }
 
@@ -274,6 +330,20 @@ async function handleActivate(body: any): Promise<NextResponse> {
 async function handleMature(body: any): Promise<NextResponse> {
   await exec(`UPDATE "SavingsPool" SET status='MATURED',"updatedAt"=NOW() WHERE id=$1`, [body.poolId])
   return NextResponse.json({ success: true, message: 'Pool matured. Calculate and distribute payouts.' })
+}
+
+// ── Mark a rotation payout as paid ────────────────────────────
+async function handleRotationPaid(body: any): Promise<NextResponse> {
+  const { rotationId } = body
+  if (!rotationId) return NextResponse.json({ success: false, error: 'rotationId required' }, { status: 400 })
+  const rows = await sql(`SELECT id, status FROM "SavingsRotationPayout" WHERE id=$1`, [rotationId])
+  if (!rows.length) return NextResponse.json({ success: false, error: 'Rotation payout not found' }, { status: 404 })
+  if (rows[0].status === 'PAID') return NextResponse.json({ success: false, error: 'This payout is already marked paid' }, { status: 409 })
+  await exec(
+    `UPDATE "SavingsRotationPayout" SET status='PAID', "paidAt"=NOW(), "paymentRef"=$2, "updatedAt"=NOW() WHERE id=$1`,
+    [rotationId, body.paymentRef || null]
+  )
+  return NextResponse.json({ success: true, message: 'Rotation payout marked as paid.' })
 }
 
 // ── Distribute / calculate payouts ───────────────────────────
