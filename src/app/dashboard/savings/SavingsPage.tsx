@@ -377,6 +377,8 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
   const [addMemberId, setAddMemberId] = useState('')
   const [payRef, setPayRef]     = useState('')
   const [search, setSearch]     = useState('')
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
 
   const fetchPool = useCallback(async () => {
     const res = await fetch(`/api/savings?poolId=${poolId}`)
@@ -504,6 +506,36 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
               style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>💸 Record Payment</button>}
             {pool.status==='ACTIVE'&&pool.allowLoans&&<button onClick={()=>setTab('loans')}
               style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>💳 Manage Loans</button>}
+
+            {/* ── Delete pool ── */}
+            <div style={{marginLeft:'auto'}}>
+              {confirmDelete
+                ? <div style={{display:'flex',gap:'6px',alignItems:'center'}}>
+                    <span style={{fontSize:'11px',color:'#FCA5A5',fontWeight:'600'}}>Permanently delete?</span>
+                    <button onClick={async()=>{
+                      setDeleting(true)
+                      try {
+                        const res  = await fetch('/api/savings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'DELETE_POOL',poolId})})
+                        const data = await res.json()
+                        if (data.success) { onAction(data.message); onClose() }
+                        else onAction(data.error||'Delete failed','error')
+                      } catch { onAction('Network error','error') }
+                      finally { setDeleting(false); setConfirmDelete(false) }
+                    }} disabled={deleting}
+                      style={{padding:'5px 12px',background:'#DC2626',color:'white',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
+                      {deleting?'…':'Yes, delete'}
+                    </button>
+                    <button onClick={()=>setConfirmDelete(false)}
+                      style={{padding:'5px 10px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>
+                      Cancel
+                    </button>
+                  </div>
+                : <button onClick={()=>setConfirmDelete(true)}
+                    style={{padding:'5px 12px',background:'rgba(220,38,38,0.2)',color:'#FCA5A5',border:'1px solid rgba(220,38,38,0.4)',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>
+                    🗑 Delete Pool
+                  </button>
+              }
+            </div>
           </div>
         </div>
 
@@ -1149,21 +1181,6 @@ export default function SavingsPage({ groupId: propGroupId }: { groupId?: string
                 </div>
 
                 <span style={{fontSize:'18px',color:'#CBD5E1',flexShrink:0}}>→</span>
-                {deleteConfirm === p.id
-                  ? <div onClick={e=>e.stopPropagation()} style={{display:'flex',gap:'6px',alignItems:'center',flexShrink:0}}>
-                      <span style={{fontSize:'11px',color:'#991B1B',fontWeight:'600'}}>Delete?</span>
-                      <button onClick={()=>handleDelete(p.id)} disabled={!!deletingId}
-                        style={{padding:'4px 10px',background:'#DC2626',color:'white',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
-                        {deletingId===p.id?'…':'Yes'}
-                      </button>
-                      <button onClick={()=>setDeleteConfirm(null)}
-                        style={{padding:'4px 10px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>No</button>
-                    </div>
-                  : <button onClick={e=>{e.stopPropagation();setDeleteConfirm(p.id)}}
-                      style={{padding:'4px 10px',background:'#FEF2F2',color:'#991B1B',border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer',flexShrink:0}}>
-                      🗑 Delete
-                    </button>
-                }
               </div>
             )
           })}
