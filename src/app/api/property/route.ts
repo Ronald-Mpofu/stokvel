@@ -390,3 +390,42 @@ function formatProperty(p: any) {
     createdAt: p.createdAt,
   }
 }
+// ── APPEND THIS TO: src/app/api/property/route.ts ────────────
+// Add after the last existing function in the file.
+// Ensure 'import prisma from "@/lib/prisma/client"' is at the top.
+// Ensure 'export const dynamic = "force-dynamic"' is at the top.
+
+// ── Delete property group (temporary hard-delete — remove before go-live) ──
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url)
+    const propertyGroupId = searchParams.get('propertyGroupId')
+    if (!propertyGroupId) return NextResponse.json({ success: false, error: 'propertyGroupId required' }, { status: 400 })
+
+    const pg = await prisma.propertyGroup.findUnique({
+      where:  { id: propertyGroupId },
+      select: { id: true, name: true },
+    })
+    if (!pg) return NextResponse.json({ success: false, error: 'Property group not found' }, { status: 404 })
+
+    await prisma.$transaction(async (tx) => {
+      // RentalDistributionShare → RentalDistribution
+      const dists = await tx.rentalDistribution.findMany({
+        where:  { propertyGroupId },
+        select: { id: true },
+      })
+      for (const d of dists) {
+        await tx.rentalDistributionShare.deleteMany({ where: { distributionId: d.id } })
+      }
+      await tx.rentalDistribution.deleteMany({ where: { propertyGroupId } })
+      await tx.propertyValuation.deleteMany({ where: { propertyGroupId } })
+      await tx.propertyStake.deleteMany({     where: { propertyGroupId } })
+      await tx.propertyGroup.delete({         where: { id: propertyGroupId } })
+    })
+
+    return NextResponse.json({ success: true, message: `"${pg.name}" has been permanently deleted.` })
+  } catch (e: any) {
+    console.error('DELETE /api/property error:', e)
+    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+  }
+}

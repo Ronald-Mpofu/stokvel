@@ -545,4 +545,33 @@ function formatItem(i: any) {
     priceDiff:           i.actualTotalPrice != null
       ? Number(i.actualTotalPrice) - Number(i.estimatedTotalPrice) : null,
   }
+  
+}
+// ── APPEND THIS TO: src/app/api/grocery/route.ts ────────────
+// Add after the last existing function in the file.
+// Ensure 'export const dynamic = "force-dynamic"' is at the top.
+
+// ── Delete grocery club (temporary hard-delete — remove before go-live) ──
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url)
+    const clubId = searchParams.get('clubId')
+    if (!clubId) return NextResponse.json({ success: false, error: 'clubId required' }, { status: 400 })
+
+    const rows = await sql(`SELECT id, name FROM "GroceryClub" WHERE id=$1`, [clubId])
+    if (!rows.length) return NextResponse.json({ success: false, error: 'Grocery club not found' }, { status: 404 })
+    const name = rows[0].name
+
+    // Cascade: purchases → items → contributions → members → club
+    try { await exec(`DELETE FROM "GroceryPurchase"     WHERE "itemId" IN (SELECT id FROM "GroceryItem" WHERE "clubId"=$1)`, [clubId]) } catch {}
+    try { await exec(`DELETE FROM "GroceryItem"         WHERE "clubId"=$1`, [clubId]) } catch {}
+    try { await exec(`DELETE FROM "GroceryContribution" WHERE "clubId"=$1`, [clubId]) } catch {}
+    try { await exec(`DELETE FROM "GroceryMember"       WHERE "clubId"=$1`, [clubId]) } catch {}
+    await exec(`DELETE FROM "GroceryClub" WHERE id=$1`, [clubId])
+
+    return NextResponse.json({ success: true, message: `"${name}" has been permanently deleted.` })
+  } catch (e: any) {
+    console.error('DELETE /api/grocery error:', e)
+    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+  }
 }

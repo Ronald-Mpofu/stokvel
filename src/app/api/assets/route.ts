@@ -160,3 +160,54 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Failed to create asset campaign' }, { status: 500 })
   }
 }
+// ── APPEND THIS TO: src/app/api/assets/route.ts ──────────────
+// Add after the last existing function in the file.
+// Ensure 'import prisma from "@/lib/prisma/client"' is at the top.
+// Ensure 'export const dynamic = "force-dynamic"' is at the top.
+
+// ── Delete asset (temporary hard-delete — remove before go-live) ──
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url)
+    const assetId = searchParams.get('assetId')
+    if (!assetId) return NextResponse.json({ success: false, error: 'assetId required' }, { status: 400 })
+
+    const asset = await prisma.asset.findUnique({
+      where:  { id: assetId },
+      select: { id: true, name: true },
+    })
+    if (!asset) return NextResponse.json({ success: false, error: 'Asset not found' }, { status: 404 })
+
+    await prisma.$transaction(async (tx) => {
+      // BackerContribution → AssetBacker
+      const backers = await tx.assetBacker.findMany({ where: { assetId }, select: { id: true } })
+      for (const b of backers) {
+        await tx.backerContribution.deleteMany({ where: { backerId: b.id } })
+      }
+      await tx.assetBacker.deleteMany({ where: { assetId } })
+
+      // AssetIncomeDistributionShare → AssetIncomeDistribution
+      const dists = await tx.assetIncomeDistribution.findMany({ where: { assetId }, select: { id: true } })
+      for (const d of dists) {
+        await tx.assetIncomeDistributionShare.deleteMany({ where: { distributionId: d.id } })
+      }
+      await tx.assetIncomeDistribution.deleteMany({ where: { assetId } })
+
+      // AssetCostingItem → AssetCostingSheet (cascade handled by onDelete: Cascade in schema)
+      const sheet = await tx.assetCostingSheet.findUnique({ where: { assetId }, select: { id: true } })
+      if (sheet) {
+        await tx.assetCostingItem.deleteMany({ where: { sheetId: sheet.id } })
+        await tx.assetCostingSheet.delete({ where: { id: sheet.id } })
+      }
+
+      await tx.assetQueueEntry.deleteMany({ where: { assetId } })
+      await tx.assetOwnership.deleteMany({ where: { assetId } })
+      await tx.asset.delete({ where: { id: assetId } })
+    })
+
+    return NextResponse.json({ success: true, message: `"${asset.name}" has been permanently deleted.` })
+  } catch (e: any) {
+    console.error('DELETE /api/assets error:', e)
+    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+  }
+}

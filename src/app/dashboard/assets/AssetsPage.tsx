@@ -806,9 +806,22 @@ export default function AssetsPage({ groupId: propGroupId }: { groupId?: string 
   const [filterType, setFilterType]   = useState('ALL')
   const [filterStatus, setFilterStatus] = useState('ALL')
   const [contributeAsset, setContributeAsset] = useState<any>(null)
+  const [deletingId, setDeletingId]   = useState<string|null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<string|null>(null)
 
   function showToast(msg: string, type: 'success'|'error' = 'success') {
     setToast({ msg, type })
+  }
+
+  async function handleDelete(assetId: string) {
+    setDeletingId(assetId)
+    try {
+      const res  = await fetch(`/api/assets?assetId=${assetId}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (data.success) { showToast(data.message); fetchAll() }
+      else showToast(data.error || 'Delete failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setDeletingId(null); setDeleteConfirm(null) }
   }
 
   const fetchAll = useCallback(async () => {
@@ -1024,6 +1037,20 @@ export default function AssetsPage({ groupId: propGroupId }: { groupId?: string 
                         💰
                       </button>
                     )}
+                    {deleteConfirm === a.id
+                      ? <div style={{display:'flex',gap:'4px',alignItems:'center'}}>
+                          <button onClick={()=>handleDelete(a.id)} disabled={!!deletingId}
+                            style={{padding:'6px 10px',background:'#DC2626',color:'white',border:'none',borderRadius:'7px',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
+                            {deletingId===a.id?'…':'Yes, delete'}
+                          </button>
+                          <button onClick={()=>setDeleteConfirm(null)}
+                            style={{padding:'6px 8px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'7px',fontSize:'11px',cursor:'pointer'}}>No</button>
+                        </div>
+                      : <button onClick={()=>setDeleteConfirm(a.id)}
+                          style={{padding:'8px 10px',background:'#FEF2F2',color:'#991B1B',border:'1px solid #FECACA',borderRadius:'8px',fontSize:'12px',cursor:'pointer'}}>
+                          🗑
+                        </button>
+                    }
                   </div>
                 </div>
               </div>

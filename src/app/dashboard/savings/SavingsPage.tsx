@@ -1003,8 +1003,21 @@ export default function SavingsPage({ groupId: propGroupId }: { groupId?: string
   const [showCreate, setShowCreate] = useState(false)
   const [selectedId, setSelectedId] = useState<string|null>(null)
   const [filterStatus, setFilterStatus] = useState('ALL')
+  const [deletingId, setDeletingId]     = useState<string|null>(null)
+  const [deleteConfirm, setDeleteConfirm] = useState<string|null>(null)
 
   function showToast(msg: string, type='success') { setToast({msg,type}) }
+
+  async function handleDelete(poolId: string) {
+    setDeletingId(poolId)
+    try {
+      const res  = await fetch('/api/savings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'DELETE_POOL', poolId }) })
+      const data = await res.json()
+      if (data.success) { showToast(data.message); fetchData() }
+      else showToast(data.error || 'Delete failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setDeletingId(null); setDeleteConfirm(null) }
+  }
 
   // Fetch savings + groups only — fast initial load
   const fetchData = useCallback(async () => {
@@ -1136,6 +1149,21 @@ export default function SavingsPage({ groupId: propGroupId }: { groupId?: string
                 </div>
 
                 <span style={{fontSize:'18px',color:'#CBD5E1',flexShrink:0}}>→</span>
+                {deleteConfirm === p.id
+                  ? <div onClick={e=>e.stopPropagation()} style={{display:'flex',gap:'6px',alignItems:'center',flexShrink:0}}>
+                      <span style={{fontSize:'11px',color:'#991B1B',fontWeight:'600'}}>Delete?</span>
+                      <button onClick={()=>handleDelete(p.id)} disabled={!!deletingId}
+                        style={{padding:'4px 10px',background:'#DC2626',color:'white',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
+                        {deletingId===p.id?'…':'Yes'}
+                      </button>
+                      <button onClick={()=>setDeleteConfirm(null)}
+                        style={{padding:'4px 10px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>No</button>
+                    </div>
+                  : <button onClick={e=>{e.stopPropagation();setDeleteConfirm(p.id)}}
+                      style={{padding:'4px 10px',background:'#FEF2F2',color:'#991B1B',border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer',flexShrink:0}}>
+                      🗑 Delete
+                    </button>
+                }
               </div>
             )
           })}

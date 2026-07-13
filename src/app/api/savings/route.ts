@@ -192,8 +192,9 @@ export async function POST(req: NextRequest) {
     if (body.action === 'ACTIVATE')    return handleActivate(body)
     if (body.action === 'MATURE')      return handleMature(body)
     if (body.action === 'DISTRIBUTE')  return handleDistribute(body)
-    if (body.action === 'PAYOUT_PAID') return handlePayoutPaid(body)
+    if (body.action === 'PAYOUT_PAID')   return handlePayoutPaid(body)
     if (body.action === 'ROTATION_PAID') return handleRotationPaid(body)
+    if (body.action === 'DELETE_POOL')   return handleDeletePool(body)
     if (body.action === 'ADD_MEMBER')  return handleAddMember(body)
 
     const data = createSchema.parse(body)
@@ -432,4 +433,21 @@ async function handleAddMember(body: any): Promise<NextResponse> {
 
   const user = await prisma.user.findUnique({ where: { id: userId }, select: { fullName: true } })
   return NextResponse.json({ success: true, message: `${user?.fullName} added to pool` })
+}
+
+// ── Delete pool (temporary hard-delete — remove before go-live) ──
+async function handleDeletePool(body: any): Promise<NextResponse> {
+  const { poolId } = body
+  if (!poolId) return NextResponse.json({ success: false, error: 'poolId required' }, { status: 400 })
+  const rows = await sql(`SELECT id, name FROM "SavingsPool" WHERE id=$1`, [poolId])
+  if (!rows.length) return NextResponse.json({ success: false, error: 'Pool not found' }, { status: 404 })
+  const poolName = rows[0].name
+  await exec(`DELETE FROM "SavingsRotationPayout" WHERE "poolId"=$1`, [poolId])
+  await exec(`DELETE FROM "SavingsPoolPayout"     WHERE "poolId"=$1`, [poolId])
+  await exec(`DELETE FROM "SavingsContribution"   WHERE "poolId"=$1`, [poolId])
+  try { await exec(`DELETE FROM "SavingsLoanRepayment" WHERE "loanId" IN (SELECT id FROM "SavingsLoan" WHERE "poolId"=$1)`, [poolId]) } catch {}
+  try { await exec(`DELETE FROM "SavingsLoan"     WHERE "poolId"=$1`, [poolId]) } catch {}
+  await exec(`DELETE FROM "SavingsPoolMember"     WHERE "poolId"=$1`, [poolId])
+  await exec(`DELETE FROM "SavingsPool"           WHERE id=$1`,       [poolId])
+  return NextResponse.json({ success: true, message: `"${poolName}" has been permanently deleted.` })
 }
