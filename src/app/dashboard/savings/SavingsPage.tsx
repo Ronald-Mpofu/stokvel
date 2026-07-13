@@ -56,6 +56,8 @@ function CreatePoolModal({ groups, members, membersLoading, onClose, onSuccess, 
   const [form, setForm] = useState({
     groupId:defaultGroupId||'', name:'', description:'', periodMonths:'12',
     contributionAmount:'', contributionFrequency:'MONTHLY',
+    poolType:'MATURITY' as 'MATURITY'|'ROTATING',
+    payoutStrategy:'SENIORITY' as 'SENIORITY'|'RANDOM'|'GROUP_VOTE',
     startDate:new Date().toISOString().split('T')[0],
     interestRatePa:'24', maxLoanPct:'50', allowLoans:true, notes:'',
     memberIds:[] as string[],
@@ -91,6 +93,8 @@ function CreatePoolModal({ groups, members, membersLoading, onClose, onSuccess, 
         periodMonths:          parseInt(form.periodMonths),
         contributionAmount:    parseFloat(form.contributionAmount),
         contributionFrequency: form.contributionFrequency,
+        poolType:              form.poolType,
+        payoutStrategy:        form.payoutStrategy,
         startDate:             form.startDate,
         interestRatePa:        parseFloat(form.interestRatePa) / 100,
         maxLoanPct:            parseFloat(form.maxLoanPct) / 100,
@@ -174,20 +178,65 @@ function CreatePoolModal({ groups, members, membersLoading, onClose, onSuccess, 
                   style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box' as any}}/>
               </div>
             </div>
-            {/* Summary card */}
-            {parseFloat(form.contributionAmount||'0')>0&&<div style={{background:'#F0FDF4',borderRadius:'10px',padding:'14px',marginTop:'14px',border:'1px solid #BBF7D0'}}>
-              <div style={{fontSize:'12px',fontWeight:'600',color:GREEN,marginBottom:'8px'}}>📊 Pool Preview</div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',fontSize:'12px'}}>
-                {[
-                  ['Payment periods', periodCount.toString()],
-                  ['Per member total', `$${fmt(totalPerMember)}`],
-                  ['Matures on', maturityDate.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})],
-                ].map(([l,v])=><div key={l} style={{background:'white',borderRadius:'6px',padding:'8px'}}>
-                  <div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>{l}</div>
-                  <div style={{fontWeight:'700',color:NAVY}}>{v}</div>
-                </div>)}
+
+            {/* ── Pool Type ── */}
+            <div style={{marginTop:'16px'}}>
+              <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'8px'}}>Pool Type *</label>
+              <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px'}}>
+                {([['MATURITY','🏦 Maturity Pool','All members are paid their share at the end of the period.'],
+                   ['ROTATING','🔄 Rotating Pool','One member receives the full pot each cycle, in strategy order.']] as [string,string,string][]).map(([v,title,desc])=>(
+                  <div key={v} onClick={()=>set('poolType')(v)}
+                    style={{padding:'12px 14px',borderRadius:'10px',cursor:'pointer',border:`2px solid ${form.poolType===v?TEAL:'#E2E8F0'}`,background:form.poolType===v?'#F0FDF4':'white'}}>
+                    <div style={{fontSize:'13px',fontWeight:'700',color:NAVY,marginBottom:'3px'}}>{title}</div>
+                    <div style={{fontSize:'11px',color:'#64748B',lineHeight:'1.4'}}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* ── Payout Strategy (rotating only) ── */}
+            {form.poolType==='ROTATING'&&<div style={{marginTop:'14px'}}>
+              <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'8px'}}>Payout Order Strategy *</label>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+                {([['SENIORITY','⬆️ Seniority','Longest-standing member goes first.'],
+                   ['RANDOM','🎲 Random Draw','Cryptographically shuffled when pool is activated.'],
+                   ['GROUP_VOTE','🗳️ Group Vote','Order agreed by the group (set before activating).']] as [string,string,string][]).map(([v,title,desc])=>(
+                  <div key={v} onClick={()=>set('payoutStrategy')(v)}
+                    style={{padding:'10px 10px',borderRadius:'9px',cursor:'pointer',border:`2px solid ${form.payoutStrategy===v?PURPLE:'#E2E8F0'}`,background:form.payoutStrategy===v?'#F5F3FF':'white',textAlign:'center'}}>
+                    <div style={{fontSize:'12px',fontWeight:'700',color:NAVY,marginBottom:'3px'}}>{title}</div>
+                    <div style={{fontSize:'10px',color:'#64748B',lineHeight:'1.4'}}>{desc}</div>
+                  </div>
+                ))}
               </div>
             </div>}
+
+            {/* Summary card */}
+            {parseFloat(form.contributionAmount||'0')>0&&(()=>{
+              const previewRows: [string,string][] = form.poolType==='ROTATING'
+                ? [
+                    ['Pool type',       '🔄 Rotating'],
+                    ['Strategy',        form.payoutStrategy],
+                    ['Pot per cycle',   `$${fmt(parseFloat(form.contributionAmount||'0') * (form.memberIds?.length||1))}`],
+                    ['Frequency',       form.contributionFrequency],
+                    ['Cycles',          `= member count`],
+                    ['Start date',      new Date(form.startDate).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})],
+                  ]
+                : [
+                    ['Payment periods', periodCount.toString()],
+                    ['Per member total',`$${fmt(totalPerMember)}`],
+                    ['Matures on',      maturityDate.toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})],
+                  ]
+              return <div style={{background:'#F0FDF4',borderRadius:'10px',padding:'14px',marginTop:'14px',border:'1px solid #BBF7D0'}}>
+                <div style={{fontSize:'12px',fontWeight:'600',color:GREEN,marginBottom:'8px'}}>📊 Pool Preview</div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',fontSize:'12px'}}>
+                  {previewRows.map(([l,v])=><div key={l} style={{background:'white',borderRadius:'6px',padding:'8px'}}>
+                    <div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>{l}</div>
+                    <div style={{fontWeight:'700',color:NAVY}}>{v}</div>
+                  </div>)}
+                </div>
+              </div>
+            })()}
+
           </>}
 
           {/* ── Step 2: Loan Settings ── */}
@@ -416,8 +465,9 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
               {l:'Contributed',   v:fmtK(pool.totalContributed),  c:'white'  },
               {l:'Interest Earned',v:fmtK(pool.totalInterestEarned),c:'#9FE1CB'},
               {l:'Members',       v:poolMembers.length,            c:'white'  },
-              {l:pool.status==='ACTIVE'?'Days Left':'Period',
-               v:pool.status==='ACTIVE'?`${daysLeft}d`:`${pool.periodMonths}mo`, c:daysLeft<30?'#FCD34D':'white'},
+              pool.poolType==='ROTATING'
+                ? {l:'Cycles Paid', v:`${(pool.rotationSchedule||[]).filter((r:any)=>r.status==='PAID').length} / ${(pool.rotationSchedule||[]).length}`, c:daysLeft<30?'#FCD34D':'white'}
+                : {l:pool.status==='ACTIVE'?'Days Left':'Period', v:pool.status==='ACTIVE'?`${daysLeft}d`:`${pool.periodMonths}mo`, c:daysLeft<30?'#FCD34D':'white'},
             ].map(s=><div key={s.l}>
               <div style={{fontSize:'9px',color:'rgba(255,255,255,0.5)',textTransform:'uppercase',letterSpacing:'0.04em'}}>{s.l}</div>
               <div style={{fontSize:'16px',fontWeight:'700',color:s.c,marginTop:'2px'}}>{s.v}</div>
@@ -437,12 +487,18 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
           </div>}
 
           {/* Action bar */}
-          <div style={{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'}}>
+          <div style={{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap',alignItems:'center'}}>
+            <span style={{fontSize:'10px',fontWeight:'700',padding:'3px 9px',borderRadius:'6px',background:'rgba(255,255,255,0.15)',color:'white'}}>
+              {pool.poolType==='ROTATING'?'🔄 ROTATING':'🏦 MATURITY'}
+            </span>
+            {pool.poolType==='ROTATING'&&<span style={{fontSize:'10px',fontWeight:'700',padding:'3px 9px',borderRadius:'6px',background:'rgba(255,255,255,0.1)',color:'rgba(255,255,255,0.7)'}}>
+              {pool.payoutStrategy}
+            </span>}
             {canActivate&&<button onClick={()=>doAction('ACTIVATE',{poolId})}
               disabled={saving} style={{padding:'6px 14px',background:TEAL,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>▶️ Activate Pool</button>}
-            {canMature&&<button onClick={()=>doAction('MATURE',{poolId})}
+            {canMature&&pool.poolType!=='ROTATING'&&<button onClick={()=>doAction('MATURE',{poolId})}
               disabled={saving} style={{padding:'6px 14px',background:GOLD,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>🏁 Mark Matured</button>}
-            {canDistrib&&<button onClick={()=>doAction('DISTRIBUTE',{poolId})}
+            {canDistrib&&pool.poolType!=='ROTATING'&&<button onClick={()=>doAction('DISTRIBUTE',{poolId})}
               disabled={saving} style={{padding:'6px 14px',background:PURPLE,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>📊 Calculate Payouts</button>}
             {pool.status==='ACTIVE'&&<button onClick={()=>setTab('contributions')}
               style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>💸 Record Payment</button>}
@@ -453,7 +509,9 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
 
         {/* Tabs */}
         <div style={{display:'flex',borderBottom:'1px solid #E2E8F0',flexShrink:0,overflowX:'auto'}}>
-          {[['dashboard','📋 Dashboard'],['contributions','💸 Contributions'],['loans','💳 Loans'],['members','👥 Members'],['payouts','🎁 Payouts']].map(([id,label])=>(
+          {[['dashboard','📋 Dashboard'],['contributions','💸 Contributions'],['loans','💳 Loans'],['members','👥 Members'],
+            pool.poolType==='ROTATING'?['payouts','🔄 Rotation Schedule']:['payouts','🎁 Payouts']
+          ].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id as any)}
               style={{padding:'10px 16px',background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap'}}>{label}</button>
           ))}
@@ -474,9 +532,9 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
             {pool.status==='SETUP'&&<div style={{background:'#EEF2FF',borderRadius:'12px',padding:'16px',border:'1px solid #C7D2FE'}}>
               <div style={{fontSize:'13px',fontWeight:'600',color:'#3730A3',marginBottom:'10px'}}>📋 Setup Checklist</div>
               {[
-                [true, 'Pool created with contribution schedule'],
+                [true, `Pool type: ${pool.poolType==='ROTATING'?'🔄 Rotating · ':'🏦 Maturity · '}${pool.poolType==='ROTATING'?pool.payoutStrategy:'Shared payout on maturity'}`],
                 [poolMembers.length>0, `Members added (${poolMembers.length} enrolled)`],
-                [poolMembers.length>0, 'Ready to activate'],
+                [poolMembers.length>0, pool.poolType==='ROTATING'?'Ready to activate — rotation order will be generated on activation':'Ready to activate'],
               ].map(([done,label],i)=><div key={i} style={{display:'flex',alignItems:'center',gap:'8px',marginBottom:'6px',fontSize:'13px',color:done?GREEN:'#64748B'}}>
                 <span>{done?'✅':'⬜'}</span><span>{label as string}</span>
               </div>)}
@@ -780,10 +838,70 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
             )}
           </div>}
 
-          {/* ── Payouts ── */}
+          {/* ── Payouts / Rotation Schedule ── */}
           {tab==='payouts'&&<div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
+
+            {/* ── ROTATING pool: rotation schedule ── */}
+            {pool.poolType==='ROTATING'&&<>
+              {pool.status==='SETUP'&&<div style={{background:'#EEF2FF',borderRadius:'10px',padding:'14px',fontSize:'13px',color:'#3730A3',border:'1px solid #C7D2FE'}}>
+                ℹ️ The rotation schedule will be generated when you activate the pool. Order is based on <strong>{pool.payoutStrategy}</strong>.
+              </div>}
+              {pool.status==='ACTIVE'&&(!pool.rotationSchedule||pool.rotationSchedule.length===0)&&<div style={{background:'#FEF9C3',borderRadius:'10px',padding:'14px',border:'1px solid #FCD34D',textAlign:'center',fontSize:'13px',color:GOLD}}>
+                No rotation schedule found. This pool may have been activated before the rotation feature was added — re-activate a test pool to generate the schedule.
+              </div>}
+              {(pool.rotationSchedule||[]).length>0&&<>
+                <div style={{background:'#F0FDF4',borderRadius:'10px',padding:'14px',border:'1px solid #BBF7D0',display:'flex',gap:'16px',flexWrap:'wrap'}}>
+                  <div><div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>POT PER CYCLE</div><div style={{fontSize:'16px',fontWeight:'700',color:NAVY}}>${fmt(pool.rotationSchedule[0]?.amount||0)}</div></div>
+                  <div><div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>TOTAL CYCLES</div><div style={{fontSize:'16px',fontWeight:'700',color:NAVY}}>{pool.rotationSchedule.length}</div></div>
+                  <div><div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>PAID OUT</div><div style={{fontSize:'16px',fontWeight:'700',color:GREEN}}>{pool.rotationSchedule.filter((r:any)=>r.status==='PAID').length}</div></div>
+                  <div><div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'2px'}}>REMAINING</div><div style={{fontSize:'16px',fontWeight:'700',color:GOLD}}>{pool.rotationSchedule.filter((r:any)=>r.status!=='PAID').length}</div></div>
+                </div>
+                <table style={{width:'100%',borderCollapse:'collapse',background:'white',borderRadius:'10px',overflow:'hidden',border:'1px solid #E2E8F0'}}>
+                  <thead><tr style={{background:'#F8FAFC'}}>
+                    {['Cycle','Member','Scheduled Date','Pot Amount','Status','Action'].map(h=>(
+                      <th key={h} style={{padding:'9px 12px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>
+                    ))}
+                  </tr></thead>
+                  <tbody>
+                    {pool.rotationSchedule.map((r:any,i:number)=>{
+                      const isNext = r.status!=='PAID' && (pool.rotationSchedule.findIndex((x:any)=>x.status!=='PAID')===i)
+                      return <tr key={r.id} style={{borderBottom:'1px solid #F8FAFC',background:isNext?'#F0FDF4':i%2===0?'white':'#FAFAFA'}}>
+                        <td style={{padding:'10px 12px'}}>
+                          <div style={{width:'28px',height:'28px',borderRadius:'50%',background:r.status==='PAID'?TEAL:isNext?GREEN:'#E2E8F0',color:r.status==='PAID'||isNext?'white':'#94A3B8',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'700'}}>{r.position}</div>
+                        </td>
+                        <td style={{padding:'10px 12px'}}>
+                          <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.fullName}</div>
+                          {isNext&&<div style={{fontSize:'10px',color:GREEN,fontWeight:'600'}}>↑ Next in line</div>}
+                        </td>
+                        <td style={{padding:'10px 12px',fontSize:'12px',color:'#64748B'}}>
+                          {new Date(r.scheduledDate).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'})}
+                        </td>
+                        <td style={{padding:'10px 12px',fontSize:'14px',fontWeight:'700',color:TEAL}}>${fmt(r.amount)}</td>
+                        <td style={{padding:'10px 12px'}}>
+                          <Pill bg={r.status==='PAID'?'#DCFCE7':isNext?'#FEF9C3':'#F1F5F9'}
+                            color={r.status==='PAID'?GREEN:isNext?GOLD:'#94A3B8'}>
+                            {r.status==='PAID'?'✓ PAID':isNext?'⏳ DUE':'SCHEDULED'}
+                          </Pill>
+                        </td>
+                        <td style={{padding:'10px 12px'}}>
+                          {r.status!=='PAID'&&isNext&&<button
+                            onClick={()=>doAction('ROTATION_PAID',{poolId,rotationId:r.id,paymentRef:`ROT-${Date.now()}`})}
+                            disabled={saving}
+                            style={{padding:'5px 12px',background:TEAL,color:'white',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>
+                            ✓ Mark Paid
+                          </button>}
+                        </td>
+                      </tr>
+                    })}
+                  </tbody>
+                </table>
+              </>}
+            </>}
+
+            {/* ── MATURITY pool: existing payouts logic ── */}
+            {pool.poolType!=='ROTATING'&&<>
             {pool.status==='ACTIVE'&&<div style={{background:'#EEF2FF',borderRadius:'10px',padding:'14px',fontSize:'13px',color:'#3730A3',border:'1px solid #C7D2FE'}}>
-              ℹ️ Payouts can only be calculated after the pool matures on <strong>{new Date(pool.maturityDate).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</strong>.
+              ℹ️ Payouts are calculated after the pool matures on <strong>{new Date(pool.maturityDate).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})}</strong>.
             </div>}
             {pool.status==='MATURED'&&(!pool.payouts||pool.payouts.length===0)&&<div style={{background:'#FEF9C3',borderRadius:'10px',padding:'16px',border:'1px solid #FCD34D',textAlign:'center'}}>
               <div style={{fontSize:'32px',marginBottom:'8px'}}>🏁</div>
@@ -835,6 +953,7 @@ function PoolDetail({ poolId, allMembers, adminId, onClose, onAction }: any) {
               </table>
               <button onClick={()=>doAction('DISTRIBUTE',{poolId})} disabled={saving}
                 style={{padding:'8px 16px',background:'#F1F5F9',color:'#475569',border:'1px solid #E2E8F0',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>↻ Recalculate Payouts</button>
+            </>}
             </>}
           </div>}
         </div>
