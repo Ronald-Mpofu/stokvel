@@ -2,6 +2,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
+import { getSessionFromRequest, hasPermission } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -36,6 +39,27 @@ const updateSchema = z.object({
 // ── GET ───────────────────────────────────────────────────────
 export async function GET(req: NextRequest) {
   try {
+    // ── Role-based scoping (BR 1 & 4) ────────────────────────
+    // SYSTEM_ADMIN / NATIONAL_ADMIN / AUDITOR see all groups.
+    // Everyone else sees only groups they created (adminUserId)
+    // OR groups where they hold an ACTIVE GROUP_ADMIN member role.
+    const session = await getSessionFromRequest(req)
+    if (!session) {
+      return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
+    }
+    const seesAll  = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'AUDITOR'].includes(session.role)
+    const scopeSql = seesAll ? '' : `AND (
+        g."adminUserId" = $1
+        OR EXISTS (
+          SELECT 1 FROM "GroupMember" gm
+          WHERE gm."groupId" = g.id
+            AND gm."userId"  = $1
+            AND gm.role      = 'GROUP_ADMIN'
+            AND gm.status    = 'ACTIVE'
+        )
+      )`
+    const params = seesAll ? [] : [session.id]
+
     // Use raw SQL to include branding column (not in Prisma schema yet)
     const groups = await sql(`
       SELECT
@@ -58,8 +82,9 @@ export async function GET(req: NextRequest) {
       FROM "Group" g
       JOIN "User" u ON u.id = g."adminUserId"
       WHERE g."deletedAt" IS NULL
+      ${scopeSql}
       ORDER BY g."createdAt" DESC
-    `)
+    `, params)
 
     const formatted = groups.map((g: any) => ({
       id:                    g.id,
@@ -109,8 +134,26 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
 
+    // Resolve the group admin from the authenticated session — direct JWT verify,
+    // no hardcoded email, no extra HTTP round-trip. getSessionFromRequest also
+    // enforces that the user exists and is ACTIVE.
+    const session = await getSessionFromRequest(req)
+    if (!session) {
+      return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
+    }
+
+    // Default: the logged-in user owns the group. A SYSTEM_ADMIN / NATIONAL_ADMIN
+    // may create a group on behalf of another user via body.adminUserId.
+    let adminUserId = session.id
+    if (body.adminUserId && body.adminUserId !== session.id) {
+      if (!hasPermission(session.role, 'NATIONAL_ADMIN')) {
+        return NextResponse.json({ success: false, error: 'Not permitted to assign a different admin' }, { status: 403 })
+      }
+      adminUserId = body.adminUserId
+    }
+
     const adminUser = await prisma.user.findFirst({
-      where:  { email: 'admin@thecommunitydeals.com' },
+      where:  { id: adminUserId, deletedAt: null },
       select: { id: true },
     })
     if (!adminUser) {

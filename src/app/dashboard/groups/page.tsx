@@ -711,9 +711,14 @@ export default function GroupsPage() {
             {loading ? 'Loading...' : `${groups.length} groups · ${groups.filter(g=>g.status==='ACTIVE').length} active`}
           </p>
         </div>
-        <button onClick={() => setView('create')} style={{ background:TEAL, color:'white', border:'none', borderRadius:'8px', padding:'10px 18px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
-          + Create Group
-        </button>
+        <div style={{ display:'flex', gap:'8px' }}>
+          <button onClick={() => { window.location.href = '/portal' }} style={{ background:'white', color:NAVY, border:'1.5px solid #E2E8F0', borderRadius:'8px', padding:'10px 16px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
+            👤 My Portal
+          </button>
+          <button onClick={() => setView('create')} style={{ background:TEAL, color:'white', border:'none', borderRadius:'8px', padding:'10px 18px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
+            + Create Group
+          </button>
+        </div>
       </div>
 
       {/* Filters */}

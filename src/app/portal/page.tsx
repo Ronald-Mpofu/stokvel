@@ -869,6 +869,12 @@ export default function MemberPortal() {
                 {data.user?.fullName?.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
               </div>
               <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.75)' }}>{data.user?.fullName?.split(' ')[0]}</div>
+              {['SYSTEM_ADMIN','NATIONAL_ADMIN','GROUP_ADMIN','TREASURER','INVESTMENT_MANAGER','AUDITOR'].includes(data.user?.role) && (
+                <button onClick={() => { window.location.href = '/dashboard' }}
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 13px', background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', borderRadius: '10px', fontSize: '13px', fontWeight: 600, cursor: 'pointer', marginLeft: '4px' }}>
+                  ⚙️ Admin Dashboard
+                </button>
+              )}
               <LogoutButton style={{ background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', padding: '7px 13px', marginLeft: '4px' }} />
             </div>
           )}

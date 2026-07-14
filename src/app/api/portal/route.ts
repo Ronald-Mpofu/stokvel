@@ -24,7 +24,7 @@ export async function GET(req: NextRequest) {
       select: {
         id: true, fullName: true, email: true, phone: true,
         city: true, country: true, kycStatus: true, tier: true,
-        reputationScore: true, status: true, createdAt: true,
+        reputationScore: true, status: true, createdAt: true, role: true,
       },
     })
     if (!user) return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 })
