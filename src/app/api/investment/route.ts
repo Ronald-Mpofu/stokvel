@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { randomUUID } from 'crypto'
 import prisma from '@/lib/prisma/client'
+import { requireGroupManager } from '@/lib/auth'
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -189,6 +190,15 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
+
+    // ── Group-manager guard (BR 4 & 6) ────────────────────────
+    let guardGroupId: string | null = body.groupId || null
+    if (!guardGroupId && body.clubId) {
+      const r = await sql(`SELECT "groupId" FROM "InvestmentClub" WHERE id=$1`, [body.clubId])
+      guardGroupId = r[0]?.groupId ?? null
+    }
+    const guardErr = await requireGroupManager(req, guardGroupId)
+    if (guardErr) return guardErr
 
     if (body.action === 'ACTIVATE')             return handleActivate(body)
     if (body.action === 'ADD_MEMBER')           return handleAddMember(body)
@@ -626,6 +636,12 @@ export async function DELETE(req: NextRequest) {
     const { searchParams } = new URL(req.url)
     const clubId = searchParams.get('clubId')
     if (!clubId) return NextResponse.json({ success: false, error: 'clubId required' }, { status: 400 })
+
+    // ── Group-manager guard ────────────────────────────────────
+    const gr = await sql(`SELECT "groupId" FROM "InvestmentClub" WHERE id=$1`, [clubId])
+    const guardErr = await requireGroupManager(req, gr[0]?.groupId ?? null)
+    if (guardErr) return guardErr
+
     const rows = await sql(`SELECT id, name FROM "InvestmentClub" WHERE id=$1`, [clubId])
     if (!rows.length) return NextResponse.json({ success: false, error: 'Investment club not found' }, { status: 404 })
     const name = rows[0].name

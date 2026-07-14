@@ -2,6 +2,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
+import { requireGroupManager } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
 
 const createSchema = z.object({
   groupId:      z.string().uuid(),
@@ -97,6 +100,17 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
+
+    // ── Group-manager guard (BR 4 & 6) ────────────────────────
+    // Creation carries groupId; REVIEW actions carry loanId, resolved
+    // to the loan's group.
+    let guardGroupId: string | null = body.groupId || null
+    if (!guardGroupId && body.loanId) {
+      const l = await prisma.loan.findUnique({ where: { id: body.loanId }, select: { groupId: true } })
+      guardGroupId = l?.groupId ?? null
+    }
+    const guardErr = await requireGroupManager(req, guardGroupId)
+    if (guardErr) return guardErr
 
     // Route to actions
     if (body.action === 'REVIEW') return handleReview(body)
@@ -267,6 +281,39 @@ async function handleReview(body: any): Promise<NextResponse> {
   }
 }
 
+// ── Delete loan (temporary hard-delete — remove before go-live) ──
+export async function DELETE(req: NextRequest) {
+  try {
+    const { searchParams } = new URL(req.url)
+    const loanId = searchParams.get('loanId')
+    if (!loanId) return NextResponse.json({ success: false, error: 'loanId required' }, { status: 400 })
+
+    const loan = await prisma.loan.findUnique({
+      where:  { id: loanId },
+      select: { id: true, amount: true, status: true, groupId: true, borrower: { select: { fullName: true } } },
+    })
+    if (!loan) return NextResponse.json({ success: false, error: 'Loan not found' }, { status: 404 })
+
+    // ── Group-manager guard ────────────────────────────────────
+    const guardErr = await requireGroupManager(req, loan.groupId)
+    if (guardErr) return guardErr
+
+    await prisma.$transaction(async (tx) => {
+      await tx.loanRepayment.deleteMany({ where: { loanId } })
+      await tx.loanGuarantor.deleteMany({ where: { loanId } })
+      await tx.loan.delete({ where: { id: loanId } })
+    })
+
+    return NextResponse.json({
+      success: true,
+      message: `Loan for ${loan.borrower?.fullName || 'member'} ($${Number(loan.amount).toFixed(2)}) has been permanently deleted.`,
+    })
+  } catch (e: any) {
+    console.error('DELETE /api/loans error:', e)
+    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+  }
+}
+
 // ── Format helper ─────────────────────────────────────────────
 function formatLoan(l: any) {
   const now      = new Date()
@@ -322,38 +369,5 @@ function formatLoan(l: any) {
     monthlyInstalment: l.termMonths > 0
       ? ((Number(l.amount) + Number(l.totalInterestDue)) / l.termMonths).toFixed(2)
       : '0.00',
-  }
-}
-// ── APPEND THIS TO: src/app/api/loans/route.ts ───────────────
-// Add after the last existing function in the file.
-// Ensure 'import prisma from "@/lib/prisma/client"' is at the top.
-// Ensure 'export const dynamic = "force-dynamic"' is at the top.
-
-// ── Delete loan (temporary hard-delete — remove before go-live) ──
-export async function DELETE(req: NextRequest) {
-  try {
-    const { searchParams } = new URL(req.url)
-    const loanId = searchParams.get('loanId')
-    if (!loanId) return NextResponse.json({ success: false, error: 'loanId required' }, { status: 400 })
-
-    const loan = await prisma.loan.findUnique({
-      where:  { id: loanId },
-      select: { id: true, amount: true, status: true, borrower: { select: { fullName: true } } },
-    })
-    if (!loan) return NextResponse.json({ success: false, error: 'Loan not found' }, { status: 404 })
-
-    await prisma.$transaction(async (tx) => {
-      await tx.loanRepayment.deleteMany({ where: { loanId } })
-      await tx.loanGuarantor.deleteMany({ where: { loanId } })
-      await tx.loan.delete({ where: { id: loanId } })
-    })
-
-    return NextResponse.json({
-      success: true,
-      message: `Loan for ${loan.borrower?.fullName || 'member'} ($${Number(loan.amount).toFixed(2)}) has been permanently deleted.`,
-    })
-  } catch (e: any) {
-    console.error('DELETE /api/loans error:', e)
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
   }
 }

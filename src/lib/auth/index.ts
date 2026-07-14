@@ -139,6 +139,41 @@ export function forbidden(message = 'Forbidden'): NextResponse {
   return NextResponse.json({ success: false, error: message }, { status: 403 })
 }
 
+// ── Group-scoped authorisation (BR 4–6) ──────────────────────
+// Roles that bypass per-group checks entirely.
+export const SUPER_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN']
+
+/**
+ * Can this user manage the given group?
+ * True when they created the group (adminUserId) OR hold an ACTIVE
+ * GROUP_ADMIN / TREASURER member role in it.
+ */
+export async function canManageGroup(userId: string, groupId: string): Promise<boolean> {
+  const g = await prisma.group.findUnique({ where: { id: groupId }, select: { adminUserId: true } })
+  if (g?.adminUserId === userId) return true
+  const m = await prisma.groupMember.findFirst({
+    where:  { groupId, userId, status: 'ACTIVE', role: { in: ['GROUP_ADMIN', 'TREASURER'] as any } },
+    select: { id: true },
+  })
+  return !!m
+}
+
+/**
+ * Route guard: verifies the request has a session and the caller may
+ * manage `groupId`. Returns null when authorised; a ready NextResponse
+ * (401/403) when not. Usage:
+ *   const guardErr = await requireGroupManager(req, groupId)
+ *   if (guardErr) return guardErr
+ */
+export async function requireGroupManager(req: NextRequest, groupId: string | null | undefined): Promise<NextResponse | null> {
+  const session = await getSessionFromRequest(req)
+  if (!session) return unauthorized()
+  if (SUPER_ROLES.includes(session.role)) return null
+  if (!groupId) return forbidden('Group could not be resolved for this request')
+  if (!(await canManageGroup(session.id, groupId))) return forbidden('Not authorised for this group')
+  return null
+}
+
 // ── Set auth cookies ──────────────────────────────────────────
 export function setAuthCookies(
   response: NextResponse,

@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
+import { requireGroupManager } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 
@@ -189,6 +190,18 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
+
+    // ── Group-manager guard (BR 4 & 6) ────────────────────────
+    // Every savings mutation is scoped to a group: creation carries
+    // groupId directly; actions carry poolId, resolved to its group.
+    let guardGroupId: string | null = body.groupId || null
+    if (!guardGroupId && body.poolId) {
+      const r = await sql(`SELECT "groupId" FROM "SavingsPool" WHERE id=$1`, [body.poolId])
+      guardGroupId = r[0]?.groupId ?? null
+    }
+    const guardErr = await requireGroupManager(req, guardGroupId)
+    if (guardErr) return guardErr
+
     if (body.action === 'ACTIVATE')    return handleActivate(body)
     if (body.action === 'MATURE')      return handleMature(body)
     if (body.action === 'DISTRIBUTE')  return handleDistribute(body)

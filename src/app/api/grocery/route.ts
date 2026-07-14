@@ -2,6 +2,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
+import { randomUUID } from 'crypto'
+import { requireGroupManager } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -132,6 +136,15 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
 
+    // ── Group-manager guard (BR 4 & 6) ────────────────────────
+    let guardGroupId: string | null = body.groupId || null
+    if (!guardGroupId && body.clubId) {
+      const r = await sql(`SELECT "groupId" FROM "GroceryClub" WHERE id=$1`, [body.clubId])
+      guardGroupId = r[0]?.groupId ?? null
+    }
+    const guardErr = await requireGroupManager(req, guardGroupId)
+    if (guardErr) return guardErr
+
     if (body.action === 'ACTIVATE')          return handleActivate(body)
     if (body.action === 'ADD_MEMBER')        return handleAddMember(body)
     if (body.action === 'REMOVE_MEMBER')     return handleRemoveMember(body)
@@ -155,7 +168,7 @@ export async function POST(req: NextRequest) {
     const startDate = new Date(data.startDate)
     const endDate   = new Date(startDate)
     endDate.setMonth(endDate.getMonth() + data.periodMonths)
-    const clubId = crypto.randomUUID()
+    const clubId = randomUUID()
 
     await exec(
       `INSERT INTO "GroceryClub" (id,"groupId",name,description,"periodMonths","contributionFrequency",
@@ -168,7 +181,7 @@ export async function POST(req: NextRequest) {
     )
 
     for (const userId of data.memberIds) {
-      const mId = crypto.randomUUID()
+      const mId = randomUUID()
       await exec(
         `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
          VALUES ($1,$2,$3,0,0,true,NOW(),NOW()) ON CONFLICT ("clubId","userId") DO NOTHING`,
@@ -210,6 +223,18 @@ export async function DELETE(req: NextRequest) {
     const { searchParams } = new URL(req.url)
     const itemId  = searchParams.get('itemId')
     const clubId  = searchParams.get('clubId')
+
+    // ── Group-manager guard ────────────────────────────────────
+    let guardGroupId: string | null = null
+    if (clubId) {
+      const r = await sql(`SELECT "groupId" FROM "GroceryClub" WHERE id=$1`, [clubId])
+      guardGroupId = r[0]?.groupId ?? null
+    } else if (itemId) {
+      const r = await sql(`SELECT gc."groupId" FROM "GroceryItem" gi JOIN "GroceryClub" gc ON gc.id = gi."clubId" WHERE gi.id=$1`, [itemId])
+      guardGroupId = r[0]?.groupId ?? null
+    }
+    const guardErr = await requireGroupManager(req, guardGroupId)
+    if (guardErr) return guardErr
 
     // ── Delete a single item ──────────────────────────────────
     if (itemId) {
@@ -257,7 +282,7 @@ async function handleActivate(body: any): Promise<NextResponse> {
 
   for (const m of members) {
     for (let p = 1; p <= periodCount; p++) {
-      const cId = crypto.randomUUID()
+      const cId = randomUUID()
       const due = calcDueDate(new Date(club.startDate), p, club.contributionFrequency)
       await exec(
         `INSERT INTO "GroceryContribution" (id,"clubId","userId","periodNumber","dueDate","amountDue","amountPaid",status,"createdAt","updatedAt")
@@ -282,7 +307,7 @@ async function handleActivate(body: any): Promise<NextResponse> {
 // ── Add/Remove member ─────────────────────────────────────────
 async function handleAddMember(body: any): Promise<NextResponse> {
   const { clubId, userId } = body
-  const mId = crypto.randomUUID()
+  const mId = randomUUID()
   await exec(
     `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
      VALUES ($1,$2,$3,0,0,true,NOW(),NOW()) ON CONFLICT ("clubId","userId") DO UPDATE SET "isActive"=true,"updatedAt"=NOW()`,
@@ -308,7 +333,7 @@ async function handleAddItem(body: any): Promise<NextResponse> {
   const mc       = Number((memberCount[0] as any).cnt) || 1
   const totalQty = data.qtyPerMember * mc
   const estTotal = data.estimatedUnitPrice * totalQty
-  const itemId   = crypto.randomUUID()
+  const itemId   = randomUUID()
 
   await exec(
     `INSERT INTO "GroceryItem" (id,"clubId",name,description,unit,"qtyPerMember","totalQty",

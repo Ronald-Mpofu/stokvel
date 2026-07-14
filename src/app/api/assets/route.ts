@@ -2,6 +2,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
+import { requireGroupManager } from '@/lib/auth'
+
+export const dynamic = 'force-dynamic'
 
 const createAssetSchema = z.object({
   groupId:        z.string().uuid(),
@@ -108,6 +111,11 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
+
+    // ── Group-manager guard (BR 4 & 6) ────────────────────────
+    const guardErr = await requireGroupManager(req, body.groupId || null)
+    if (guardErr) return guardErr
+
     const data = createAssetSchema.parse(body)
 
     // Verify group exists
@@ -160,10 +168,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, error: 'Failed to create asset campaign' }, { status: 500 })
   }
 }
-// ── APPEND THIS TO: src/app/api/assets/route.ts ──────────────
-// Add after the last existing function in the file.
-// Ensure 'import prisma from "@/lib/prisma/client"' is at the top.
-// Ensure 'export const dynamic = "force-dynamic"' is at the top.
 
 // ── Delete asset (temporary hard-delete — remove before go-live) ──
 export async function DELETE(req: NextRequest) {
@@ -174,9 +178,13 @@ export async function DELETE(req: NextRequest) {
 
     const asset = await prisma.asset.findUnique({
       where:  { id: assetId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, groupId: true },
     })
     if (!asset) return NextResponse.json({ success: false, error: 'Asset not found' }, { status: 404 })
+
+    // ── Group-manager guard ────────────────────────────────────
+    const guardErr = await requireGroupManager(req, asset.groupId)
+    if (guardErr) return guardErr
 
     await prisma.$transaction(async (tx) => {
       // BackerContribution → AssetBacker
@@ -193,7 +201,7 @@ export async function DELETE(req: NextRequest) {
       }
       await tx.assetIncomeDistribution.deleteMany({ where: { assetId } })
 
-      // AssetCostingItem → AssetCostingSheet (cascade handled by onDelete: Cascade in schema)
+      // AssetCostingItem → AssetCostingSheet
       const sheet = await tx.assetCostingSheet.findUnique({ where: { assetId }, select: { id: true } })
       if (sheet) {
         await tx.assetCostingItem.deleteMany({ where: { sheetId: sheet.id } })

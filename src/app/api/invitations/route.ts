@@ -3,7 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import bcrypt from 'bcryptjs'
-import { getSessionFromRequest, unauthorized } from '@/lib/auth'
+import { getSessionFromRequest, unauthorized, forbidden, canManageGroup, SUPER_ROLES } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 
@@ -119,13 +119,31 @@ export async function POST(req: NextRequest) {
     // reach these branches without a valid session.
     const session = await getSessionFromRequest(req)
     if (!session) return unauthorized()
+    const isSuper = SUPER_ROLES.includes(session.role)
 
     if (body.action === 'ACCEPT') return handleAccept(body, req)
-    if (body.action === 'CANCEL') return handleCancel(body)
-    if (body.action === 'RESEND') return handleResend(body)
+
+    // Cancel / resend act on an invitationId — resolve its group first,
+    // then verify the caller manages THAT group (BR 5).
+    if (body.action === 'CANCEL' || body.action === 'RESEND') {
+      const inv = await prisma.memberInvitation.findUnique({
+        where:  { id: body.invitationId },
+        select: { groupId: true },
+      })
+      if (!inv) return NextResponse.json({ success: false, error: 'Invitation not found' }, { status: 404 })
+      if (!isSuper && !(await canManageGroup(session.id, inv.groupId))) {
+        return forbidden('Not authorised for this group')
+      }
+      return body.action === 'CANCEL' ? handleCancel(body) : handleResend(body)
+    }
 
     // Default: send new invitation
     const data = sendSchema.parse(body)
+
+    // Only managers of the target group may invite into it (BR 5).
+    if (!isSuper && !(await canManageGroup(session.id, data.groupId))) {
+      return forbidden('Not authorised for this group')
+    }
 
     if (!data.email && !data.phone) {
       return NextResponse.json({ success: false, error: 'At least one of email or phone is required.' }, { status: 400 })
