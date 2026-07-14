@@ -179,6 +179,24 @@ export async function POST(req: NextRequest) {
       },
     })
 
+    // ── Auto-membership: the admin is a member of their own group ──
+    // Keeps member counts honest, lets the admin join schemes, and powers
+    // the member-role visibility branch of the Overview scoping.
+    try {
+      await prisma.groupMember.create({
+        data: {
+          groupId:      group.id,
+          userId:       adminUser.id,
+          role:         'GROUP_ADMIN',
+          status:       'ACTIVE',
+          approvedById: session.id,
+          approvedAt:   new Date(),
+        },
+      })
+    } catch (e: any) {
+      if (e?.code !== 'P2002') throw e   // already a member — fine
+    }
+
     // Set extra columns via raw SQL (not in Prisma schema)
     if (body.branding || body.treasurerId || body.secretaryId || body.city || body.zipCode || body.groupType) {
       await exec(

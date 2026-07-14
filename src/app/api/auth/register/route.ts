@@ -1,10 +1,12 @@
 // src/app/api/auth/register/route.ts
-// Public self-signup — always creates role = MEMBER (admins are provisioned, never self-registered).
+// Public self-signup — creates role = MEMBER, or GROUP_ADMIN when the user
+// chooses "create my own Group" (accountType). The role is derived SERVER-SIDE
+// from a strict two-value whitelist — the client can never post a raw role,
+// so staff roles (SYSTEM_ADMIN etc.) remain provisioning-only.
+// Both paths start with joiningFeePaid = false: the middleware fee gate holds
+// GROUP_ADMINs exactly like MEMBERs until their (group) joining fee is paid.
 // Mirrors login route mechanics: JWT access/refresh tokens + setAuthCookies + audit log.
 // After success the client redirects to /dashboard/join-fee (fee gate).
-//
-// NOTE: assumes @/lib/auth exports hashPassword (counterpart of verifyPassword).
-// If yours is named differently (e.g. hashPw), change the single import below.
 
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
@@ -21,6 +23,8 @@ const registerSchema = z.object({
     .regex(/^\+?[0-9\s-]+$/, 'Phone may only contain digits, spaces, dashes and a leading +'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
   country: z.string().length(2, 'Choose your country').optional(),
+  // Strict whitelist — anything else fails validation with a 400.
+  accountType: z.enum(['MEMBER', 'GROUP_ADMIN']).default('MEMBER'),
 })
 
 export async function POST(req: NextRequest) {
@@ -36,7 +40,11 @@ export async function POST(req: NextRequest) {
 
     const email = parsed.data.email.toLowerCase().trim()
     const phone = parsed.data.phone.replace(/[\s-]/g, '')
-    const { fullName, password, country } = parsed.data
+    const { fullName, password, country, accountType } = parsed.data
+
+    // Role is derived here and ONLY here — MEMBER, or GROUP_ADMIN for the
+    // "create my own Group" path. Fee gate applies to both until paid.
+    const role = accountType === 'GROUP_ADMIN' ? 'GROUP_ADMIN' : 'MEMBER'
 
     // ONE query for both uniqueness checks (email + phone are indexed)
     const existing = await prisma.user.findFirst({
@@ -61,7 +69,7 @@ export async function POST(req: NextRequest) {
           phone,
           passwordHash,
           fullName: fullName.trim(),
-          role: 'MEMBER',          // public signup NEVER creates admins
+          role: role as any,       // MEMBER or GROUP_ADMIN only — whitelisted above
           country: country || null,
           // joiningFeePaid defaults to false via the raw-SQL column default
         },
@@ -105,7 +113,7 @@ export async function POST(req: NextRequest) {
         entityId: user.id,
         ipAddress: req.ip || 'unknown',
         userAgent: req.headers.get('user-agent') || undefined,
-        description: `User ${user.email} registered`,
+        description: `User ${user.email} registered as ${role}${role === 'GROUP_ADMIN' ? ' (create-a-group signup)' : ''}`,
       },
     })
 

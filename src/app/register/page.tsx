@@ -58,6 +58,7 @@ export default function RegisterPage() {
   const [country, setCountry] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
+  const [accountType, setAccountType] = useState<'MEMBER' | 'GROUP_ADMIN'>('MEMBER');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -96,6 +97,7 @@ export default function RegisterPage() {
           phone: phone.trim(),
           password,
           country: country || undefined,
+          accountType,
         }),
       });
       const data = await res.json();
@@ -110,7 +112,7 @@ export default function RegisterPage() {
       setError('Network error. Please try again.');
       setLoading(false);
     }
-  }, [fullName, email, phone, country, password, confirm, router]);
+  }, [fullName, email, phone, country, password, confirm, accountType, router]);
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
@@ -165,10 +167,31 @@ export default function RegisterPage() {
             </select>
           </Field>
 
-          {selectedFee ? (
+          <Field label="How do you want to join?">
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+              {([
+                ['MEMBER', '👤 Join as a Member', 'Join community groups you are invited to'],
+                ['GROUP_ADMIN', '👥 Create my own Group', 'Start and administer your own group'],
+              ] as ['MEMBER' | 'GROUP_ADMIN', string, string][]).map(([v, title, desc]) => (
+                <div key={v} onClick={() => setAccountType(v)}
+                  style={{ padding: '12px 12px', borderRadius: 10, cursor: 'pointer', border: `2px solid ${accountType === v ? TEAL : '#E2E8F0'}`, background: accountType === v ? '#F0FDF4' : 'white' }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: NAVY, marginBottom: 3 }}>{title}</div>
+                  <div style={{ fontSize: 11, color: '#64748B', lineHeight: 1.4 }}>{desc}</div>
+                </div>
+              ))}
+            </div>
+          </Field>
+
+          {accountType === 'MEMBER' && selectedFee ? (
             <div style={{ background: '#f0fdf9', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: NAVY, display: 'flex', justifyContent: 'space-between' }}>
               <span>Once-off joining fee</span>
               <strong style={{ color: TEAL }}>{selectedFee.currency} {selectedFee.amount.toFixed(2)}</strong>
+            </div>
+          ) : null}
+
+          {accountType === 'GROUP_ADMIN' ? (
+            <div style={{ background: '#EEF2FF', border: '1px solid #C7D2FE', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#3730A3', lineHeight: 1.5 }}>
+              👥 A once-off <strong>Group joining fee</strong> applies to group creators — the amount for your country is shown at the payment step. Members you invite into your group pay no joining fee.
             </div>
           ) : null}
 
