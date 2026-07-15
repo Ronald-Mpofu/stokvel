@@ -371,6 +371,9 @@ export default function GroupsPage() {
   const [pendingPayments, setPendingPayments] = useState<any[]>([])
   const [paymentsLoading, setPaymentsLoading] = useState(false)
   const [paymentActionId, setPaymentActionId] = useState<string | null>(null)
+  const [joinRequests, setJoinRequests]       = useState<any[]>([])
+  const [requestsLoading, setRequestsLoading] = useState(false)
+  const [requestActionId, setRequestActionId] = useState<string | null>(null)
 
   // Lazy-load the full currency list only when the Settings tab first opens
   useEffect(() => {
@@ -557,6 +560,34 @@ export default function GroupsPage() {
       else showToast(data.error || 'Action failed', 'error')
     } catch { showToast('Network error', 'error') }
     finally { setPaymentActionId(null) }
+  }
+
+  // ── Join requests (Public group discovery) ──────────────────
+  const fetchJoinRequests = useCallback(async (groupId: string) => {
+    setRequestsLoading(true)
+    try {
+      const res  = await fetch(`/api/discover?pendingFor=${groupId}`)
+      const data = await res.json()
+      setJoinRequests(data.success ? (data.data || []) : [])
+    } catch { setJoinRequests([]) }
+    finally { setRequestsLoading(false) }
+  }, [])
+
+  async function handleJoinRequest(requestId: string, action: 'APPROVE' | 'DECLINE', groupId: string) {
+    if (requestActionId) return
+    if (action === 'DECLINE' && !window.confirm('Decline this join request?')) return
+    setRequestActionId(requestId)
+    try {
+      const res  = await fetch('/api/discover', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ action, requestId }),
+      })
+      const data = await res.json()
+      if (data.success) { showToast(data.message || 'Done'); fetchJoinRequests(groupId); fetchGroupMembers(groupId) }
+      else showToast(data.error || 'Action failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setRequestActionId(null) }
   }
 
   // ── Change group status ─────────────────────────────────────
@@ -1153,7 +1184,7 @@ export default function GroupsPage() {
         {/* Tabs */}
         <div style={{ display:'flex', gap:'0', borderBottom:'1px solid #E2E8F0' }}>
           {TABS.map(t => (
-            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id); if (t === 'members') { fetchInvitations(g.id); fetchPendingPayments(g.id) } }} style={{
+            <button key={t} onClick={() => { setDetailTab(t); if (t === 'members' || t === 'schemes') fetchGroupMembers(g.id); if (t === 'members') { fetchInvitations(g.id); fetchPendingPayments(g.id); fetchJoinRequests(g.id) } }} style={{
               padding:'10px 18px', background:'none', border:'none',
               borderBottom: detailTab===t?`2px solid ${TEAL}`:'2px solid transparent',
               color: detailTab===t?TEAL:'#64748B', fontWeight: detailTab===t?'600':'400',
@@ -1436,6 +1467,47 @@ export default function GroupsPage() {
                 </div>
               </div>
             )}
+
+            {/* ── Join Requests (Public group discovery) ── */}
+            {(() => {
+              if (requestsLoading && joinRequests.length === 0) return null
+              if (joinRequests.length === 0) return null
+              return (
+                <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', overflow:'hidden' }}>
+                  <div style={{ padding:'12px 16px', background:'#EFF6FF', borderBottom:'1px solid #BFDBFE', display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                    <span style={{ fontSize:'12px', fontWeight:'700', color:NAVY, textTransform:'uppercase', letterSpacing:'0.03em' }}>
+                      🙋 Join Requests ({joinRequests.length})
+                    </span>
+                    <button onClick={() => fetchJoinRequests(g.id)} style={{ padding:'5px 10px', background:'white', border:'1px solid #E2E8F0', borderRadius:'6px', fontSize:'11px', cursor:'pointer', color:'#475569' }}>↻ Refresh</button>
+                  </div>
+                  <div style={{ display:'flex', flexDirection:'column' }}>
+                    {joinRequests.map((r: any) => {
+                      const busy = requestActionId === r.id
+                      return (
+                        <div key={r.id} style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 16px', borderBottom:'1px solid #F1F5F9' }}>
+                          <div style={{ flex:1, minWidth:0 }}>
+                            <div style={{ fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {r.fullName}
+                            </div>
+                            <div style={{ fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                              {r.email || r.phone} · requested {new Date(r.requestedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}
+                            </div>
+                          </div>
+                          <button onClick={() => handleJoinRequest(r.id, 'APPROVE', g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:TEAL, color:'white', border:'none', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            {busy ? '…' : '✓ Admit'}
+                          </button>
+                          <button onClick={() => handleJoinRequest(r.id, 'DECLINE', g.id)} disabled={busy}
+                            style={{ padding:'6px 12px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                            Decline
+                          </button>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )
+            })()}
 
             {/* ── Pending Payments (treasurer confirmation) ── */}
             {(() => {

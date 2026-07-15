@@ -170,6 +170,79 @@ function PayModal({ item, userId, onClose, onPaid, onError }: any) {
   )
 }
 
+// ── Discover Tab — browse Public groups & request to join ─────
+// This is the service the Members Pool joining fee pays for.
+function DiscoverTab({ showToast }: any) {
+  const [groups, setGroups]     = useState<any[]>([])
+  const [loading, setLoading]   = useState(true)
+  const [requestingId, setRequestingId] = useState<string | null>(null)
+
+  const fetchDiscover = useCallback(() => {
+    setLoading(true)
+    fetch('/api/discover')
+      .then(r => r.json())
+      .then(d => setGroups(d.success ? (d.data || []) : []))
+      .catch(() => setGroups([]))
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => { fetchDiscover() }, [fetchDiscover])
+
+  async function requestJoin(g: any) {
+    if (requestingId) return
+    setRequestingId(g.id)
+    try {
+      const res = await fetch('/api/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'REQUEST', groupId: g.id }),
+      })
+      const d = await res.json()
+      if (d.success) { showToast(d.message); fetchDiscover() }
+      else showToast(d.error || 'Request failed', 'error')
+    } catch { showToast('Network error', 'error') }
+    finally { setRequestingId(null) }
+  }
+
+  if (loading) return <EmptyState icon="⏳" text="Finding public groups..." />
+  if (!groups.length) return <EmptyState icon="🔎" text="No public groups are open right now — check back soon" />
+
+  return (
+    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '14px' }}>
+      {groups.map((g: any) => {
+        const busy = requestingId === g.id
+        const sym  = g.currency === 'USD' ? '$' : g.currency + ' '
+        return (
+          <div key={g.id} style={{ background: 'white', borderRadius: '14px', border: '1px solid #E2E8F0', padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: '15px', fontWeight: '700', color: NAVY, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{g.name}</div>
+                <div style={{ fontSize: '11px', color: '#94A3B8' }}>{[g.city, g.country].filter(Boolean).join(', ')}{g.branding ? ` · ${g.branding}` : ''}</div>
+              </div>
+              <span style={{ fontSize: '10px', fontWeight: '700', padding: '3px 8px', borderRadius: '6px', background: '#DBEAFE', color: '#1E40AF', whiteSpace: 'nowrap', flexShrink: 0 }}>🌐 Public</span>
+            </div>
+            {g.description && <p style={{ fontSize: '12px', color: '#64748B', margin: 0, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any, overflow: 'hidden' }}>{g.description}</p>}
+            <div style={{ display: 'flex', gap: '14px', fontSize: '12px', color: '#475569' }}>
+              <span><strong style={{ color: TEAL }}>{sym}{fmt(g.contributionAmount)}</strong> / {(g.contributionFrequency || 'MONTHLY').toLowerCase()}</span>
+              <span>👥 {g.memberCount}/{g.maxMembers}</span>
+            </div>
+            {g.myStatus === 'ACTIVE'
+              ? <div style={{ textAlign: 'center', padding: '9px', background: '#F0FDF4', borderRadius: '9px', fontSize: '12px', fontWeight: '600', color: '#166534' }}>✓ You're a member</div>
+              : g.myStatus === 'PENDING'
+              ? <div style={{ textAlign: 'center', padding: '9px', background: '#FEF9C3', borderRadius: '9px', fontSize: '12px', fontWeight: '600', color: '#854D0E' }}>⏳ Request pending review</div>
+              : g.isFull
+              ? <div style={{ textAlign: 'center', padding: '9px', background: '#F1F5F9', borderRadius: '9px', fontSize: '12px', fontWeight: '600', color: '#94A3B8' }}>Group is full</div>
+              : <button onClick={() => requestJoin(g)} disabled={busy}
+                  style={{ padding: '10px', background: busy ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '9px', fontSize: '13px', fontWeight: '700', cursor: busy ? 'wait' : 'pointer' }}>
+                  {busy ? '⏳ Sending…' : '🙋 Request to Join'}
+                </button>
+            }
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Overview Tab ──────────────────────────────────────────────
 function OverviewTab({ data, onViewCert, onPay }: any) {
   const { user, memberships, summary, recentContributions, upcomingContributions, payoutPositions, assetOwnerships, queueEntries, recentIncome } = data
@@ -820,6 +893,7 @@ export default function MemberPortal() {
 
   const TABS = [
     { id: 'overview',      icon: '🏠', label: 'Overview'      },
+    { id: 'discover',      icon: '🔎', label: 'Discover Groups' },
     { id: 'contributions', icon: '💸', label: 'Contributions' },
     { id: 'assets',        icon: '🏭', label: 'My Assets'     },
     { id: 'documents',     icon: '📄', label: 'Documents'     },
@@ -898,6 +972,7 @@ export default function MemberPortal() {
         ) : (
           <>
             {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} />}
+            {tab === 'discover'      && <DiscoverTab showToast={showToast} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}
             {tab === 'assets'        && <AssetsTab data={data} onViewCert={setCertEntry} />}
             {tab === 'documents'     && <DocumentsTab userId={userId} />}

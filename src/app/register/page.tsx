@@ -170,7 +170,7 @@ export default function RegisterPage() {
           <Field label="How do you want to join?">
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
               {([
-                ['MEMBER', '👤 Join as a Member', 'Join community groups you are invited to'],
+                ['MEMBER', '👤 Join the Members Pool', 'Discover Public groups advertised to you and request to join them'],
                 ['GROUP_ADMIN', '👥 Create my own Group', 'Start and administer your own group'],
               ] as ['MEMBER' | 'GROUP_ADMIN', string, string][]).map(([v, title, desc]) => (
                 <div key={v} onClick={() => setAccountType(v)}
@@ -184,7 +184,7 @@ export default function RegisterPage() {
 
           {accountType === 'MEMBER' && selectedFee ? (
             <div style={{ background: '#f0fdf9', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: NAVY, display: 'flex', justifyContent: 'space-between' }}>
-              <span>Once-off joining fee</span>
+              <span>Once-off joining fee — Members Pool access</span>
               <strong style={{ color: TEAL }}>{selectedFee.currency} {selectedFee.amount.toFixed(2)}</strong>
             </div>
           ) : null}

@@ -28,6 +28,15 @@ enum UserRole {
   AUDITOR
 }
 
+enum MemberStatus {
+  ACTIVE
+  SUSPENDED
+  DEFAULTED
+  EXITED
+  BLACKLISTED
+  PENDING
+ }
+
 enum KycStatus {
   PENDING
   UNDER_REVIEW
