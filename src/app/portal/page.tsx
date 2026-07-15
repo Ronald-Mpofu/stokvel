@@ -7,6 +7,19 @@ const TEAL   = '#0F6E56'
 const NAVY   = '#0D2137'
 const PURPLE = '#7C3AED'
 
+// ── Mobile detection (640px breakpoint) ───────────────────────
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)')
+    const update = () => setIsMobile(mq.matches)
+    update()
+    mq.addEventListener('change', update)
+    return () => mq.removeEventListener('change', update)
+  }, [])
+  return isMobile
+}
+
 const fmt = (n: number, dec = 2) =>
   new Intl.NumberFormat('en-US', { minimumFractionDigits: dec, maximumFractionDigits: dec }).format(n)
 
@@ -172,6 +185,7 @@ function PayModal({ item, userId, onClose, onPaid, onError }: any) {
 
 // ── Join Questionnaire — completed when requesting to join ────
 function JoinQuestionnaireModal({ group, user, onClose, onSubmitted, showToast }: any) {
+  const isMobile = useIsMobile()
   const [f, setF] = useState<any>({
     fullName: user?.fullName || '', preferredName: '', nationality: '',
     countryOfResidence: user?.country || '', residentialAddress: '',
@@ -235,7 +249,7 @@ function JoinQuestionnaireModal({ group, user, onClose, onSubmitted, showToast }
 
         <div style={{ padding: '6px 24px 12px', overflowY: 'auto' }}>
           <div style={SEC}>1 · About you</div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
             <div><label style={LB}>Full Name *</label><input style={IN} value={f.fullName} onChange={e => set('fullName')(e.target.value)} /></div>
             <div><label style={LB}>Preferred Name</label><input style={IN} value={f.preferredName} onChange={e => set('preferredName')(e.target.value)} /></div>
             <div><label style={LB}>Nationality *</label><input style={IN} value={f.nationality} onChange={e => set('nationality')(e.target.value)} placeholder="e.g. Zimbabwean" /></div>
@@ -253,13 +267,13 @@ function JoinQuestionnaireModal({ group, user, onClose, onSubmitted, showToast }
               <textarea style={{ ...IN, resize: 'vertical', fontFamily: 'inherit' }} rows={3} value={f.whyJoin} onChange={e => set('whyJoin')(e.target.value)} /></div>
             <div><label style={LB}>Have you belonged to a savings group before?</label><YN k="belongedBefore" /></div>
             {f.belongedBefore === 'YES' && (
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', background: '#F8FAFC', borderRadius: '10px', padding: '12px' }}>
+              <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px', background: '#F8FAFC', borderRadius: '10px', padding: '12px' }}>
                 <div><label style={LB}>Which one?</label><input style={IN} value={f.prevGroupName} onChange={e => set('prevGroupName')(e.target.value)} /></div>
                 <div><label style={LB}>How long were you a member?</label><input style={IN} value={f.membershipDuration} onChange={e => set('membershipDuration')(e.target.value)} placeholder="e.g. 2 years" /></div>
                 <div style={{ gridColumn: '1/-1' }}><label style={LB}>Why did you leave?</label><input style={IN} value={f.whyLeft} onChange={e => set('whyLeft')(e.target.value)} /></div>
               </div>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
               <div><label style={LB}>Ever defaulted on contributions?</label><YN k="everDefaulted" /></div>
               <div><label style={LB}>Ever been expelled from a savings group?</label><YN k="everExpelled" /></div>
             </div>
@@ -268,7 +282,7 @@ function JoinQuestionnaireModal({ group, user, onClose, onSubmitted, showToast }
           <div style={SEC}>3 · Financial commitment</div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
             <div><label style={LB}>Are you able to contribute {sym}{fmt(group.contributionAmount)} every {(group.contributionFrequency || 'MONTHLY').toLowerCase()}?</label><YN k="canContribute" /></div>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
               <div><label style={LB}>Preferred payment method</label>
                 <select style={IN} value={f.paymentMethod} onChange={e => set('paymentMethod')(e.target.value)}>
                   <option value="MOBILE_MONEY">Mobile Money Account</option>
@@ -385,6 +399,7 @@ function DiscoverTab({ showToast, user }: any) {
 
 // ── Overview Tab ──────────────────────────────────────────────
 function OverviewTab({ data, onViewCert, onPay }: any) {
+  const isMobile = useIsMobile()
   const { user, memberships, summary, recentContributions, upcomingContributions, payoutPositions, assetOwnerships, queueEntries, recentIncome } = data
 
   const nextDue = upcomingContributions?.[0]
@@ -415,7 +430,7 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
       </div>
 
       {/* KPI strip */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
         <KpiCard icon="💸" label="Total Contributed"   value={`$${fmt(summary.totalContributed)}`}  color={TEAL}   sub={`across ${summary.totalGroups} group${summary.totalGroups !== 1 ? 's' : ''}`} />
         <KpiCard icon="🏆" label="Payout Position"     value={myPayout ? `#${myPayout.position}` : '—'}            color={NAVY}   sub={myPayout ? myPayout.groupName : 'No active payout'} />
         <KpiCard icon="🏭" label="Asset Stakes"         value={summary.totalAssets}                  color={PURPLE}  sub={`${assetOwnerships.length} owned + ${queueEntries.length} in queue`} />
@@ -423,7 +438,7 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
       </div>
 
       {/* Two column layout */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '16px' }}>
 
         {/* Upcoming contributions */}
         <SectionCard title="📅 Upcoming Contributions">
@@ -548,7 +563,7 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
       {/* Recent contributions */}
       {recentContributions.length > 0 && (
         <SectionCard title="💸 Recent Contributions" action={<span style={{ fontSize: '11px', color: '#94A3B8' }}>Last 10 transactions</span>}>
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}><table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
             <thead>
               <tr style={{ background: '#F8FAFC' }}>
                 {['Group', 'Amount', 'Status', 'Date'].map(h => (
@@ -568,7 +583,7 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         </SectionCard>
       )}
 
@@ -596,6 +611,7 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
 
 // ── Contributions Tab ─────────────────────────────────────────
 function ContributionsTab({ userId }: { userId: string }) {
+  const isMobile = useIsMobile()
   const [data, setData]     = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [filter, setFilter] = useState('ALL')
@@ -614,7 +630,7 @@ function ContributionsTab({ userId }: { userId: string }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
       {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, 1fr)' : 'repeat(4, 1fr)', gap: '12px' }}>
         {[
           { label: 'Total Paid',  value: `$${fmt(data.totalPaid)}`,         color: TEAL         },
           { label: 'Completed',   value: data.byStatus.completed,           color: '#166534'    },
@@ -637,7 +653,7 @@ function ContributionsTab({ userId }: { userId: string }) {
 
       {/* Table */}
       <div style={{ background: 'white', borderRadius: '12px', border: '1px solid #E2E8F0', overflow: 'hidden' }}>
-        <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}><table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
           <thead>
             <tr style={{ background: '#F8FAFC' }}>
               {['Group', 'Amount', 'Method', 'Reference', 'Status', 'Description', 'Date'].map(h => (
@@ -666,7 +682,7 @@ function ContributionsTab({ userId }: { userId: string }) {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   )
@@ -832,7 +848,7 @@ function DocumentsTab({ userId }: { userId: string }) {
         {!data.incomeStatements?.length ? (
           <EmptyState icon="💵" text="No income distributions yet. When assets generate income and it's distributed, your share will appear here." />
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+          <div style={{ overflowX: 'auto', WebkitOverflowScrolling: 'touch' as any }}><table style={{ width: '100%', borderCollapse: 'collapse', minWidth: '560px' }}>
             <thead>
               <tr style={{ background: '#F8FAFC' }}>
                 {['Asset', 'Type', 'Description', 'My Share', 'Status', 'Date'].map(h => (
@@ -856,7 +872,7 @@ function DocumentsTab({ userId }: { userId: string }) {
                 </tr>
               ))}
             </tbody>
-          </table>
+          </table></div>
         )}
       </SectionCard>
     </div>
@@ -865,6 +881,7 @@ function DocumentsTab({ userId }: { userId: string }) {
 
 // ── Profile Tab ───────────────────────────────────────────────
 function ProfileTab({ user }: any) {
+  const isMobile = useIsMobile()
   const KYC_META: Record<string, any> = {
     NOT_SUBMITTED: { bg:'#F1F5F9', color:'#475569', label:'Not submitted', action:'Submit KYC' },
     SUBMITTED:     { bg:'#FEF9C3', color:'#854D0E', label:'Under review',  action:null          },
@@ -884,7 +901,7 @@ function ProfileTab({ user }: any) {
     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '600px' }}>
 
       {/* Avatar + name */}
-      <div style={{ background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, borderRadius: '16px', padding: '28px', display: 'flex', alignItems: 'center', gap: '20px' }}>
+      <div style={{ background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, borderRadius: '16px', padding: isMobile ? '20px' : '28px', display: 'flex', alignItems: 'center', gap: isMobile ? '14px' : '20px', flexWrap: 'wrap' }}>
         <div style={{ width: '64px', height: '64px', borderRadius: '50%', background: 'rgba(255,255,255,0.2)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '24px', fontWeight: '700', color: 'white', flexShrink: 0 }}>
           {user.fullName.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
         </div>
@@ -901,7 +918,7 @@ function ProfileTab({ user }: any) {
 
       {/* Details */}
       <SectionCard title="👤 Personal Information">
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '10px' }}>
           {[
             ['Full Name',       user.fullName],
             ['Email',           user.email],
@@ -983,6 +1000,8 @@ function VersionBadge({ label, ver }: { label: string; ver: string }) {
 }
 
 export default function MemberPortal() {
+  const isMobile = useIsMobile()
+  const [menuOpen, setMenuOpen] = useState(false)
   const [data, setData]       = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string>('')
@@ -1059,16 +1078,21 @@ export default function MemberPortal() {
         </div>
       )}
 
-      {/* Top navigation */}
-      <div style={{ background: `linear-gradient(135deg, ${NAVY}, #1A3A5C)`, padding: '0 24px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
-        <div style={{ maxWidth: '1100px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '0' }}>
+      {/* Top navigation — brand row + (on mobile) separate swipeable tab row */}
+      <div style={{ background: `linear-gradient(135deg, ${NAVY}, #1A3A5C)`, padding: isMobile ? '0 12px' : '0 24px', borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+        <div style={{ maxWidth: '1100px', margin: '0 auto', display: 'flex', alignItems: 'center', gap: '0', flexWrap: isMobile ? 'wrap' : 'nowrap' }}>
           {/* Brand */}
-          <div style={{ padding: '14px 20px 14px 0', borderRight: '1px solid rgba(255,255,255,0.1)', marginRight: '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+          <div style={{ padding: isMobile ? '12px 0' : '14px 20px 14px 0', borderRight: isMobile ? 'none' : '1px solid rgba(255,255,255,0.1)', marginRight: isMobile ? 0 : '20px', display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {isMobile && (
+              <button onClick={() => setMenuOpen(true)} aria-label="Open menu"
+                style={{ background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.2)', borderRadius: '9px', width: '38px', height: '38px', cursor: 'pointer', color: 'white', fontSize: '18px', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                ☰
+              </button>
+            )}
             <span style={{ fontSize: '20px' }}>🔄</span>
             <span style={{ fontSize: '14px', fontWeight: '700', color: 'white' }}>Stokvel Platform</span>
           </div>
-          {/* Tabs */}
-          {TABS.map(t => (
+          {!isMobile && TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id)}
               style={{ padding: '16px 14px', background: 'none', border: 'none', borderBottom: tab === t.id ? `3px solid ${TEAL}` : '3px solid transparent', color: tab === t.id ? 'white' : 'rgba(255,255,255,0.5)', fontWeight: tab === t.id ? '600' : '400', fontSize: '13px', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
               <span style={{ fontSize: '15px' }}>{t.icon}</span>
@@ -1077,26 +1101,57 @@ export default function MemberPortal() {
           ))}
           <div style={{ flex: 1 }} />
           {data && (
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: isMobile ? '8px' : '10px' }}>
               <NotificationBell userId={userId} />
-              <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: TEAL, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: 'white' }}>
+              <div style={{ width: '32px', height: '32px', borderRadius: '50%', background: TEAL, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: '700', color: 'white', flexShrink: 0 }}>
                 {data.user?.fullName?.split(' ').map((n: string) => n[0]).join('').slice(0, 2)}
               </div>
-              <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.75)' }}>{data.user?.fullName?.split(' ')[0]}</div>
+              {!isMobile && <div style={{ fontSize: '12px', color: 'rgba(255,255,255,0.75)' }}>{data.user?.fullName?.split(' ')[0]}</div>}
               {['SYSTEM_ADMIN','NATIONAL_ADMIN','GROUP_ADMIN','TREASURER','INVESTMENT_MANAGER','AUDITOR'].includes(data.user?.role) && (
-                <button onClick={() => { window.location.href = '/dashboard' }}
-                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: '7px 13px', background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', borderRadius: '10px', fontSize: '13px', fontWeight: 600, cursor: 'pointer', marginLeft: '4px' }}>
-                  ⚙️ Admin Dashboard
+                <button onClick={() => { window.location.href = '/dashboard' }} title="Admin Dashboard"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', padding: isMobile ? '7px 10px' : '7px 13px', background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', borderRadius: '10px', fontSize: '13px', fontWeight: 600, cursor: 'pointer', marginLeft: '4px' }}>
+                  ⚙️{!isMobile && ' Admin Dashboard'}
                 </button>
               )}
-              <LogoutButton style={{ background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', padding: '7px 13px', marginLeft: '4px' }} />
+              <LogoutButton style={{ background: 'rgba(255,255,255,0.1)', color: 'white', border: '1px solid rgba(255,255,255,0.25)', padding: isMobile ? '7px 10px' : '7px 13px', marginLeft: '4px' }} />
             </div>
           )}
         </div>
       </div>
 
+      {/* Mobile: left-hand collapsible menu (drawer) */}
+      {isMobile && menuOpen && (
+        <div onClick={() => setMenuOpen(false)}
+          style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', zIndex: 4000 }}>
+          <div onClick={e => e.stopPropagation()}
+            style={{ position: 'absolute', top: 0, left: 0, bottom: 0, width: '270px', maxWidth: '80vw', background: `linear-gradient(180deg, ${NAVY}, #1A3A5C)`, display: 'flex', flexDirection: 'column', boxShadow: '4px 0 30px rgba(0,0,0,0.35)' }}>
+            <div style={{ padding: '18px 18px 14px', borderBottom: '1px solid rgba(255,255,255,0.12)', display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ fontSize: '22px' }}>🔄</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: '14px', fontWeight: 700, color: 'white' }}>Stokvel Platform</div>
+                {data?.user?.fullName && <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.55)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{data.user.fullName}</div>}
+              </div>
+              <button onClick={() => setMenuOpen(false)} aria-label="Close menu"
+                style={{ background: 'rgba(255,255,255,0.1)', border: 'none', borderRadius: '8px', width: '30px', height: '30px', cursor: 'pointer', color: 'white', fontSize: '15px' }}>×</button>
+            </div>
+            <div style={{ flex: 1, overflowY: 'auto', padding: '10px 10px' }}>
+              {TABS.map(t => (
+                <button key={t.id} onClick={() => { setTab(t.id); setMenuOpen(false) }}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', gap: '12px', padding: '13px 14px', marginBottom: '2px', background: tab === t.id ? 'rgba(15,110,86,0.35)' : 'none', border: 'none', borderLeft: tab === t.id ? `3px solid ${TEAL}` : '3px solid transparent', borderRadius: '10px', color: tab === t.id ? 'white' : 'rgba(255,255,255,0.65)', fontWeight: tab === t.id ? 600 : 400, fontSize: '14px', cursor: 'pointer', textAlign: 'left' }}>
+                  <span style={{ fontSize: '17px' }}>{t.icon}</span>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+            <div style={{ padding: '12px 14px', borderTop: '1px solid rgba(255,255,255,0.12)', fontSize: '10px', color: 'rgba(255,255,255,0.4)' }}>
+              Windfall Community Deals
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Page content */}
-      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: '24px' }}>
+      <div style={{ maxWidth: '1100px', margin: '0 auto', padding: isMobile ? '14px 12px' : '24px' }}>
         {loading ? (
           <div style={{ textAlign: 'center', padding: '80px', color: '#94A3B8' }}>
             <div style={{ fontSize: '40px', marginBottom: '16px' }}>⏳</div>
