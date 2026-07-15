@@ -34,6 +34,7 @@ const updateSchema = z.object({
   city:                  z.string().nullish().transform(v => v || null),
   zipCode:               z.string().nullish().transform(v => v || null),
   groupType:             z.enum(['PRIVATE','PUBLIC']).default('PRIVATE'),
+  publicAdvert:          z.string().max(600).optional().nullable(),
 })
 
 // ── GET ───────────────────────────────────────────────────────
@@ -76,6 +77,7 @@ export async function GET(req: NextRequest) {
         COALESCE(g.city, '')           as city,
         COALESCE(g."zipCode", '')      as "zipCode",
         COALESCE(g."groupType", 'PRIVATE') as "groupType",
+        COALESCE(g."publicAdvert", '')     as "publicAdvert",
         u."fullName" as "adminName", u.email as "adminEmail",
         (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id) as "memberCount",
         (SELECT COUNT(*) FROM "Loan" WHERE "groupId" = g.id) as "loanCount"
@@ -112,6 +114,7 @@ export async function GET(req: NextRequest) {
       city:                  g.city         || '',
       zipCode:               g.zipCode      || '',
       groupType:             g.groupType    || 'PRIVATE',
+      publicAdvert:          g.publicAdvert || '',
       adminName:             g.adminName,
       adminEmail:            g.adminEmail,
       adminUserId:           g.adminUserId,
@@ -198,10 +201,10 @@ export async function POST(req: NextRequest) {
     }
 
     // Set extra columns via raw SQL (not in Prisma schema)
-    if (body.branding || body.treasurerId || body.secretaryId || body.city || body.zipCode || body.groupType) {
+    if (body.branding || body.treasurerId || body.secretaryId || body.city || body.zipCode || body.groupType || body.publicAdvert) {
       await exec(
-        `UPDATE "Group" SET branding=$1,"treasurerId"=$2,"secretaryId"=$3,city=$4,"zipCode"=$5,"groupType"=$6 WHERE id=$7`,
-        [body.branding||null, body.treasurerId||null, body.secretaryId||null, body.city||null, body.zipCode||null, body.groupType||'PRIVATE', group.id]
+        `UPDATE "Group" SET branding=$1,"treasurerId"=$2,"secretaryId"=$3,city=$4,"zipCode"=$5,"groupType"=$6,"publicAdvert"=$7 WHERE id=$8`,
+        [body.branding||null, body.treasurerId||null, body.secretaryId||null, body.city||null, body.zipCode||null, body.groupType||'PRIVATE', body.publicAdvert||null, group.id]
       )
     }
 
@@ -260,9 +263,10 @@ export async function PUT(req: NextRequest) {
         city                  = $16,
         "zipCode"             = $17,
         "groupType"           = $18,
-        status                = COALESCE($19::"GroupStatus", status),
+        "publicAdvert"        = $19,
+        status                = COALESCE($20::"GroupStatus", status),
         "updatedAt"           = NOW()
-      WHERE id = $20
+      WHERE id = $21
     `, [
       data.name,
       data.description,
@@ -282,6 +286,7 @@ export async function PUT(req: NextRequest) {
       data.city           || null,
       data.zipCode        || null,
       data.groupType      || 'PRIVATE',
+      data.publicAdvert   || null,
       data.status         || null,
       data.id,
     ])

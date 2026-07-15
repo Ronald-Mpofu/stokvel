@@ -54,6 +54,7 @@ const EMPTY_FORM = {
   payoutStrategy: 'SENIORITY', country: '', region: '', branding: '',
   city: '', zipCode: '', treasurerId: '', secretaryId: '',
   groupType: 'PRIVATE' as 'PRIVATE'|'PUBLIC',
+  publicAdvert: '',
 }
 
 // ── Helpers ───────────────────────────────────────────────────
@@ -408,6 +409,7 @@ export default function GroupsPage() {
           treasurerId:         editForm.treasurerId  || null,
           secretaryId:         editForm.secretaryId  || null,
           groupType:           editForm.groupType    || 'PRIVATE',
+          publicAdvert:        editForm.publicAdvert || '',
         }),
       })
       const data = await res.json()
@@ -426,6 +428,7 @@ export default function GroupsPage() {
           branding:            editForm.branding || '',
           currency:            editLocation.currency || editForm.currency,
           groupType:           editForm.groupType || 'PRIVATE',
+          publicAdvert:        editForm.publicAdvert || '',
         }
         setSelectedGroup((prev: any) => ({ ...prev, ...saved }))
         // Also refresh groups list in background
@@ -612,6 +615,7 @@ export default function GroupsPage() {
           branding: group.branding||'', city: group.city||'', zipCode: group.zipCode||'',
           treasurerId: group.treasurerId||'', secretaryId: group.secretaryId||'',
           groupType: group.groupType||'PRIVATE',
+          publicAdvert: group.publicAdvert||'',
         }),
       })
       const data = await res.json()
@@ -704,6 +708,7 @@ export default function GroupsPage() {
           treasurerId:         null,
           secretaryId:         null,
           groupType:           form.groupType || 'PRIVATE',
+          publicAdvert:        form.publicAdvert || '',
         }),
       })
       const data = await res.json()
@@ -1003,6 +1008,15 @@ export default function GroupsPage() {
                             value={form.groupType as 'PRIVATE'|'PUBLIC'}
                             onChange={v => setForm(f => ({...f, groupType: v}))}
                           />
+                          {form.groupType === 'PUBLIC' && (
+                            <div style={{ marginTop:'10px' }}>
+                              <label style={LABEL}>Public Advert <span style={{ color:'#94A3B8', fontWeight:400 }}>(shown to pool members on Discover Groups)</span></label>
+                              <textarea value={form.publicAdvert} onChange={e => setForm(f => ({...f, publicAdvert: e.target.value}))} maxLength={600} rows={3}
+                                placeholder="e.g. We are interested in members of the public living in Zimbabwe around the Bulawayo area. Interested members should be able to provide 2 referees."
+                                style={{ ...INPUT, resize:'vertical' as any, fontFamily:'inherit', lineHeight:1.5 }} />
+                              <div style={{ fontSize:'10px', color:'#94A3B8', textAlign:'right' }}>{(form.publicAdvert||'').length}/600</div>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}
@@ -1836,6 +1850,15 @@ export default function GroupsPage() {
                                     value={ef.groupType as 'PRIVATE'|'PUBLIC'}
                                     onChange={v => setEditForm((p: any) => ({...p, groupType: v}))}
                                   />
+                                  {ef.groupType === 'PUBLIC' && (
+                                    <div style={{ marginTop:'10px' }}>
+                                      <label style={LABEL}>Public Advert <span style={{ color:'#94A3B8', fontWeight:400 }}>(shown on Discover Groups)</span></label>
+                                      <textarea value={ef.publicAdvert||''} onChange={e=>setEditForm((p: any) => ({...p, publicAdvert: e.target.value}))} maxLength={600} rows={3}
+                                        placeholder="e.g. We are interested in members of the public living in Zimbabwe around the Bulawayo area. Interested members should be able to provide 2 referees."
+                                        style={{...INPUT, resize:'vertical' as any, fontFamily:'inherit', lineHeight:1.5}}/>
+                                      <div style={{ fontSize:'10px', color:'#94A3B8', textAlign:'right' }}>{(ef.publicAdvert||'').length}/600</div>
+                                    </div>
+                                  )}
                                 </div>
                               </div>
                             )}

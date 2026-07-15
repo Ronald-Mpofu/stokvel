@@ -220,6 +220,11 @@ function DiscoverTab({ showToast }: any) {
               </div>
               <span style={{ fontSize: '10px', fontWeight: '700', padding: '3px 8px', borderRadius: '6px', background: '#DBEAFE', color: '#1E40AF', whiteSpace: 'nowrap', flexShrink: 0 }}>🌐 Public</span>
             </div>
+            {g.publicAdvert && (
+              <div style={{ background: '#F0FDF4', border: '1px solid #BBF7D0', borderRadius: '9px', padding: '10px 12px', fontSize: '12px', color: '#166534', lineHeight: 1.55 }}>
+                📣 {g.publicAdvert}
+              </div>
+            )}
             {g.description && <p style={{ fontSize: '12px', color: '#64748B', margin: 0, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any, overflow: 'hidden' }}>{g.description}</p>}
             <div style={{ display: 'flex', gap: '14px', fontSize: '12px', color: '#475569' }}>
               <span><strong style={{ color: TEAL }}>{sym}{fmt(g.contributionAmount)}</strong> / {(g.contributionFrequency || 'MONTHLY').toLowerCase()}</span>

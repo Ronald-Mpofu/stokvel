@@ -54,7 +54,8 @@ export async function GET(req: NextRequest) {
          g.id, g.name, g.description, g.country, g.currency,
          g."contributionAmount", g."contributionFrequency", g."maxMembers",
          COALESCE(g.city, '')     AS city,
-         COALESCE(g.branding, '') AS branding,
+         COALESCE(g.branding, '')     AS branding,
+         COALESCE(g."publicAdvert", '') AS "publicAdvert",
          (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id AND status = 'ACTIVE')::int AS "memberCount",
          my.status AS "myStatus"
        FROM "Group" g
@@ -76,6 +77,7 @@ export async function GET(req: NextRequest) {
         contributionAmount:    Number(g.contributionAmount),
         contributionFrequency: g.contributionFrequency,
         branding:              g.branding,
+        publicAdvert:          g.publicAdvert || '',
         memberCount:           Number(g.memberCount),
         maxMembers:            g.maxMembers,
         isFull:                Number(g.memberCount) >= g.maxMembers,
