@@ -170,12 +170,153 @@ function PayModal({ item, userId, onClose, onPaid, onError }: any) {
   )
 }
 
+// ── Join Questionnaire — completed when requesting to join ────
+function JoinQuestionnaireModal({ group, user, onClose, onSubmitted, showToast }: any) {
+  const [f, setF] = useState<any>({
+    fullName: user?.fullName || '', preferredName: '', nationality: '',
+    countryOfResidence: user?.country || '', residentialAddress: '',
+    mobileNumber: user?.phone || '', emailAddress: user?.email || '',
+    occupation: '', employer: '',
+    whyJoin: '', belongedBefore: 'NO', prevGroupName: '', whyLeft: '', membershipDuration: '',
+    everDefaulted: 'NO', everExpelled: 'NO',
+    canContribute: 'YES', paymentMethod: 'MOBILE_MONEY', paymentDetail: '', payoutMethod: 'MOBILE_MONEY',
+    understandPenalties: false, agreeConstitution: false,
+  })
+  const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
+  const set = (k: string) => (v: any) => setF((p: any) => ({ ...p, [k]: v }))
+
+  const IN: any = { width: '100%', padding: '9px 11px', border: '1.5px solid #E2E8F0', borderRadius: '8px', fontSize: '13px', outline: 'none', boxSizing: 'border-box' }
+  const LB: any = { display: 'block', fontSize: '11px', fontWeight: 600, color: '#374151', marginBottom: '4px' }
+  const SEC: any = { fontSize: '12px', fontWeight: 700, color: TEAL, textTransform: 'uppercase', letterSpacing: '0.04em', margin: '18px 0 10px', paddingBottom: '6px', borderBottom: '1px solid #E2E8F0' }
+
+  function YN({ k }: { k: string }) {
+    return (
+      <div style={{ display: 'flex', gap: '6px' }}>
+        {['YES', 'NO'].map(v => (
+          <button key={v} type="button" onClick={() => set(k)(v)}
+            style={{ flex: 1, padding: '8px', borderRadius: '8px', fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+              border: `2px solid ${f[k] === v ? TEAL : '#E2E8F0'}`, background: f[k] === v ? '#F0FDF4' : 'white', color: NAVY }}>
+            {v === 'YES' ? 'Yes' : 'No'}
+          </button>
+        ))}
+      </div>
+    )
+  }
+
+  async function submit() {
+    setErr('')
+    if (!f.understandPenalties) return setErr('Please acknowledge the late-payment penalties.')
+    if (!f.agreeConstitution)   return setErr('Please agree to the group constitution.')
+    setSaving(true)
+    try {
+      const res = await fetch('/api/discover', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'REQUEST', groupId: group.id, application: f }),
+      })
+      const d = await res.json()
+      if (d.success) { showToast(d.message); onSubmitted() }
+      else setErr(d.error || 'Request failed')
+    } catch { setErr('Network error. Please try again.') }
+    finally { setSaving(false) }
+  }
+
+  const sym = group.currency === 'USD' ? '$' : group.currency + ' '
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000, padding: '16px' }}>
+      <div style={{ background: 'white', borderRadius: '16px', width: '100%', maxWidth: '560px', maxHeight: '92vh', display: 'flex', flexDirection: 'column', boxShadow: '0 25px 50px rgba(0,0,0,0.25)' }}>
+        <div style={{ padding: '18px 24px 12px', borderBottom: '1px solid #E2E8F0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+          <div>
+            <h3 style={{ fontSize: '16px', fontWeight: 700, color: NAVY, margin: 0 }}>Apply to join {group.name}</h3>
+            <p style={{ fontSize: '11px', color: '#94A3B8', margin: '2px 0 0' }}>The group admin reviews your answers before admitting you.</p>
+          </div>
+          <button onClick={onClose} style={{ background: '#F1F5F9', border: 'none', borderRadius: '8px', width: '30px', height: '30px', cursor: 'pointer', fontSize: '17px', color: '#64748B', flexShrink: 0 }}>×</button>
+        </div>
+
+        <div style={{ padding: '6px 24px 12px', overflowY: 'auto' }}>
+          <div style={SEC}>1 · About you</div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+            <div><label style={LB}>Full Name *</label><input style={IN} value={f.fullName} onChange={e => set('fullName')(e.target.value)} /></div>
+            <div><label style={LB}>Preferred Name</label><input style={IN} value={f.preferredName} onChange={e => set('preferredName')(e.target.value)} /></div>
+            <div><label style={LB}>Nationality *</label><input style={IN} value={f.nationality} onChange={e => set('nationality')(e.target.value)} placeholder="e.g. Zimbabwean" /></div>
+            <div><label style={LB}>Country of Residence *</label><input style={IN} value={f.countryOfResidence} onChange={e => set('countryOfResidence')(e.target.value)} /></div>
+            <div style={{ gridColumn: '1/-1' }}><label style={LB}>Residential Address *</label><input style={IN} value={f.residentialAddress} onChange={e => set('residentialAddress')(e.target.value)} /></div>
+            <div><label style={LB}>Mobile Number *</label><input style={IN} value={f.mobileNumber} onChange={e => set('mobileNumber')(e.target.value)} /></div>
+            <div><label style={LB}>Email Address *</label><input style={IN} value={f.emailAddress} onChange={e => set('emailAddress')(e.target.value)} /></div>
+            <div><label style={LB}>Occupation *</label><input style={IN} value={f.occupation} onChange={e => set('occupation')(e.target.value)} /></div>
+            <div><label style={LB}>Employer / Business Name</label><input style={IN} value={f.employer} onChange={e => set('employer')(e.target.value)} /></div>
+          </div>
+
+          <div style={SEC}>2 · Membership suitability</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div><label style={LB}>Why do you want to join this stokvel? *</label>
+              <textarea style={{ ...IN, resize: 'vertical', fontFamily: 'inherit' }} rows={3} value={f.whyJoin} onChange={e => set('whyJoin')(e.target.value)} /></div>
+            <div><label style={LB}>Have you belonged to a savings group before?</label><YN k="belongedBefore" /></div>
+            {f.belongedBefore === 'YES' && (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', background: '#F8FAFC', borderRadius: '10px', padding: '12px' }}>
+                <div><label style={LB}>Which one?</label><input style={IN} value={f.prevGroupName} onChange={e => set('prevGroupName')(e.target.value)} /></div>
+                <div><label style={LB}>How long were you a member?</label><input style={IN} value={f.membershipDuration} onChange={e => set('membershipDuration')(e.target.value)} placeholder="e.g. 2 years" /></div>
+                <div style={{ gridColumn: '1/-1' }}><label style={LB}>Why did you leave?</label><input style={IN} value={f.whyLeft} onChange={e => set('whyLeft')(e.target.value)} /></div>
+              </div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div><label style={LB}>Ever defaulted on contributions?</label><YN k="everDefaulted" /></div>
+              <div><label style={LB}>Ever been expelled from a savings group?</label><YN k="everExpelled" /></div>
+            </div>
+          </div>
+
+          <div style={SEC}>3 · Financial commitment</div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+            <div><label style={LB}>Are you able to contribute {sym}{fmt(group.contributionAmount)} every {(group.contributionFrequency || 'MONTHLY').toLowerCase()}?</label><YN k="canContribute" /></div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+              <div><label style={LB}>Preferred payment method</label>
+                <select style={IN} value={f.paymentMethod} onChange={e => set('paymentMethod')(e.target.value)}>
+                  <option value="MOBILE_MONEY">Mobile Money Account</option>
+                  <option value="BANK_ACCOUNT">Bank Account</option>
+                </select></div>
+              <div><label style={LB}>Preferred payout method</label>
+                <select style={IN} value={f.payoutMethod} onChange={e => set('payoutMethod')(e.target.value)}>
+                  <option value="MOBILE_MONEY">Mobile Money Account</option>
+                  <option value="BANK_ACCOUNT">Bank Account</option>
+                </select></div>
+            </div>
+            <div><label style={LB}>Account details ({f.paymentMethod === 'BANK_ACCOUNT' ? 'bank & account number' : 'mobile money number'})</label>
+              <input style={IN} value={f.paymentDetail} onChange={e => set('paymentDetail')(e.target.value)} /></div>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' }} onClick={() => set('understandPenalties')(!f.understandPenalties)}>
+              <div style={{ width: '20px', height: '20px', borderRadius: '6px', border: `2px solid ${f.understandPenalties ? TEAL : '#CBD5E1'}`, background: f.understandPenalties ? TEAL : 'white', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {f.understandPenalties && <span style={{ color: 'white', fontSize: '12px', fontWeight: 700 }}>✓</span>}
+              </div>
+              <span style={{ fontSize: '12px', color: '#374151', lineHeight: 1.5 }}>I understand that late contributions attract penalties. *</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', cursor: 'pointer' }} onClick={() => set('agreeConstitution')(!f.agreeConstitution)}>
+              <div style={{ width: '20px', height: '20px', borderRadius: '6px', border: `2px solid ${f.agreeConstitution ? TEAL : '#CBD5E1'}`, background: f.agreeConstitution ? TEAL : 'white', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                {f.agreeConstitution && <span style={{ color: 'white', fontSize: '12px', fontWeight: 700 }}>✓</span>}
+              </div>
+              <span style={{ fontSize: '12px', color: '#374151', lineHeight: 1.5 }}>I agree to abide by the group constitution. *</span>
+            </div>
+          </div>
+
+          {err && <div style={{ background: '#FEF2F2', border: '1px solid #FECACA', borderRadius: '9px', padding: '10px 12px', color: '#991B1B', fontSize: '12px', marginTop: '12px' }}>❌ {err}</div>}
+        </div>
+
+        <div style={{ padding: '14px 24px', borderTop: '1px solid #E2E8F0', display: 'flex', gap: '10px' }}>
+          <button onClick={onClose} style={{ flex: 1, padding: '11px', background: '#F1F5F9', border: 'none', borderRadius: '9px', fontSize: '13px', cursor: 'pointer', color: '#475569', fontWeight: 500 }}>Cancel</button>
+          <button onClick={submit} disabled={saving}
+            style={{ flex: 2, padding: '11px', background: saving ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '9px', fontSize: '14px', fontWeight: 700, cursor: saving ? 'not-allowed' : 'pointer' }}>
+            {saving ? '⏳ Submitting…' : '🙋 Submit Application'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── Discover Tab — browse Public groups & request to join ─────
 // This is the service the Members Pool joining fee pays for.
-function DiscoverTab({ showToast }: any) {
+function DiscoverTab({ showToast, user }: any) {
   const [groups, setGroups]     = useState<any[]>([])
   const [loading, setLoading]   = useState(true)
-  const [requestingId, setRequestingId] = useState<string | null>(null)
+  const [applyGroup, setApplyGroup] = useState<any>(null)
 
   const fetchDiscover = useCallback(() => {
     setLoading(true)
@@ -188,20 +329,6 @@ function DiscoverTab({ showToast }: any) {
 
   useEffect(() => { fetchDiscover() }, [fetchDiscover])
 
-  async function requestJoin(g: any) {
-    if (requestingId) return
-    setRequestingId(g.id)
-    try {
-      const res = await fetch('/api/discover', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'REQUEST', groupId: g.id }),
-      })
-      const d = await res.json()
-      if (d.success) { showToast(d.message); fetchDiscover() }
-      else showToast(d.error || 'Request failed', 'error')
-    } catch { showToast('Network error', 'error') }
-    finally { setRequestingId(null) }
-  }
 
   if (loading) return <EmptyState icon="⏳" text="Finding public groups..." />
   if (!groups.length) return <EmptyState icon="🔎" text="No public groups are open right now — check back soon" />
@@ -209,7 +336,6 @@ function DiscoverTab({ showToast }: any) {
   return (
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))', gap: '14px' }}>
       {groups.map((g: any) => {
-        const busy = requestingId === g.id
         const sym  = g.currency === 'USD' ? '$' : g.currency + ' '
         return (
           <div key={g.id} style={{ background: 'white', borderRadius: '14px', border: '1px solid #E2E8F0', padding: '18px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
@@ -236,14 +362,23 @@ function DiscoverTab({ showToast }: any) {
               ? <div style={{ textAlign: 'center', padding: '9px', background: '#FEF9C3', borderRadius: '9px', fontSize: '12px', fontWeight: '600', color: '#854D0E' }}>⏳ Request pending review</div>
               : g.isFull
               ? <div style={{ textAlign: 'center', padding: '9px', background: '#F1F5F9', borderRadius: '9px', fontSize: '12px', fontWeight: '600', color: '#94A3B8' }}>Group is full</div>
-              : <button onClick={() => requestJoin(g)} disabled={busy}
-                  style={{ padding: '10px', background: busy ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '9px', fontSize: '13px', fontWeight: '700', cursor: busy ? 'wait' : 'pointer' }}>
-                  {busy ? '⏳ Sending…' : '🙋 Request to Join'}
+              : <button onClick={() => setApplyGroup(g)}
+                  style={{ padding: '10px', background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', border: 'none', borderRadius: '9px', fontSize: '13px', fontWeight: '700', cursor: 'pointer' }}>
+                  🙋 Request to Join
                 </button>
             }
           </div>
         )
       })}
+      {applyGroup && (
+        <JoinQuestionnaireModal
+          group={applyGroup}
+          user={user}
+          showToast={showToast}
+          onClose={() => setApplyGroup(null)}
+          onSubmitted={() => { setApplyGroup(null); fetchDiscover() }}
+        />
+      )}
     </div>
   )
 }
@@ -977,7 +1112,7 @@ export default function MemberPortal() {
         ) : (
           <>
             {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} />}
-            {tab === 'discover'      && <DiscoverTab showToast={showToast} />}
+            {tab === 'discover'      && <DiscoverTab showToast={showToast} user={data?.user} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}
             {tab === 'assets'        && <AssetsTab data={data} onViewCert={setCertEntry} />}
             {tab === 'documents'     && <DocumentsTab userId={userId} />}

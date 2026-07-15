@@ -375,6 +375,7 @@ export default function GroupsPage() {
   const [joinRequests, setJoinRequests]       = useState<any[]>([])
   const [requestsLoading, setRequestsLoading] = useState(false)
   const [requestActionId, setRequestActionId] = useState<string | null>(null)
+  const [expandedRequestId, setExpandedRequestId] = useState<string | null>(null)
 
   // Lazy-load the full currency list only when the Settings tab first opens
   useEffect(() => {
@@ -1497,24 +1498,77 @@ export default function GroupsPage() {
                   <div style={{ display:'flex', flexDirection:'column' }}>
                     {joinRequests.map((r: any) => {
                       const busy = requestActionId === r.id
+                      const open = expandedRequestId === r.id
+                      const app  = r.application || null
+                      const QA_SECTIONS: [string, [string, string][]][] = app ? [
+                        ['About the applicant', [
+                          ['Full Name', app.fullName], ['Preferred Name', app.preferredName],
+                          ['Nationality', app.nationality], ['Country of Residence', app.countryOfResidence],
+                          ['Residential Address', app.residentialAddress], ['Mobile', app.mobileNumber],
+                          ['Email', app.emailAddress], ['Occupation', app.occupation], ['Employer / Business', app.employer],
+                        ]],
+                        ['Membership suitability', [
+                          ['Why join this stokvel?', app.whyJoin],
+                          ['Belonged to a savings group before?', app.belongedBefore],
+                          ['Which one?', app.prevGroupName], ['How long a member?', app.membershipDuration],
+                          ['Why did they leave?', app.whyLeft],
+                          ['Ever defaulted on contributions?', app.everDefaulted],
+                          ['Ever expelled from a savings group?', app.everExpelled],
+                        ]],
+                        ['Financial commitment', [
+                          ['Able to contribute the required amount?', app.canContribute],
+                          ['Preferred payment method', (app.paymentMethod||'').replace('_',' ')],
+                          ['Account details', app.paymentDetail],
+                          ['Preferred payout method', (app.payoutMethod||'').replace('_',' ')],
+                          ['Understands late-payment penalties', app.understandPenalties ? 'YES' : 'NO'],
+                          ['Agrees to the constitution', app.agreeConstitution ? 'YES' : 'NO'],
+                        ]],
+                      ] : []
                       return (
-                        <div key={r.id} style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 16px', borderBottom:'1px solid #F1F5F9' }}>
-                          <div style={{ flex:1, minWidth:0 }}>
-                            <div style={{ fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-                              {r.fullName}
+                        <div key={r.id} style={{ borderBottom:'1px solid #F1F5F9' }}>
+                          <div style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 16px' }}>
+                            <div style={{ flex:1, minWidth:0 }}>
+                              <div style={{ fontSize:'13px', fontWeight:'600', color:NAVY, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                                {r.fullName}
+                              </div>
+                              <div style={{ fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                                {r.email || r.phone} · requested {new Date(r.requestedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}
+                              </div>
                             </div>
-                            <div style={{ fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
-                              {r.email || r.phone} · requested {new Date(r.requestedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short'})}
-                            </div>
+                            {app && (
+                              <button onClick={() => setExpandedRequestId(open ? null : r.id)}
+                                style={{ padding:'6px 12px', background:'#EFF6FF', color:'#1E40AF', border:'1px solid #BFDBFE', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor:'pointer', whiteSpace:'nowrap' }}>
+                                {open ? '▲ Hide application' : '📋 View application'}
+                              </button>
+                            )}
+                            <button onClick={() => handleJoinRequest(r.id, 'APPROVE', g.id)} disabled={busy}
+                              style={{ padding:'6px 12px', background:TEAL, color:'white', border:'none', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                              {busy ? '…' : '✓ Admit'}
+                            </button>
+                            <button onClick={() => handleJoinRequest(r.id, 'DECLINE', g.id)} disabled={busy}
+                              style={{ padding:'6px 12px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
+                              Decline
+                            </button>
                           </div>
-                          <button onClick={() => handleJoinRequest(r.id, 'APPROVE', g.id)} disabled={busy}
-                            style={{ padding:'6px 12px', background:TEAL, color:'white', border:'none', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
-                            {busy ? '…' : '✓ Admit'}
-                          </button>
-                          <button onClick={() => handleJoinRequest(r.id, 'DECLINE', g.id)} disabled={busy}
-                            style={{ padding:'6px 12px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor: busy ? 'wait' : 'pointer', opacity: busy ? 0.6 : 1, whiteSpace:'nowrap' }}>
-                            Decline
-                          </button>
+                          {open && app && (
+                            <div style={{ padding:'0 16px 14px' }}>
+                              {QA_SECTIONS.map(([secTitle, rows]) => (
+                                <div key={secTitle} style={{ marginBottom:'10px' }}>
+                                  <div style={{ fontSize:'10px', fontWeight:'700', color:TEAL, textTransform:'uppercase', letterSpacing:'0.04em', margin:'8px 0 6px' }}>{secTitle}</div>
+                                  <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(240px, 1fr))', gap:'6px' }}>
+                                    {rows.filter(([,v]) => v !== '' && v != null).map(([q, v]) => (
+                                      <div key={q} style={{ background:'#F8FAFC', borderRadius:'8px', padding:'8px 10px' }}>
+                                        <div style={{ fontSize:'10px', color:'#94A3B8', marginBottom:'2px' }}>{q}</div>
+                                        <div style={{ fontSize:'12px', color:NAVY, fontWeight:500, wordBreak:'break-word' }}>
+                                          {v === 'YES' ? '✅ Yes' : v === 'NO' ? '❌ No' : String(v)}
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
                         </div>
                       )
                     })}

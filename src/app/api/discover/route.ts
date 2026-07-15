@@ -5,11 +5,43 @@
 // Raw SQL with explicit enum casts throughout, so this works even before
 // `prisma generate` picks up the new PENDING enum value.
 import { NextRequest, NextResponse } from 'next/server'
+import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
 import { getSessionFromRequest, unauthorized, requireGroupManager } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
+
+// Questionnaire completed when requesting to join a Public group.
+// Identity + suitability + financial commitment (BR: admin verifies before admitting).
+const yesNo = z.enum(['YES', 'NO'])
+const applicationSchema = z.object({
+  // Identity
+  fullName:           z.string().min(2, 'Full name is required'),
+  preferredName:      z.string().optional().default(''),
+  nationality:        z.string().min(2, 'Nationality is required'),
+  countryOfResidence: z.string().min(2, 'Country of residence is required'),
+  residentialAddress: z.string().min(5, 'Residential address is required'),
+  mobileNumber:       z.string().min(6, 'Mobile number is required'),
+  emailAddress:       z.string().email('Valid email is required'),
+  occupation:         z.string().min(2, 'Occupation is required'),
+  employer:           z.string().optional().default(''),
+  // Suitability
+  whyJoin:            z.string().min(10, 'Tell the group why you want to join'),
+  belongedBefore:     yesNo,
+  prevGroupName:      z.string().optional().default(''),
+  whyLeft:            z.string().optional().default(''),
+  membershipDuration: z.string().optional().default(''),
+  everDefaulted:      yesNo,
+  everExpelled:       yesNo,
+  // Financial commitment
+  canContribute:      yesNo,
+  paymentMethod:      z.enum(['BANK_ACCOUNT', 'MOBILE_MONEY']),
+  paymentDetail:      z.string().optional().default(''),
+  payoutMethod:       z.enum(['BANK_ACCOUNT', 'MOBILE_MONEY']),
+  understandPenalties: z.literal(true, { errorMap: () => ({ message: 'You must acknowledge the late-payment penalties' }) }),
+  agreeConstitution:   z.literal(true, { errorMap: () => ({ message: 'You must agree to the group constitution' }) }),
+})
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -34,7 +66,7 @@ export async function GET(req: NextRequest) {
       const guardErr = await requireGroupManager(req, pendingFor)
       if (guardErr) return guardErr
       const rows = await sql(
-        `SELECT gm.id, gm."userId", gm."createdAt", u."fullName", u.email, u.phone, u.tier
+        `SELECT gm.id, gm."userId", gm."createdAt", gm."applicationData", u."fullName", u.email, u.phone, u.tier
          FROM "GroupMember" gm
          JOIN "User" u ON u.id = gm."userId"
          WHERE gm."groupId" = $1 AND gm.status = 'PENDING'
@@ -44,6 +76,7 @@ export async function GET(req: NextRequest) {
         data: rows.map(r => ({
           id: r.id, userId: r.userId, fullName: r.fullName,
           email: r.email, phone: r.phone, tier: r.tier, requestedAt: r.createdAt,
+          application: r.applicationData || null,
         })),
       })
     }
@@ -115,6 +148,15 @@ export async function POST(req: NextRequest) {
       if (grp.status !== 'ACTIVE')    return NextResponse.json({ success: false, error: 'This group is not currently active' }, { status: 409 })
       if (Number(grp.memberCount) >= grp.maxMembers) return NextResponse.json({ success: false, error: 'This group is full' }, { status: 409 })
 
+      // Validate the questionnaire — required before the request is accepted
+      const parsedApp = applicationSchema.safeParse(body.application || {})
+      if (!parsedApp.success) {
+        return NextResponse.json({
+          success: false,
+          error: parsedApp.error.errors.map(e => e.message).join('; '),
+        }, { status: 400 })
+      }
+
       const existing = await sql(
         `SELECT id, status FROM "GroupMember" WHERE "groupId" = $1 AND "userId" = $2`, [groupId, session.id])
       if (existing.length) {
@@ -125,9 +167,9 @@ export async function POST(req: NextRequest) {
       }
 
       await exec(
-        `INSERT INTO "GroupMember" (id, "groupId", "userId", role, status, "joinedAt", "createdAt", "updatedAt")
-         VALUES ($1, $2, $3, 'MEMBER'::"UserRole", 'PENDING'::"MemberStatus", NOW(), NOW(), NOW())`,
-        [randomUUID(), groupId, session.id])
+        `INSERT INTO "GroupMember" (id, "groupId", "userId", role, status, "applicationData", "joinedAt", "createdAt", "updatedAt")
+         VALUES ($1, $2, $3, 'MEMBER'::"UserRole", 'PENDING'::"MemberStatus", $4::jsonb, NOW(), NOW(), NOW())`,
+        [randomUUID(), groupId, session.id, JSON.stringify(parsedApp.data)])
 
       return NextResponse.json({ success: true, message: `Request sent! The admin of "${grp.name}" will review it.` })
     }
