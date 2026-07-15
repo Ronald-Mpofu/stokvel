@@ -35,7 +35,8 @@ enum MemberStatus {
   EXITED
   BLACKLISTED
   PENDING
- }
+}
+
 
 enum KycStatus {
   PENDING
@@ -49,14 +50,6 @@ enum MemberTier {
   SILVER
   GOLD
   PLATINUM
-}
-
-enum MemberStatus {
-  ACTIVE
-  SUSPENDED
-  DEFAULTED
-  EXITED
-  BLACKLISTED
 }
 
 enum GroupStatus {
