@@ -16,7 +16,11 @@ const JWT_SECRET = new TextEncoder().encode(
 const PUBLIC_ROUTES   = ['/', '/login', '/register', '/setup', '/invite', '/guarantor']
 const ADMIN_ROUTES    = ['/dashboard']
 const MEMBER_ROUTES   = ['/portal']
-const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout', '/api/auth/setup-password']
+// NOTE: /api/payments/webhook is listed individually — NOT the whole
+// /api/payments namespace. Stripe calls it server-to-server with no
+// cookie, so it must be public; it authenticates itself by verifying
+// the Stripe signature header instead.
+const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout', '/api/auth/setup-password', '/api/payments/webhook']
 
 // ── Helpers ───────────────────────────────────────────────────
 function isPublic(pathname: string): boolean {
@@ -128,11 +132,15 @@ export async function middleware(req: NextRequest) {
     // Joining fee gate for APIs — unpaid users may only reach auth
     // and joining-fee endpoints. Prevents bypassing the page gate by
     // calling APIs directly.
+    // /api/payments/ MUST be exempt: an unpaid user calling checkout to
+    // pay their joining fee would otherwise be blocked by the very gate
+    // they are trying to clear. These routes enforce their own auth.
     if (
       feePaid === false &&
       !FEE_EXEMPT_ROLES.includes(role) &&
       !pathname.startsWith('/api/auth/') &&
-      !pathname.startsWith('/api/joining-fee')
+      !pathname.startsWith('/api/joining-fee') &&
+      !pathname.startsWith('/api/payments/')
     ) {
       return NextResponse.json(
         { success: false, error: 'Joining fee payment required before using the platform.' },
