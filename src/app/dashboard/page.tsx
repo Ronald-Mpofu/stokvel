@@ -66,7 +66,20 @@ export default function Dashboard() {
   }, [])
 
   // Close mobile menu when navigating
+  // Nav ids that are REAL routes, not dashboard tabs. Clicking them
+  // navigates instead of switching tab state — the tab switch would
+  // land on the ComingSoon placeholder even though the page exists.
+  const ROUTED_NAV: Record<string, string> = {
+    settings: '/dashboard/settings',
+  }
+
   function navigate(id: string) {
+    const route = ROUTED_NAV[id]
+    if (route) {
+      setMobileMenuOpen(false)
+      router.push(route)
+      return
+    }
     setActive(id)
     setMobileMenuOpen(false)
   }
@@ -361,7 +374,7 @@ export default function Dashboard() {
           {NAV_ITEMS.map(item => (
             <button
               key={item.id}
-              onClick={() => setActive(item.id)}
+              onClick={() => navigate(item.id)}
               style={{
                 width: '100%', display: 'flex', alignItems: 'center', gap: '10px',
                 padding: '10px 16px',
