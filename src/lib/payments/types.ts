@@ -45,6 +45,9 @@ export interface CreateCheckoutParams {
   price: ResolvedPrice;
   successUrl: string;
   cancelUrl: string;
+  /** Copied onto both the session and the subscription so webhooks —
+   *  including renewals years later — can trace back to our records. */
+  metadata?: Record<string, string>;
 }
 
 export interface CheckoutResult {

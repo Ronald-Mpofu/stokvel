@@ -2,11 +2,15 @@
 // GET  ?type=config                 → all active countries + fees + methods (single call, cache 5 min)
 // GET  ?userId=xxx                  → user's current invoice + latest attempt status
 // POST { userId, countryCode, provider, phone? } → create/reuse invoice, create attempt, call provider
+//
+// CARD is now a real Stripe path: it returns data.checkoutUrl for the
+// frontend to redirect to. Mobile money remains stubbed.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma/client';
+import { stripeProvider } from '@/lib/payments/stripe/adapter';
 
 export const dynamic = 'force-dynamic';
 
@@ -92,15 +96,23 @@ export async function POST(req: NextRequest) {
     }
     const { userId, countryCode, provider, phone } = parsed.data;
 
-    // Already paid?
+    // Already paid AND still current? Expiry matters now — a lapsed
+    // member must be able to pay again, so a bare joiningFeePaid check
+    // would wrongly block every renewal.
     const paidCheck: any[] = await prisma.$queryRawUnsafe(
-      `SELECT "joiningFeePaid" FROM "User" WHERE "id" = $1`,
+      `SELECT "joiningFeePaid", "joiningFeeExpiresAt", "email"
+       FROM "User" WHERE "id" = $1`,
       userId
     );
     if (!paidCheck.length) {
       return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
     }
-    if (paidCheck[0].joiningFeePaid) {
+    const userRow = paidCheck[0];
+    const stillCurrent =
+      userRow.joiningFeePaid === true &&
+      (userRow.joiningFeeExpiresAt === null ||
+        new Date(userRow.joiningFeeExpiresAt) > new Date());
+    if (stillCurrent) {
       return NextResponse.json({ success: false, error: 'Joining fee already paid' }, { status: 409 });
     }
 
@@ -155,14 +167,23 @@ export async function POST(req: NextRequest) {
       attemptId, invoice.id, userId, provider, invoice.amount, invoice.currency
     );
 
-    // Call provider API (adapter pattern — swap stubs for real integrations)
+    // Base URL for Stripe redirects — origin header is correct across
+    // localhost, preview and production without extra env vars.
+    const origin = req.headers.get('origin') || req.nextUrl.origin;
+
+    // Call provider API (adapter pattern — CARD is live via Stripe)
     const providerResult = await initiateWithProvider({
       provider,
       attemptId,
+      invoiceId: invoice.id,
+      userId,
+      userEmail: userRow.email,
+      countryCode,
       amount: Number(invoice.amount),
       currency: invoice.currency,
       phone,
       reference: invoice.invoiceNo,
+      origin,
     });
 
     await prisma.$executeRawUnsafe(
@@ -189,6 +210,8 @@ export async function POST(req: NextRequest) {
         amount: Number(invoice.amount),
         currency: invoice.currency,
         instructions: providerResult.instructions || null,
+        // CARD only — frontend redirects here to pay.
+        checkoutUrl: providerResult.checkoutUrl || null,
       },
     });
   } catch (e: any) {
@@ -198,15 +221,19 @@ export async function POST(req: NextRequest) {
 }
 
 // ------------------------------------------------------------------
-// Provider adapters (stubs — replace bodies with real API calls)
+// Provider adapters
+//   CARD          → live (Stripe Checkout, subscription mode)
+//   mobile money  → stubs, replace bodies with real API calls
 // ------------------------------------------------------------------
 type ProviderInit = {
-  provider: string; attemptId: string; amount: number;
-  currency: string; phone?: string; reference: string;
+  provider: string; attemptId: string; invoiceId: string;
+  userId: string; userEmail: string; countryCode: string;
+  amount: number; currency: string; phone?: string;
+  reference: string; origin: string;
 };
 type ProviderResult = {
   ok: boolean; providerRef?: string; error?: string;
-  userMessage?: string; instructions?: string;
+  userMessage?: string; instructions?: string; checkoutUrl?: string;
 };
 
 async function initiateWithProvider(p: ProviderInit): Promise<ProviderResult> {
@@ -221,6 +248,7 @@ async function initiateWithProvider(p: ProviderInit): Promise<ProviderResult> {
         userMessage: 'A payment prompt has been sent to your phone. Approve it to complete payment.',
         instructions: `Approve the ${p.provider} prompt for ${p.currency} ${p.amount} on ${p.phone}.`,
       };
+
     case 'BANK_TRANSFER':
       return {
         ok: true,
@@ -228,7 +256,42 @@ async function initiateWithProvider(p: ProviderInit): Promise<ProviderResult> {
         userMessage: 'Bank transfer details generated.',
         instructions: `Transfer ${p.currency} ${p.amount} using reference ${p.reference}. Your membership activates once the payment is confirmed.`,
       };
-    case 'CARD':
+
+    case 'CARD': {
+      // Stripe Checkout in subscription mode — the annual joining fee
+      // renews automatically. providerRef is the session id (cs_...),
+      // which the webhook uses to find this attempt.
+      try {
+        const result = await stripeProvider.createSubscriptionCheckout({
+          scope: 'MEMBER_ANNUAL',
+          userId: p.userId,
+          userEmail: p.userEmail,
+          price: {
+            currency: p.currency,
+            amount: p.amount,
+            countryCode: p.countryCode,
+          },
+          successUrl: `${p.origin}/dashboard/join-fee?paid=1`,
+          cancelUrl: `${p.origin}/dashboard/join-fee?cancelled=1`,
+          metadata: {
+            attemptId: p.attemptId,
+            invoiceId: p.invoiceId,
+            invoiceNo: p.reference,
+            countryCode: p.countryCode,
+          },
+        });
+        return {
+          ok: true,
+          providerRef: result.checkoutId,
+          checkoutUrl: result.checkoutUrl,
+          userMessage: 'Redirecting to secure checkout.',
+        };
+      } catch (e: any) {
+        console.error('Stripe checkout error:', e?.message);
+        return { ok: false, error: 'Could not start card payment. Please try again.' };
+      }
+    }
+
     case 'USSD':
       // TODO: return hosted checkout URL from gateway
       return {
@@ -236,6 +299,7 @@ async function initiateWithProvider(p: ProviderInit): Promise<ProviderResult> {
         providerRef: `SIM-${p.attemptId.slice(0, 12)}`,
         userMessage: 'Redirecting to secure checkout.',
       };
+
     default:
       return { ok: false, error: 'Unsupported provider' };
   }

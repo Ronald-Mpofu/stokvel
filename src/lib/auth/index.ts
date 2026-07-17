@@ -14,6 +14,12 @@ const JWT_SECRET = new TextEncoder().encode(
 const JWT_EXPIRY = process.env.JWT_EXPIRY || '15m'
 const REFRESH_EXPIRY = process.env.REFRESH_TOKEN_EXPIRY || '7d'
 
+// joiningFeePaid is a raw-SQL column (not in schema.prisma), so it is
+// not part of SessionUser. Callers that have loaded it — login and
+// refresh — pass it through so it reaches the JWT. Anything else omits
+// it and the middleware gate fails open, as before.
+export type TokenUser = SessionUser & { joiningFeePaid?: boolean }
+
 // ── Password ──────────────────────────────────────────────────
 export async function hashPassword(password: string): Promise<string> {
   return bcrypt.hash(password, 12)
@@ -24,13 +30,23 @@ export async function verifyPassword(password: string, hash: string): Promise<bo
 }
 
 // ── JWT ───────────────────────────────────────────────────────
-export async function signAccessToken(user: SessionUser): Promise<string> {
-  return new SignJWT({
+export async function signAccessToken(user: TokenUser): Promise<string> {
+  const claims: Record<string, unknown> = {
     sub: user.id,
     email: user.email,
     role: user.role,
     name: user.fullName,
-  })
+  }
+
+  // Only emit the claim when the caller actually knows the value.
+  // Defaulting an unknown to `false` would lock the user out: the
+  // middleware treats `false` as "unpaid — redirect to fee page" but
+  // treats `undefined` as "unknown — allow through".
+  if (typeof user.joiningFeePaid === 'boolean') {
+    claims.joiningFeePaid = user.joiningFeePaid
+  }
+
+  return new SignJWT(claims)
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(JWT_EXPIRY)

@@ -89,12 +89,14 @@ export const stripeProvider: PaymentProvider = {
       // webhook maps Stripe objects back to our records.
       subscription_data: {
         metadata: {
+          ...(params.metadata ?? {}),
           scope: params.scope,
           userId: params.userId,
           groupId: params.groupId ?? '',
         },
       },
       metadata: {
+        ...(params.metadata ?? {}),
         scope: params.scope,
         userId: params.userId,
         groupId: params.groupId ?? '',

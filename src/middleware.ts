@@ -16,11 +16,13 @@ const JWT_SECRET = new TextEncoder().encode(
 const PUBLIC_ROUTES   = ['/', '/login', '/register', '/setup', '/invite', '/guarantor']
 const ADMIN_ROUTES    = ['/dashboard']
 const MEMBER_ROUTES   = ['/portal']
-// NOTE: /api/payments/webhook is listed individually — NOT the whole
-// /api/payments namespace. Stripe calls it server-to-server with no
-// cookie, so it must be public; it authenticates itself by verifying
-// the Stripe signature header instead.
-const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout', '/api/auth/setup-password', '/api/payments/webhook']
+// NOTE: webhook routes are listed individually — NOT whole namespaces.
+// Providers (Stripe, EcoCash, M-Pesa, MTN MoMo) call them server-to-server
+// with no cookie, so they must be public; each authenticates itself by
+// verifying a signature header instead.
+//   /api/payments/webhook      → Stripe signature
+//   /api/joining-fee/webhook   → per-provider HMAC (was 401-ing every callback)
+const API_PUBLIC      = ['/api/auth/login', '/api/auth/register', '/api/auth/refresh', '/api/auth/logout', '/api/auth/setup-password', '/api/payments/webhook', '/api/joining-fee/webhook']
 
 // ── Helpers ───────────────────────────────────────────────────
 function isPublic(pathname: string): boolean {

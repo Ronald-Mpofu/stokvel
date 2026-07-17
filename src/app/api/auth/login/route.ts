@@ -19,10 +19,19 @@ export async function POST(req: NextRequest) {
 
     // Raw SQL (single round trip): "joiningFeePaid" is a raw-SQL column
     // NOT in schema.prisma, so it cannot go through findUnique's select.
+    //
+    // joiningFeePaid is computed as "paid AND not expired" rather than
+    // read raw. The renewal clock is evaluated here, at token-issue time,
+    // so no cron job is needed to expire lapsed members — their next
+    // login or token refresh simply stops carrying the paid claim.
+    // NULL joiningFeeExpiresAt = never expires (legacy paid users).
     const rows: any[] = await prisma.$queryRawUnsafe(
       `SELECT "id","email","fullName","passwordHash","role","tier",
               "kycStatus","reputationScore","status","profilePhotoUrl",
-              "isBlacklisted","joiningFeePaid"
+              "isBlacklisted",
+              ("joiningFeePaid" AND ("joiningFeeExpiresAt" IS NULL
+                OR "joiningFeeExpiresAt" > now())) AS "joiningFeePaid",
+              "joiningFeeExpiresAt"
        FROM "User"
        WHERE "email" = $1 AND "deletedAt" IS NULL
        LIMIT 1`,
@@ -51,6 +60,7 @@ export async function POST(req: NextRequest) {
       reputationScore: Number(user.reputationScore),
       profilePhotoUrl: user.profilePhotoUrl,
       joiningFeePaid: user.joiningFeePaid === true,
+      joiningFeeExpiresAt: user.joiningFeeExpiresAt,
     }
 
     const [accessToken, refreshToken] = await Promise.all([
