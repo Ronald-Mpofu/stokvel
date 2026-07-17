@@ -4,7 +4,12 @@
 // Joining fee payment flow: choose country → see fee + methods → pay.
 // Auth: session cookie via /api/auth/me (same pattern as login page).
 // Performance: exactly TWO parallel requests on load (auth/me + fee config).
-// Payment status polling starts only AFTER an attempt is initiated.
+//
+// Two payment shapes share this page:
+//   CARD (Stripe)  → redirect away to hosted checkout, return via ?paid=1
+//   Mobile money   → stay here, poll until the webhook settles
+// The card path must NOT fall into the polling branch — no payment can
+// happen while the member is still sitting on this page.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -66,6 +71,7 @@ export default function JoinFeePage() {
   const [provider, setProvider] = useState('');
   const [phone, setPhone] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [redirecting, setRedirecting] = useState(false);
   const [instructions, setInstructions] = useState<string | null>(null);
   const [paid, setPaid] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
@@ -76,42 +82,7 @@ export default function JoinFeePage() {
     setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // Exactly two parallel requests on load: session + fee config
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [meRes, configRes] = await Promise.all([
-          fetch('/api/auth/me'),
-          fetch('/api/joining-fee?type=config'),
-        ]);
-        const [me, cfg] = await Promise.all([meRes.json(), configRes.json()]);
-        if (cancelled) return;
-
-        if (!me.success || !me.data?.id) {
-          router.replace('/login?redirect=/dashboard/join-fee');
-          return;
-        }
-        setUserId(me.data.id);
-        setRole(me.data.role || '');
-        if (me.data.joiningFeePaid === true) setPaid(true);
-        if (cfg.success) setConfig(cfg.data);
-        else showToast('error', 'Could not load joining fee options');
-      } catch {
-        if (!cancelled) showToast('error', 'Could not load joining fee options');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [router, showToast]);
-
-  const selected = config.find(c => c.countryCode === countryCode) || null;
-  const needsPhone = MOBILE_MONEY.includes(provider);
-
+  // Defined before the mount effect so the Stripe return path can call it.
   const startPolling = useCallback((uid: string) => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
@@ -138,6 +109,63 @@ export default function JoinFeePage() {
     }, 5000);
   }, [showToast]);
 
+  // Exactly two parallel requests on load: session + fee config
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [meRes, configRes] = await Promise.all([
+          fetch('/api/auth/me'),
+          fetch('/api/joining-fee?type=config'),
+        ]);
+        const [me, cfg] = await Promise.all([meRes.json(), configRes.json()]);
+        if (cancelled) return;
+
+        if (!me.success || !me.data?.id) {
+          router.replace('/login?redirect=/dashboard/join-fee');
+          return;
+        }
+        setUserId(me.data.id);
+        setRole(me.data.role || '');
+        if (me.data.joiningFeePaid === true) setPaid(true);
+        if (cfg.success) setConfig(cfg.data);
+        else showToast('error', 'Could not load joining fee options');
+
+        // ── Returning from Stripe ────────────────────────────
+        // Read the query string directly rather than useSearchParams,
+        // which would force this page behind a Suspense boundary.
+        const params = new URLSearchParams(window.location.search);
+
+        if (params.get('cancelled') === '1') {
+          showToast('error', 'Payment cancelled — you can try again');
+          window.history.replaceState({}, '', '/dashboard/join-fee');
+        }
+
+        if (params.get('paid') === '1' && me.data.joiningFeePaid !== true) {
+          // Do NOT trust this redirect as proof of payment — anyone can
+          // type ?paid=1. It only tells us Stripe sent them back; the
+          // webhook is the source of truth. Poll until it settles, which
+          // also covers the race where the redirect beats the webhook.
+          setInstructions('Payment received — confirming with your bank…');
+          startPolling(me.data.id);
+          window.history.replaceState({}, '', '/dashboard/join-fee');
+        }
+      } catch {
+        if (!cancelled) showToast('error', 'Could not load joining fee options');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [router, showToast, startPolling]);
+
+  const selected = config.find(c => c.countryCode === countryCode) || null;
+  const needsPhone = MOBILE_MONEY.includes(provider);
+  const isCard = provider === 'CARD';
+
   const handlePay = useCallback(async () => {
     if (!userId) return showToast('error', 'Session expired — please sign in again');
     if (!countryCode) return showToast('error', 'Choose your country first');
@@ -152,26 +180,48 @@ export default function JoinFeePage() {
         body: JSON.stringify({ userId, countryCode, provider, phone: needsPhone ? phone.trim() : undefined }),
       });
       const json = await res.json();
-      if (json.success) {
-        showToast('success', json.message || 'Payment started');
-        setInstructions(json.data?.instructions || json.message || null);
-        startPolling(userId);
-      } else {
+
+      if (!json.success) {
         showToast('error', json.error || 'Payment could not be started');
+        setSubmitting(false);
+        return;
       }
+
+      // ── Card: leave for Stripe's hosted checkout ───────────
+      // Must return BEFORE startPolling: there is nothing to poll for
+      // while the member is still on this page — the payment happens
+      // on Stripe's domain. Keep the button disabled through the
+      // redirect so it cannot be double-submitted.
+      if (json.data?.checkoutUrl) {
+        setRedirecting(true);
+        window.location.href = json.data.checkoutUrl;
+        return;
+      }
+
+      // ── Mobile money / bank transfer: stay and poll ────────
+      showToast('success', json.message || 'Payment started');
+      setInstructions(json.data?.instructions || json.message || null);
+      startPolling(userId);
+      setSubmitting(false);
     } catch {
       showToast('error', 'Network error — please try again');
-    } finally {
       setSubmitting(false);
     }
   }, [userId, countryCode, provider, phone, needsPhone, showToast, startPolling]);
+
+  const payButtonLabel = () => {
+    if (redirecting) return 'Redirecting to secure checkout…';
+    if (submitting) return 'Starting payment…';
+    if (!selected) return 'Pay';
+    return `Pay ${selected.currency} ${selected.amount.toFixed(2)}`;
+  };
 
   return (
     <div style={{ maxWidth: 520, margin: '40px auto', padding: '0 16px', fontFamily: 'system-ui, sans-serif' }}>
       <div style={{ background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, borderRadius: 12, padding: 24, color: '#fff', marginBottom: 24 }}>
         <h1 style={{ margin: 0, fontSize: 22 }}>🌀 Join Community Deals</h1>
         <p style={{ margin: '8px 0 0', fontSize: 14, opacity: 0.9 }}>
-          A once-off joining fee, set at an affordable level for your country.
+          An annual membership fee, set at an affordable level for your country.
         </p>
       </div>
 
@@ -232,8 +282,11 @@ export default function JoinFeePage() {
           {selected ? (
             <div>
               <div style={{ background: '#f0fdf9', borderRadius: 8, padding: '12px 16px', marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                <span style={{ fontSize: 13, color: NAVY }}>Joining fee</span>
-                <strong style={{ fontSize: 18, color: TEAL }}>{selected.currency} {selected.amount.toFixed(2)}</strong>
+                <span style={{ fontSize: 13, color: NAVY }}>Membership fee</span>
+                <span style={{ textAlign: 'right' }}>
+                  <strong style={{ fontSize: 18, color: TEAL }}>{selected.currency} {selected.amount.toFixed(2)}</strong>
+                  <span style={{ fontSize: 12, color: '#64748b', marginLeft: 4 }}>/ year</span>
+                </span>
               </div>
 
               <Field label="Payment method">
@@ -271,23 +324,30 @@ export default function JoinFeePage() {
                 </Field>
               ) : null}
 
+              {isCard ? (
+                <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 8, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: '#475569', lineHeight: 1.5 }}>
+                  🔒 You will be taken to Stripe to enter your card details securely — we never see or store your card number.
+                  Your membership renews automatically each year at {selected.currency} {selected.amount.toFixed(2)}, and you can cancel at any time.
+                </div>
+              ) : null}
+
               <button
                 type="button"
                 onClick={handlePay}
-                disabled={submitting}
+                disabled={submitting || redirecting}
                 style={{
                   width: '100%',
                   padding: '12px 16px',
-                  background: submitting ? '#9ca3af' : TEAL,
+                  background: submitting || redirecting ? '#9ca3af' : TEAL,
                   color: '#fff',
                   border: 'none',
                   borderRadius: 8,
                   fontSize: 15,
                   fontWeight: 600,
-                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  cursor: submitting || redirecting ? 'not-allowed' : 'pointer',
                 }}
               >
-                {submitting ? 'Starting payment…' : `Pay ${selected.currency} ${selected.amount.toFixed(2)}`}
+                {payButtonLabel()}
               </button>
 
               {instructions ? (
