@@ -16,7 +16,9 @@ export function getStripe(): Stripe {
       throw new Error('STRIPE_SECRET_KEY is not set');
     }
     stripeSingleton = new Stripe(key, {
-      apiVersion: '2024-06-20',
+      // apiVersion deliberately omitted — the SDK pins itself to the
+      // API version it ships with, and hardcoding a string here breaks
+      // the build every time the stripe package is updated.
       typescript: true,
     });
   }
