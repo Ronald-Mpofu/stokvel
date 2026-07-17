@@ -5,17 +5,26 @@
 // Auth: session cookie via /api/auth/me (same pattern as login page).
 // Performance: exactly TWO parallel requests on load (auth/me + fee config).
 //
-// Two payment shapes share this page:
-//   CARD (Stripe)  → redirect away to hosted checkout, return via ?paid=1
-//   Mobile money   → stay here, poll until the webhook settles
-// The card path must NOT fall into the polling branch — no payment can
-// happen while the member is still sitting on this page.
+// Three top-level render states — they are mutually exclusive and must
+// stay at the TOP level, not nested inside the form:
+//   paid       → membership active, leaving for dashboard/portal
+//   confirming → returned from Stripe, polling for the webhook
+//   form       → choose country + method
+//
+// Why that matters: returning from Stripe is a FRESH page load, so
+// countryCode is empty and `selected` is null. Anything rendered inside
+// the `selected ? ...` branch is invisible on return — which silently
+// dropped the member back onto the empty form while polling ran unseen.
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 const TEAL = '#0F6E56';
 const NAVY = '#0D2137';
+
+// Poll for the webhook for 2 minutes before offering a manual retry.
+const POLL_INTERVAL_MS = 3000;
+const POLL_MAX_ATTEMPTS = 40;
 
 type FeeConfig = {
   countryCode: string;
@@ -60,6 +69,24 @@ const inputStyle: React.CSSProperties = {
   boxSizing: 'border-box',
 };
 
+const cardStyle: React.CSSProperties = {
+  background: '#fff',
+  border: '1px solid #e5e7eb',
+  borderRadius: 12,
+  padding: 24,
+};
+
+const primaryBtn: React.CSSProperties = {
+  padding: '12px 28px',
+  background: TEAL,
+  color: '#fff',
+  border: 'none',
+  borderRadius: 8,
+  fontSize: 15,
+  fontWeight: 600,
+  cursor: 'pointer',
+};
+
 export default function JoinFeePage() {
   const router = useRouter();
 
@@ -74,40 +101,72 @@ export default function JoinFeePage() {
   const [redirecting, setRedirecting] = useState(false);
   const [instructions, setInstructions] = useState<string | null>(null);
   const [paid, setPaid] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [pollTimedOut, setPollTimedOut] = useState(false);
   const [toast, setToast] = useState<Toast>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const attemptsRef = useRef(0);
+  const roleRef = useRef('');
 
   const showToast = useCallback((type: 'success' | 'error', text: string) => {
     setToast({ type, text });
     setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // Defined before the mount effect so the Stripe return path can call it.
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  // Success path shared by polling and the manual check.
+  const onConfirmed = useCallback(async () => {
+    stopPolling();
+    // CRITICAL: re-issue the JWT before the member navigates.
+    // The webhook flipped joiningFeePaid in the DB, but the token in
+    // this browser still says false — without this refresh the
+    // middleware gate bounces them straight back here.
+    try {
+      await fetch('/api/auth/refresh', { method: 'POST' });
+    } catch {
+      // The Continue button retries the refresh.
+    }
+    setConfirming(false);
+    setPaid(true);
+    showToast('success', 'Payment confirmed — welcome to Community Deals!');
+    // Send them onward automatically; the button is the fallback.
+    setTimeout(() => {
+      router.push(ADMIN_ROLES.includes(roleRef.current) ? '/dashboard' : '/portal');
+    }, 1500);
+  }, [router, showToast, stopPolling]);
+
+  const checkOnce = useCallback(async (uid: string): Promise<boolean> => {
+    try {
+      const res = await fetch(`/api/joining-fee?userId=${uid}`);
+      const json = await res.json();
+      return json.success && json.data?.status === 'PAID';
+    } catch {
+      return false;
+    }
+  }, []);
+
+  // Defined before the mount effect so the Stripe return path can use it.
   const startPolling = useCallback((uid: string) => {
-    if (pollRef.current) clearInterval(pollRef.current);
+    stopPolling();
+    attemptsRef.current = 0;
+    setPollTimedOut(false);
     pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/joining-fee?userId=${uid}`);
-        const json = await res.json();
-        if (json.success && json.data?.status === 'PAID') {
-          if (pollRef.current) clearInterval(pollRef.current);
-          // CRITICAL: re-issue the JWT before the member navigates.
-          // The webhook flipped joiningFeePaid in the DB, but the
-          // token in this browser still says false — without this
-          // refresh the middleware gate bounces them straight back.
-          try {
-            await fetch('/api/auth/refresh', { method: 'POST' });
-          } catch {
-            // If refresh fails, the Continue button retries it.
-          }
-          setPaid(true);
-          showToast('success', 'Payment confirmed — welcome to Community Deals!');
-        }
-      } catch {
-        // polling errors are silent; next tick retries
+      attemptsRef.current += 1;
+      if (attemptsRef.current > POLL_MAX_ATTEMPTS) {
+        stopPolling();
+        setPollTimedOut(true);
+        return;
       }
-    }, 5000);
-  }, [showToast]);
+      const ok = await checkOnce(uid);
+      if (ok) await onConfirmed();
+    }, POLL_INTERVAL_MS);
+  }, [checkOnce, onConfirmed, stopPolling]);
 
   // Exactly two parallel requests on load: session + fee config
   useEffect(() => {
@@ -127,6 +186,7 @@ export default function JoinFeePage() {
         }
         setUserId(me.data.id);
         setRole(me.data.role || '');
+        roleRef.current = me.data.role || '';
         if (me.data.joiningFeePaid === true) setPaid(true);
         if (cfg.success) setConfig(cfg.data);
         else showToast('error', 'Could not load joining fee options');
@@ -143,12 +203,19 @@ export default function JoinFeePage() {
 
         if (params.get('paid') === '1' && me.data.joiningFeePaid !== true) {
           // Do NOT trust this redirect as proof of payment — anyone can
-          // type ?paid=1. It only tells us Stripe sent them back; the
-          // webhook is the source of truth. Poll until it settles, which
-          // also covers the race where the redirect beats the webhook.
-          setInstructions('Payment received — confirming with your bank…');
-          startPolling(me.data.id);
+          // type ?paid=1. It only says Stripe sent them back; the webhook
+          // is the source of truth. Poll until it settles, which also
+          // covers the race where the redirect beats the webhook.
+          setConfirming(true);
           window.history.replaceState({}, '', '/dashboard/join-fee');
+          // Check immediately — the webhook has usually already landed.
+          const already = await checkOnce(me.data.id);
+          if (cancelled) return;
+          if (already) {
+            await onConfirmed();
+          } else {
+            startPolling(me.data.id);
+          }
         }
       } catch {
         if (!cancelled) showToast('error', 'Could not load joining fee options');
@@ -160,7 +227,7 @@ export default function JoinFeePage() {
       cancelled = true;
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [router, showToast, startPolling]);
+  }, [router, showToast, startPolling, checkOnce, onConfirmed]);
 
   const selected = config.find(c => c.countryCode === countryCode) || null;
   const needsPhone = MOBILE_MONEY.includes(provider);
@@ -188,10 +255,9 @@ export default function JoinFeePage() {
       }
 
       // ── Card: leave for Stripe's hosted checkout ───────────
-      // Must return BEFORE startPolling: there is nothing to poll for
+      // Must return BEFORE startPolling: nothing can be polled for
       // while the member is still on this page — the payment happens
-      // on Stripe's domain. Keep the button disabled through the
-      // redirect so it cannot be double-submitted.
+      // on Stripe's domain.
       if (json.data?.checkoutUrl) {
         setRedirecting(true);
         window.location.href = json.data.checkoutUrl;
@@ -208,6 +274,16 @@ export default function JoinFeePage() {
       setSubmitting(false);
     }
   }, [userId, countryCode, provider, phone, needsPhone, showToast, startPolling]);
+
+  const handleManualCheck = useCallback(async () => {
+    const ok = await checkOnce(userId);
+    if (ok) {
+      await onConfirmed();
+    } else {
+      showToast('error', 'Still not confirmed. Your bank may take a moment.');
+      startPolling(userId);
+    }
+  }, [checkOnce, onConfirmed, showToast, startPolling, userId]);
 
   const payButtonLabel = () => {
     if (redirecting) return 'Redirecting to secure checkout…';
@@ -226,14 +302,16 @@ export default function JoinFeePage() {
       </div>
 
       {loading ? (
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 24, textAlign: 'center' }}>
+        <div style={{ ...cardStyle, textAlign: 'center' }}>
           <span style={{ fontSize: 24 }}>⏳</span>
         </div>
       ) : paid ? (
         <div style={{ background: '#ecfdf5', border: `1px solid ${TEAL}`, borderRadius: 12, padding: 24, textAlign: 'center' }}>
           <div style={{ fontSize: 40 }}>✅</div>
           <h2 style={{ color: TEAL, margin: '8px 0' }}>Membership active</h2>
-          <p style={{ color: NAVY, fontSize: 14, margin: '0 0 20px' }}>Your joining fee is paid. You can now join groups and Windfall Schemes.</p>
+          <p style={{ color: NAVY, fontSize: 14, margin: '0 0 20px' }}>
+            Your joining fee is paid. Taking you through now…
+          </p>
           <button
             type="button"
             onClick={async () => {
@@ -246,22 +324,41 @@ export default function JoinFeePage() {
               }
               router.push(ADMIN_ROLES.includes(role) ? '/dashboard' : '/portal');
             }}
-            style={{
-              padding: '12px 28px',
-              background: TEAL,
-              color: '#fff',
-              border: 'none',
-              borderRadius: 8,
-              fontSize: 15,
-              fontWeight: 600,
-              cursor: 'pointer',
-            }}
+            style={primaryBtn}
           >
             Continue →
           </button>
         </div>
+      ) : confirming ? (
+        <div style={{ ...cardStyle, textAlign: 'center' }}>
+          <div style={{ fontSize: 40 }}>{pollTimedOut ? '⏳' : '🔄'}</div>
+          <h2 style={{ color: NAVY, margin: '8px 0', fontSize: 18 }}>
+            {pollTimedOut ? 'Still confirming' : 'Confirming your payment…'}
+          </h2>
+          <p style={{ color: '#64748b', fontSize: 14, margin: '0 0 20px', lineHeight: 1.6 }}>
+            {pollTimedOut
+              ? 'Your payment may still be processing. If your card was charged, your membership will activate shortly — check again below or reload this page in a minute.'
+              : 'Your card has been submitted. We are waiting for confirmation — this usually takes a few seconds.'}
+          </p>
+          <button type="button" onClick={handleManualCheck} style={primaryBtn}>
+            Check again
+          </button>
+          <div style={{ marginTop: 14 }}>
+            <button
+              type="button"
+              onClick={() => {
+                stopPolling();
+                setConfirming(false);
+                setPollTimedOut(false);
+              }}
+              style={{ background: 'none', border: 'none', color: '#64748b', fontSize: 13, cursor: 'pointer', textDecoration: 'underline' }}
+            >
+              Back to payment options
+            </button>
+          </div>
+        </div>
       ) : (
-        <div style={{ background: '#fff', border: '1px solid #e5e7eb', borderRadius: 12, padding: 24 }}>
+        <div style={cardStyle}>
           <Field label="Your country">
             <select
               style={inputStyle}
