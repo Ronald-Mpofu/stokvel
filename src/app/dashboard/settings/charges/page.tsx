@@ -11,6 +11,7 @@
 // Mins are derived (prev max + 1) and the last tier is locked
 // open-ended, so gaps/overlaps are impossible by construction.
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 // ── Palette ───────────────────────────────────────────────────
@@ -48,7 +49,33 @@ interface ToastState {
   text: string;
 }
 
-// ── Derived mins: [ '' , max1+1, max2+1, ... ] ────────────────
+// ── Country display helpers ───────────────────────────────────
+// Same Intl.DisplayNames pattern as the Groups dashboard Country column.
+const regionNames =
+  typeof Intl !== 'undefined' && 'DisplayNames' in Intl
+    ? new Intl.DisplayNames(['en'], { type: 'region' })
+    : null;
+
+function countryName(code: string): string {
+  if (code === 'DEFAULT') return 'Default Pricing';
+  try {
+    return regionNames?.of(code) || code;
+  } catch {
+    return code;
+  }
+}
+
+function flagEmoji(code: string): string {
+  if (code === 'DEFAULT' || code.length !== 2) return '🌐';
+  const A = 0x1f1e6;
+  const base = 'A'.charCodeAt(0);
+  return (
+    String.fromCodePoint(A + code.charCodeAt(0) - base) +
+    String.fromCodePoint(A + code.charCodeAt(1) - base)
+  );
+}
+
+// ── Derived mins: 1, max1+1, max2+1, ... ─────────────────────
 function derivedMins(tiers: TierDraft[]): number[] {
   const mins: number[] = [];
   let next = 1;
@@ -69,6 +96,15 @@ function sheetToDraft(s: Sheet): SheetDraft {
       monthlyFee: String(t.monthlyFee),
     })),
   };
+}
+
+function tierSummary(s: Sheet): string {
+  if (!s.tiers.length) return 'No tiers configured';
+  const fees = s.tiers.map((t) => t.monthlyFee);
+  const lo = Math.min(...fees);
+  const hi = Math.max(...fees);
+  const range = lo === hi ? `${lo}` : `${lo} – ${hi}`;
+  return `${s.tiers.length} tier${s.tiers.length > 1 ? 's' : ''} · ${s.currency} ${range}/month`;
 }
 
 // ── Shared styles ─────────────────────────────────────────────
@@ -112,6 +148,8 @@ const btnDanger: React.CSSProperties = {
   cursor: 'pointer',
 };
 
+const gridCols = '110px 130px 160px 90px';
+
 // ── Module-level components (never inside render — cursor focus) ──
 function Field(props: { label: string; children: React.ReactNode; width?: number }) {
   return (
@@ -137,17 +175,19 @@ function TierRow(props: {
     <div
       style={{
         display: 'grid',
-        gridTemplateColumns: '90px 110px 140px 90px',
+        gridTemplateColumns: gridCols,
         gap: 10,
         alignItems: 'center',
-        padding: '8px 0',
+        padding: '10px 0',
         borderBottom: '1px solid #f1f5f9',
       }}
     >
-      <div style={{ fontSize: 14, color: NAVY, fontWeight: 600 }}>{props.min}</div>
+      <div style={{ fontSize: 14, color: NAVY, fontWeight: 600 }}>
+        {props.min} {props.min === 1 ? 'member' : 'members'}
+      </div>
       <div>
         {props.isLast ? (
-          <div style={{ fontSize: 14, color: '#64748b', padding: '8px 0' }}>∞ (no limit)</div>
+          <div style={{ fontSize: 13, color: '#64748b', padding: '8px 0' }}>No upper limit</div>
         ) : (
           <input
             type="number"
@@ -155,12 +195,12 @@ function TierRow(props: {
             value={props.tier.maxMembers}
             onChange={(e) => props.onMaxChange(e.target.value)}
             style={inputStyle}
-            placeholder="max"
+            placeholder="up to…"
           />
         )}
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-        <span style={{ fontSize: 13, color: '#64748b' }}>{props.currency}</span>
+        <span style={{ fontSize: 13, color: '#64748b', minWidth: 32 }}>{props.currency}</span>
         <input
           type="number"
           min={0}
@@ -178,6 +218,29 @@ function TierRow(props: {
           </button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function TierTableHeader() {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: gridCols,
+        gap: 10,
+        fontSize: 11,
+        fontWeight: 700,
+        color: '#64748b',
+        letterSpacing: 0.5,
+        borderBottom: '2px solid #e2e8f0',
+        paddingBottom: 6,
+      }}
+    >
+      <div>GROUP SIZE FROM</div>
+      <div>UP TO</div>
+      <div>MONTHLY FEE</div>
+      <div></div>
     </div>
   );
 }
@@ -255,8 +318,8 @@ export default function ChargesSettingsPage() {
       const isLast = i === tiers.length - 1;
       if (!isLast) {
         const max = parseInt(tiers[i].maxMembers, 10);
-        if (!Number.isFinite(max)) return `Tier ${i + 1}: max members is required`;
-        if (max < mins[i]) return `Tier ${i + 1}: max (${max}) is below min (${mins[i]})`;
+        if (!Number.isFinite(max)) return `Tier ${i + 1}: "up to" is required`;
+        if (max < mins[i]) return `Tier ${i + 1}: "up to" (${max}) is below "from" (${mins[i]})`;
       }
       const fee = parseFloat(tiers[i].monthlyFee);
       if (!Number.isFinite(fee) || fee < 0) return `Tier ${i + 1}: enter a valid fee`;
@@ -285,7 +348,7 @@ export default function ChargesSettingsPage() {
       });
       const json = await res.json();
       if (!json.success) throw new Error(json.error || 'Save failed');
-      showToast('success', `${sheet.countryCode} charges saved`);
+      showToast('success', `${countryName(sheet.countryCode)} charges saved`);
       await fetchAll();
     } catch (e: any) {
       showToast('error', e?.message || 'Failed to save');
@@ -295,7 +358,8 @@ export default function ChargesSettingsPage() {
   };
 
   const deleteSheet = async (sheet: Sheet) => {
-    if (!window.confirm(`Delete the charge sheet for ${sheet.countryCode}? Groups there will fall back to DEFAULT pricing.`)) {
+    const name = countryName(sheet.countryCode);
+    if (!window.confirm(`Delete the charge sheet for ${name}? Groups there will fall back to Default Pricing.`)) {
       return;
     }
     setSavingId(sheet.id);
@@ -365,8 +429,6 @@ export default function ChargesSettingsPage() {
     tiers.map((t, i) => (i === index ? { ...t, monthlyFee: value } : t));
 
   const addTierRow = (tiers: TierDraft[]): TierDraft[] => {
-    // New row is inserted before the open-ended last tier; the previous
-    // last tier gains an editable max.
     const copy = [...tiers];
     const last = copy[copy.length - 1];
     copy[copy.length - 1] = { ...last, maxMembers: '' };
@@ -383,11 +445,19 @@ export default function ChargesSettingsPage() {
 
   return (
     <div style={{ maxWidth: 860, margin: '0 auto', padding: 24 }}>
+      <div style={{ marginBottom: 6 }}>
+        <Link
+          href="/dashboard/settings"
+          style={{ textDecoration: 'none', color: '#64748b', fontSize: 13, fontWeight: 600 }}
+        >
+          ← All Settings
+        </Link>
+      </div>
       <div style={{ marginBottom: 20 }}>
-        <h1 style={{ color: NAVY, fontSize: 24, margin: 0 }}>Membership Charges</h1>
-        <p style={{ color: '#64748b', fontSize: 14, marginTop: 6 }}>
-          Group monthly subscription pricing per country, tiered by member count.
-          Member annual joining fees are configured separately under Joining Fees.
+        <h1 style={{ color: NAVY, fontSize: 24, margin: 0 }}>💳 Membership Charges</h1>
+        <p style={{ color: '#64748b', fontSize: 14, marginTop: 6, lineHeight: 1.6 }}>
+          What groups pay each month to use the platform, priced per country and tiered
+          by group size. Member annual joining fees are configured separately under Joining Fees.
         </p>
       </div>
 
@@ -397,6 +467,7 @@ export default function ChargesSettingsPage() {
           style={{ ...btnPrimary, opacity: availableCountries.length === 0 ? 0.5 : 1 }}
           disabled={availableCountries.length === 0}
           onClick={openAdd}
+          title={availableCountries.length === 0 ? 'All countries with joining-fee config already have charges' : ''}
         >
           + Add Country
         </button>
@@ -413,7 +484,7 @@ export default function ChargesSettingsPage() {
             return (
               <div
                 key={sheet.id}
-                style={{ border: '1px solid #e2e8f0', borderRadius: 8, background: '#fff', overflow: 'hidden' }}
+                style={{ border: '1px solid #e2e8f0', borderRadius: 10, background: '#fff', overflow: 'hidden' }}
               >
                 <button
                   type="button"
@@ -427,27 +498,38 @@ export default function ChargesSettingsPage() {
                     background: isOpen ? '#f8fafc' : '#fff',
                     border: 'none',
                     cursor: 'pointer',
+                    textAlign: 'left',
                   }}
                 >
-                  <span style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <span style={{ fontWeight: 700, color: NAVY, fontSize: 15 }}>
-                      {sheet.countryCode === 'DEFAULT' ? 'DEFAULT (fallback)' : sheet.countryCode}
-                    </span>
-                    <span style={{ fontSize: 13, color: '#64748b' }}>{sheet.currency}</span>
-                    <span
-                      style={{
-                        fontSize: 11,
-                        fontWeight: 700,
-                        padding: '2px 8px',
-                        borderRadius: 999,
-                        background: sheet.isActive ? '#dcfce7' : '#fee2e2',
-                        color: sheet.isActive ? '#166534' : '#991b1b',
-                      }}
-                    >
-                      {sheet.isActive ? 'ACTIVE' : 'INACTIVE'}
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                    <span style={{ fontSize: 24 }}>{flagEmoji(sheet.countryCode)}</span>
+                    <span style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <span style={{ fontWeight: 700, color: NAVY, fontSize: 15 }}>
+                          {countryName(sheet.countryCode)}
+                        </span>
+                        {sheet.countryCode !== 'DEFAULT' ? (
+                          <span style={{ fontSize: 11, color: '#94a3b8', fontWeight: 700 }}>
+                            {sheet.countryCode}
+                          </span>
+                        ) : null}
+                        <span
+                          style={{
+                            fontSize: 11,
+                            fontWeight: 700,
+                            padding: '2px 8px',
+                            borderRadius: 999,
+                            background: sheet.isActive ? '#dcfce7' : '#fee2e2',
+                            color: sheet.isActive ? '#166534' : '#991b1b',
+                          }}
+                        >
+                          {sheet.isActive ? 'ACTIVE' : 'INACTIVE'}
+                        </span>
+                      </span>
+                      <span style={{ fontSize: 12, color: '#64748b' }}>{tierSummary(sheet)}</span>
                     </span>
                   </span>
-                  <span style={{ color: '#64748b' }}>{isOpen ? '▲' : '▼'}</span>
+                  <span style={{ color: '#64748b', flexShrink: 0, marginLeft: 12 }}>{isOpen ? '▲' : '▼'}</span>
                 </button>
 
                 {isOpen && draft ? (
@@ -475,23 +557,7 @@ export default function ChargesSettingsPage() {
                       </label>
                     </div>
 
-                    <div
-                      style={{
-                        display: 'grid',
-                        gridTemplateColumns: '90px 110px 140px 90px',
-                        gap: 10,
-                        fontSize: 12,
-                        fontWeight: 700,
-                        color: '#64748b',
-                        borderBottom: '2px solid #e2e8f0',
-                        paddingBottom: 6,
-                      }}
-                    >
-                      <div>FROM</div>
-                      <div>TO</div>
-                      <div>MONTHLY FEE</div>
-                      <div></div>
-                    </div>
+                    <TierTableHeader />
 
                     {draft.tiers.map((tier, i) => (
                       <TierRow
@@ -565,11 +631,14 @@ export default function ChargesSettingsPage() {
             zIndex: 1000,
           }}
         >
-          <div style={{ background: '#fff', borderRadius: 10, padding: 24, width: 520, maxHeight: '85vh', overflowY: 'auto' }}>
-            <h2 style={{ color: NAVY, fontSize: 18, marginTop: 0, marginBottom: 16 }}>Add Country Charges</h2>
+          <div style={{ background: '#fff', borderRadius: 10, padding: 24, width: 560, maxWidth: '92vw', maxHeight: '85vh', overflowY: 'auto' }}>
+            <h2 style={{ color: NAVY, fontSize: 18, marginTop: 0, marginBottom: 4 }}>Add Country Charges</h2>
+            <p style={{ fontSize: 13, color: '#64748b', marginTop: 0, marginBottom: 16 }}>
+              Only countries with joining-fee configuration can be added here.
+            </p>
 
-            <div style={{ display: 'flex', gap: 14, marginBottom: 16 }}>
-              <Field label="Country" width={260}>
+            <div style={{ display: 'flex', gap: 14, marginBottom: 16, flexWrap: 'wrap' }}>
+              <Field label="Country" width={280}>
                 <select
                   value={addCountry}
                   onChange={(e) => {
@@ -582,7 +651,7 @@ export default function ChargesSettingsPage() {
                 >
                   {availableCountries.map((c) => (
                     <option key={c.countryCode} value={c.countryCode}>
-                      {c.countryName} ({c.countryCode})
+                      {flagEmoji(c.countryCode)} {c.countryName} ({c.countryCode})
                     </option>
                   ))}
                 </select>
@@ -597,23 +666,7 @@ export default function ChargesSettingsPage() {
               </Field>
             </div>
 
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '90px 110px 140px 90px',
-                gap: 10,
-                fontSize: 12,
-                fontWeight: 700,
-                color: '#64748b',
-                borderBottom: '2px solid #e2e8f0',
-                paddingBottom: 6,
-              }}
-            >
-              <div>FROM</div>
-              <div>TO</div>
-              <div>MONTHLY FEE</div>
-              <div></div>
-            </div>
+            <TierTableHeader />
 
             {addTiers.map((tier, i) => (
               <TierRow
