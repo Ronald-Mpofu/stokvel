@@ -2,23 +2,23 @@
 // Stripe webhook. Public route (allowlisted in middleware) — Stripe calls
 // it server-to-server with no cookie and authenticates via signature.
 //
-// Events handled:
-//   checkout.session.completed        → first payment: settle the attempt
-//                                       created by POST /api/joining-fee
-//   invoice.paid (subscription_cycle) → renewal: NO checkout happened, so
-//                                       create a fresh invoice + attempt,
-//                                       then settle them
-//   invoice.payment_failed            → record the failure
-//   customer.subscription.deleted     → subscription ended; membership
-//                                       lapses at the end of the paid period
+// TWO subscription scopes flow through here, split on metadata.scope:
 //
-// Settlement mirrors /api/joining-fee/webhook exactly:
-//   attempt SUCCEEDED → invoice PAID → immutable FEE Transaction
-//   → User flags (+ joiningFeeExpiresAt, the renewal clock)
+//   MEMBER_ANNUAL  (joining fee)
+//     checkout.session.completed → settle the PaymentAttempt created by
+//                                  POST /api/joining-fee
+//     invoice.paid (cycle)       → renewal: create fresh invoice+attempt,
+//                                  settle, extend joiningFeeExpiresAt
+//
+//   GROUP_MONTHLY  (group subscription)
+//     checkout.session.completed → mark PlatformSubscription active and
+//                                  flip the Group to ACTIVE — the group
+//                                  does not activate until payment lands
+//     invoice.paid (cycle)       → extend currentPeriodEnd + FEE Transaction
+//     customer.subscription.deleted → Group falls to PAUSED (not deleted —
+//                                  no data loss, feature lockout only)
 //
 // Env: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET
-// Local: stripe listen --forward-to localhost:3000/api/payments/webhook
-//        (that prints a DIFFERENT secret from the dashboard's)
 
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
@@ -53,7 +53,7 @@ function toDecimal(minorUnits: number | null | undefined, currency: string): num
 }
 
 // ------------------------------------------------------------------
-// Settle a successful payment. Idempotent by attempt status.
+// MEMBER_ANNUAL: settle a successful payment. Idempotent by attempt status.
 // ------------------------------------------------------------------
 async function settleAttempt(params: {
   attemptId: string;
@@ -115,6 +115,9 @@ async function settleAttempt(params: {
 
 // ------------------------------------------------------------------
 // Mirror Stripe subscription state into PlatformSubscription.
+// Prefers a match on stripeSubscriptionId, then stripeCheckoutId
+// (the group-checkout route pre-creates an 'incomplete' row keyed by
+// checkout id, before the subscription id exists).
 // ------------------------------------------------------------------
 async function upsertSubscription(params: {
   scope: string;
@@ -122,23 +125,34 @@ async function upsertSubscription(params: {
   groupId: string | null;
   customerId: string;
   subscriptionId: string;
+  checkoutId?: string | null;
   status: string;
   currency: string;
   amount: number;
   periodEnd: Date | null;
 }) {
-  const existing: any[] = await prisma.$queryRawUnsafe(
+  const bySub: any[] = await prisma.$queryRawUnsafe(
     `SELECT "id" FROM "PlatformSubscription" WHERE "stripeSubscriptionId" = $1 LIMIT 1`,
     params.subscriptionId
   );
+  let rowId: string | null = bySub[0]?.id ?? null;
 
-  if (existing.length) {
+  if (!rowId && params.checkoutId) {
+    const byCheckout: any[] = await prisma.$queryRawUnsafe(
+      `SELECT "id" FROM "PlatformSubscription" WHERE "stripeCheckoutId" = $1 LIMIT 1`,
+      params.checkoutId
+    );
+    rowId = byCheckout[0]?.id ?? null;
+  }
+
+  if (rowId) {
     await prisma.$executeRawUnsafe(
       `UPDATE "PlatformSubscription"
-       SET "status" = $2, "currentPeriodEnd" = $3, "amount" = $4,
-           "currency" = $5, "updatedAt" = now()
+       SET "stripeSubscriptionId" = $2, "status" = $3, "currentPeriodEnd" = $4,
+           "amount" = $5, "currency" = $6, "updatedAt" = now()
        WHERE "id" = $1`,
-      existing[0].id, params.status, params.periodEnd, params.amount, params.currency
+      rowId, params.subscriptionId, params.status, params.periodEnd,
+      params.amount, params.currency
     );
     return;
   }
@@ -146,17 +160,37 @@ async function upsertSubscription(params: {
   await prisma.$executeRawUnsafe(
     `INSERT INTO "PlatformSubscription"
        ("id","scope","userId","groupId","stripeCustomerId","stripeSubscriptionId",
-        "status","currency","amount","currentPeriodEnd")
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        "stripeCheckoutId","status","currency","amount","currentPeriodEnd")
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
     randomUUID(), params.scope, params.userId, params.groupId,
-    params.customerId, params.subscriptionId, params.status,
-    params.currency, params.amount, params.periodEnd
+    params.customerId, params.subscriptionId, params.checkoutId ?? null,
+    params.status, params.currency, params.amount, params.periodEnd
   );
 }
 
 // ------------------------------------------------------------------
-// Renewal — Stripe billed a saved card with no checkout involved, so
-// there is no pre-existing attempt to find. Create invoice + attempt.
+// GROUP_MONTHLY: a FEE Transaction tied to the group.
+// ------------------------------------------------------------------
+async function recordGroupFeeTransaction(params: {
+  groupId: string;
+  userId: string;
+  amount: number;
+  currency: string;
+  providerRef: string;
+}) {
+  await prisma.$executeRawUnsafe(
+    `INSERT INTO "Transaction"
+       ("id","type","status","amount","currency","description","reference","externalRef","paymentMethod","groupId","userId","metadata","createdAt")
+     VALUES ($1, $2::"TransactionType", $3::"TransactionStatus", $4, $5::"CurrencyCode",
+             'Group monthly subscription', $6, $7, $8::"PaymentMethod", $9, $10, $11::jsonb, now())`,
+    randomUUID(), 'FEE', 'COMPLETED', params.amount, params.currency,
+    randomUUID(), params.providerRef, PROVIDER, params.groupId, params.userId,
+    JSON.stringify({ rail: 'STRIPE', scope: 'GROUP_MONTHLY' })
+  );
+}
+
+// ------------------------------------------------------------------
+// MEMBER_ANNUAL renewal — no checkout happened, so create records.
 // ------------------------------------------------------------------
 async function createRenewalRecords(params: {
   userId: string;
@@ -211,29 +245,10 @@ export async function POST(req: NextRequest) {
 
   try {
     switch (event.type) {
-      // ── First payment ────────────────────────────────────────
+      // ── First payment (both scopes) ──────────────────────────
       case 'checkout.session.completed': {
         const session = event.data.object as any;
-        const providerRef = session.id as string;
-
-        const attempts: any[] = await prisma.$queryRawUnsafe(
-          `SELECT "id","invoiceId","userId","status","amount","currency"
-           FROM "PaymentAttempt"
-           WHERE "provider" = $1 AND "providerRef" = $2
-           LIMIT 1`,
-          PROVIDER, providerRef
-        );
-        if (!attempts.length) {
-          // Not ours (or created outside this flow) — ack so Stripe stops retrying.
-          console.error('POST /api/payments/webhook: no attempt for session', providerRef);
-          return NextResponse.json({ success: true, message: 'No matching attempt; ignored' });
-        }
-        const attempt = attempts[0];
-
-        // Idempotency — Stripe retries, and events can arrive twice.
-        if (attempt.status === 'SUCCEEDED' || attempt.status === 'FAILED') {
-          return NextResponse.json({ success: true, message: 'Already processed' });
-        }
+        const scope = session.metadata?.scope || 'MEMBER_ANNUAL';
 
         if (session.payment_status !== 'paid') {
           return NextResponse.json({ success: true, message: 'Session not paid; ignored' });
@@ -246,6 +261,75 @@ export async function POST(req: NextRequest) {
           const sub = await getStripe().subscriptions.retrieve(subscriptionId);
           periodEnd = subscriptionPeriodEnd(sub);
           subStatus = (sub as any).status || 'active';
+        }
+
+        // ── GROUP_MONTHLY: activate the group ──────────────────
+        if (scope === 'GROUP_MONTHLY') {
+          const groupId: string | null = session.metadata?.groupId || null;
+          const userId: string | null = session.metadata?.userId || null;
+          if (!groupId || !userId || !subscriptionId) {
+            console.error('POST /api/payments/webhook: group checkout missing metadata', session.id);
+            return NextResponse.json({ success: true, message: 'Missing group metadata; ignored' });
+          }
+
+          // Idempotency — an already-active subscription means we ran.
+          const already: any[] = await prisma.$queryRawUnsafe(
+            `SELECT "id" FROM "PlatformSubscription"
+             WHERE "stripeSubscriptionId" = $1 AND "status" = 'active' LIMIT 1`,
+            subscriptionId
+          );
+          if (already.length) {
+            return NextResponse.json({ success: true, message: 'Already processed' });
+          }
+
+          const currency = String(session.currency || 'usd').toUpperCase();
+          const amount = toDecimal(session.amount_total, currency);
+
+          await upsertSubscription({
+            scope: 'GROUP_MONTHLY',
+            userId,
+            groupId,
+            customerId: session.customer as string,
+            subscriptionId,
+            checkoutId: session.id,
+            status: subStatus,
+            currency,
+            amount,
+            periodEnd,
+          });
+
+          // The activation itself — DRAFT/PAUSED only; enum cast required.
+          await prisma.$executeRawUnsafe(
+            `UPDATE "Group"
+             SET "status" = 'ACTIVE'::"GroupStatus", "updatedAt" = now()
+             WHERE "id" = $1 AND "status" IN ('DRAFT'::"GroupStatus", 'PAUSED'::"GroupStatus")`,
+            groupId
+          );
+
+          await recordGroupFeeTransaction({
+            groupId, userId, amount, currency, providerRef: session.id,
+          });
+
+          return NextResponse.json({ success: true, message: 'Group subscription active — group activated' });
+        }
+
+        // ── MEMBER_ANNUAL: settle the joining-fee attempt ──────
+        const providerRef = session.id as string;
+        const attempts: any[] = await prisma.$queryRawUnsafe(
+          `SELECT "id","invoiceId","userId","status","amount","currency"
+           FROM "PaymentAttempt"
+           WHERE "provider" = $1 AND "providerRef" = $2
+           LIMIT 1`,
+          PROVIDER, providerRef
+        );
+        if (!attempts.length) {
+          console.error('POST /api/payments/webhook: no attempt for session', providerRef);
+          return NextResponse.json({ success: true, message: 'No matching attempt; ignored' });
+        }
+        const attempt = attempts[0];
+
+        if (attempt.status === 'SUCCEEDED' || attempt.status === 'FAILED') {
+          return NextResponse.json({ success: true, message: 'Already processed' });
         }
 
         await settleAttempt({
@@ -262,11 +346,12 @@ export async function POST(req: NextRequest) {
 
         if (subscriptionId) {
           await upsertSubscription({
-            scope: session.metadata?.scope || 'MEMBER_ANNUAL',
+            scope: 'MEMBER_ANNUAL',
             userId: attempt.userId,
-            groupId: session.metadata?.groupId || null,
+            groupId: null,
             customerId: session.customer as string,
             subscriptionId,
+            checkoutId: session.id,
             status: subStatus,
             currency: attempt.currency,
             amount: Number(attempt.amount),
@@ -277,7 +362,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, message: 'Payment confirmed and membership activated' });
       }
 
-      // ── Renewal ──────────────────────────────────────────────
+      // ── Renewal (both scopes) ────────────────────────────────
       case 'invoice.paid': {
         const invoice = event.data.object as any;
 
@@ -287,19 +372,6 @@ export async function POST(req: NextRequest) {
           return NextResponse.json({ success: true, message: 'Not a renewal; ignored' });
         }
 
-        const providerRef = invoice.id as string;
-
-        // Idempotency by providerRef — the renewal records are created
-        // here, so their presence means we already ran.
-        const seen: any[] = await prisma.$queryRawUnsafe(
-          `SELECT "id","status" FROM "PaymentAttempt"
-           WHERE "provider" = $1 AND "providerRef" = $2 LIMIT 1`,
-          PROVIDER, providerRef
-        );
-        if (seen.length) {
-          return NextResponse.json({ success: true, message: 'Already processed' });
-        }
-
         const subscriptionId: string | null = invoice.subscription || null;
         if (!subscriptionId) {
           return NextResponse.json({ success: true, message: 'No subscription on invoice; ignored' });
@@ -307,15 +379,59 @@ export async function POST(req: NextRequest) {
 
         const sub = await getStripe().subscriptions.retrieve(subscriptionId);
         const meta = (sub as any).metadata || {};
+        const scope = meta.scope || 'MEMBER_ANNUAL';
         const userId: string | undefined = meta.userId;
+        const providerRef = invoice.id as string;
+        const currency = String(invoice.currency || 'usd').toUpperCase();
+        const amount = toDecimal(invoice.amount_paid, currency);
+        const periodEnd = invoicePeriodEnd(invoice) ?? subscriptionPeriodEnd(sub);
+
+        // ── GROUP_MONTHLY renewal: extend the period, no member
+        //    records — JoiningFeeInvoice/User columns are member-only.
+        if (scope === 'GROUP_MONTHLY') {
+          const groupId: string | null = meta.groupId || null;
+
+          // Idempotency: has this invoice already produced a Transaction?
+          const seenTx: any[] = await prisma.$queryRawUnsafe(
+            `SELECT "id" FROM "Transaction" WHERE "externalRef" = $1 LIMIT 1`,
+            providerRef
+          );
+          if (seenTx.length) {
+            return NextResponse.json({ success: true, message: 'Already processed' });
+          }
+
+          await prisma.$executeRawUnsafe(
+            `UPDATE "PlatformSubscription"
+             SET "status" = 'active', "currentPeriodEnd" = $2, "updatedAt" = now()
+             WHERE "stripeSubscriptionId" = $1`,
+            subscriptionId, periodEnd
+          );
+
+          if (groupId && userId) {
+            await recordGroupFeeTransaction({
+              groupId, userId, amount, currency, providerRef,
+            });
+          }
+
+          return NextResponse.json({ success: true, message: 'Group renewal settled' });
+        }
+
+        // ── MEMBER_ANNUAL renewal ──────────────────────────────
         if (!userId) {
           console.error('POST /api/payments/webhook: renewal without userId metadata', subscriptionId);
           return NextResponse.json({ success: true, message: 'No userId metadata; ignored' });
         }
 
-        const currency = String(invoice.currency || 'usd').toUpperCase();
-        const amount = toDecimal(invoice.amount_paid, currency);
-        const periodEnd = invoicePeriodEnd(invoice) ?? subscriptionPeriodEnd(sub);
+        // Idempotency by providerRef — the renewal records are created
+        // here, so their presence means we already ran.
+        const seen: any[] = await prisma.$queryRawUnsafe(
+          `SELECT "id" FROM "PaymentAttempt"
+           WHERE "provider" = $1 AND "providerRef" = $2 LIMIT 1`,
+          PROVIDER, providerRef
+        );
+        if (seen.length) {
+          return NextResponse.json({ success: true, message: 'Already processed' });
+        }
 
         const countryRows: any[] = await prisma.$queryRawUnsafe(
           `SELECT "country" FROM "User" WHERE "id" = $1 LIMIT 1`,
@@ -340,9 +456,9 @@ export async function POST(req: NextRequest) {
         });
 
         await upsertSubscription({
-          scope: meta.scope || 'MEMBER_ANNUAL',
+          scope: 'MEMBER_ANNUAL',
           userId,
-          groupId: meta.groupId || null,
+          groupId: null,
           customerId: invoice.customer as string,
           subscriptionId,
           status: (sub as any).status || 'active',
@@ -354,7 +470,7 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ success: true, message: 'Renewal settled' });
       }
 
-      // ── Failed payment ───────────────────────────────────────
+      // ── Failed payment (both scopes) ─────────────────────────
       case 'invoice.payment_failed': {
         const invoice = event.data.object as any;
         const subscriptionId: string | null = invoice.subscription || null;
@@ -366,24 +482,40 @@ export async function POST(req: NextRequest) {
             subscriptionId
           );
         }
-        // Membership is NOT revoked here — Stripe Smart Retries run for
-        // ~2 weeks. The user stays paid until joiningFeeExpiresAt lapses
-        // or the subscription is deleted outright.
+        // Nothing is revoked here — Stripe Smart Retries run for ~2 weeks.
+        // Members stay paid until joiningFeeExpiresAt lapses; groups stay
+        // ACTIVE until the subscription is deleted outright.
         console.error('POST /api/payments/webhook: payment failed for subscription', subscriptionId);
         return NextResponse.json({ success: true, message: 'Failure recorded' });
       }
 
-      // ── Subscription ended ───────────────────────────────────
+      // ── Subscription ended (both scopes) ─────────────────────
       case 'customer.subscription.deleted': {
         const sub = event.data.object as any;
+        const scope = sub.metadata?.scope || 'MEMBER_ANNUAL';
+
         await prisma.$executeRawUnsafe(
           `UPDATE "PlatformSubscription"
            SET "status" = 'canceled', "canceledAt" = now(), "updatedAt" = now()
            WHERE "stripeSubscriptionId" = $1`,
           sub.id
         );
-        // Deliberately NOT flipping joiningFeePaid — the member has paid
-        // through joiningFeeExpiresAt and keeps access until then.
+
+        if (scope === 'GROUP_MONTHLY' && sub.metadata?.groupId) {
+          // Group falls to PAUSED — features lock, data survives, and
+          // re-activation simply runs the checkout again.
+          await prisma.$executeRawUnsafe(
+            `UPDATE "Group"
+             SET "status" = 'PAUSED'::"GroupStatus", "updatedAt" = now()
+             WHERE "id" = $1 AND "status" = 'ACTIVE'::"GroupStatus"`,
+            sub.metadata.groupId
+          );
+          return NextResponse.json({ success: true, message: 'Group subscription ended — group paused' });
+        }
+
+        // MEMBER_ANNUAL: deliberately NOT flipping joiningFeePaid — the
+        // member has paid through joiningFeeExpiresAt and keeps access
+        // until then.
         return NextResponse.json({ success: true, message: 'Subscription cancelled' });
       }
 
