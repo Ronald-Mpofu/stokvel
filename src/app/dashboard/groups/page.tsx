@@ -601,6 +601,35 @@ export default function GroupsPage() {
     if (statusChangingId) return   // guard against double-clicks
     setStatusChangingId(groupId)
     try {
+      // ── Activation is a PAID action ─────────────────────────
+      // Business rule: the group subscription is charged at activation,
+      // priced by the group's country + configured capacity (maxMembers).
+      // Start the Stripe checkout; the webhook flips the group to ACTIVE
+      // once payment lands. If a live subscription already exists (409 —
+      // e.g. reactivating from PAUSED while billing continued), fall
+      // through to the plain status update below, which the API permits.
+      if (newStatus === 'ACTIVE') {
+        const payRes = await fetch('/api/payments/group-checkout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ groupId }),
+        })
+        const pay = await payRes.json()
+        if (pay.success && pay.data?.checkoutUrl) {
+          const tierLabel = pay.data.tierMax
+            ? `up to ${pay.data.tierMax} members`
+            : `${pay.data.tierMin ?? 1}+ members`
+          showToast(`Group subscription: ${pay.data.currency} ${Number(pay.data.amount).toFixed(2)}/month (${tierLabel}) — redirecting to checkout…`)
+          window.location.href = pay.data.checkoutUrl
+          return
+        }
+        if (payRes.status !== 409) {
+          showToast(pay.error || 'Could not start the group subscription', 'error')
+          return
+        }
+        // 409 = live subscription exists → plain reactivation below
+      }
+
       const res  = await fetch('/api/groups', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -659,6 +688,26 @@ export default function GroupsPage() {
   }, [])
 
   useEffect(() => { fetchGroups() }, [fetchGroups])
+
+  // ── Returning from Stripe group-subscription checkout ───────
+  // ?activated=1 means Stripe redirected back after payment — the
+  // WEBHOOK flips the group to ACTIVE, and it can lag the redirect by
+  // a few seconds, so refetch once now and again shortly after.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('activated') === '1') {
+      showToast('✅ Payment received — activating your group…')
+      window.history.replaceState({}, '', '/dashboard/groups')
+      const t1 = setTimeout(() => fetchGroups(), 3000)
+      const t2 = setTimeout(() => fetchGroups(), 8000)
+      return () => { clearTimeout(t1); clearTimeout(t2) }
+    }
+    if (params.get('activation_cancelled') === '1') {
+      showToast('Group activation cancelled — no charge was made', 'error')
+      window.history.replaceState({}, '', '/dashboard/groups')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchGroups])
 
   // Auto-fetch members when a group detail is opened
   useEffect(() => {

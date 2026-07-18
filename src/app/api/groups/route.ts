@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { getSessionFromRequest, hasPermission } from '@/lib/auth'
+import { syncGroupSubscriptionTier } from '@/lib/payments/groupTier'
 
 export const dynamic = 'force-dynamic'
 
@@ -234,12 +235,39 @@ export async function PUT(req: NextRequest) {
     const body = await req.json()
     const data = updateSchema.parse(body)
 
-    // Check group exists
+    // Check group exists (status + maxMembers also needed below:
+    // status for the activation payment gate, maxMembers to detect
+    // capacity changes that move the subscription tier)
     const existing = await sql(
-      `SELECT id, name, "deletedAt" FROM "Group" WHERE id = $1`, [data.id]
+      `SELECT id, name, status, "maxMembers", "deletedAt" FROM "Group" WHERE id = $1`, [data.id]
     )
     if (!existing.length || existing[0].deletedAt) {
       return NextResponse.json({ success: false, error: 'Group not found' }, { status: 404 })
+    }
+
+    // ── Activation is a PAID action ───────────────────────────
+    // Business rule: the group subscription is charged when the group
+    // is activated. Setting status=ACTIVE directly through this PUT
+    // would bypass payment entirely, so it is only allowed when a live
+    // GROUP_MONTHLY subscription already exists (e.g. reactivating from
+    // PAUSED while the subscription kept running). Otherwise the client
+    // must go through /api/payments/group-checkout — the Stripe webhook
+    // performs the actual flip to ACTIVE once payment lands.
+    if (data.status === 'ACTIVE' && existing[0].status !== 'ACTIVE') {
+      const liveSub = await sql(
+        `SELECT id FROM "PlatformSubscription"
+         WHERE "groupId" = $1
+           AND scope = 'GROUP_MONTHLY'
+           AND status IN ('active', 'past_due')
+         LIMIT 1`, [data.id]
+      )
+      if (!liveSub.length) {
+        return NextResponse.json({
+          success: false,
+          requiresPayment: true,
+          error: 'Activating a group requires a group subscription. Complete the payment step to activate.',
+        }, { status: 402 })
+      }
     }
 
     // Update ALL fields via raw SQL — bypasses Prisma client schema limitations
@@ -290,6 +318,18 @@ export async function PUT(req: NextRequest) {
       data.status         || null,
       data.id,
     ])
+
+    // ── Capacity changed → re-sync the Stripe tier ────────────
+    // Billing is by configured capacity (maxMembers). If the admin
+    // changed it on a subscribed group, the subscription price moves
+    // to the matching tier from the NEXT invoice (no proration).
+    // The helper never throws — a sync failure must not fail the save.
+    if (
+      data.maxMembers !== undefined &&
+      Number(existing[0].maxMembers) !== Number(data.maxMembers)
+    ) {
+      await syncGroupSubscriptionTier(data.id)
+    }
 
     await prisma.auditLog.create({
       data: {
