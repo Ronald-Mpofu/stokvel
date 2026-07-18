@@ -52,12 +52,20 @@ function priceData(
 
 async function findOrCreateCustomer(
   userId: string,
-  email: string
+  email: string,
+  currency: string
 ): Promise<string> {
   const stripe = getStripe();
-  // Search by our userId in metadata first — avoids duplicate customers
+  const cur = currency.toLowerCase();
+
+  // Stripe locks a Customer to the currency of its first active
+  // subscription and rejects any subscription in a different currency
+  // ("cannot combine currencies on a single customer"). Our platform
+  // routinely mixes currencies on one person — a member joining fee in
+  // USD and a group subscription in AUD, say — so we key the Customer
+  // by (userId, currency) and keep one Stripe Customer per currency.
   const existing = await stripe.customers.search({
-    query: `metadata["windfallUserId"]:"${userId}"`,
+    query: `metadata["windfallUserId"]:"${userId}" AND metadata["windfallCurrency"]:"${cur}"`,
     limit: 1,
   });
   if (existing.data.length > 0) {
@@ -65,7 +73,7 @@ async function findOrCreateCustomer(
   }
   const created = await stripe.customers.create({
     email,
-    metadata: { windfallUserId: userId },
+    metadata: { windfallUserId: userId, windfallCurrency: cur },
   });
   return created.id;
 }
@@ -77,7 +85,7 @@ export const stripeProvider: PaymentProvider = {
     params: CreateCheckoutParams
   ): Promise<CheckoutResult> {
     const stripe = getStripe();
-    const customerId = await findOrCreateCustomer(params.userId, params.userEmail);
+    const customerId = await findOrCreateCustomer(params.userId, params.userEmail, params.price.currency);
 
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
