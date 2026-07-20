@@ -80,7 +80,7 @@ export async function GET(req: NextRequest) {
         COALESCE(g."groupType", 'PRIVATE') as "groupType",
         COALESCE(g."publicAdvert", '')     as "publicAdvert",
         u."fullName" as "adminName", u.email as "adminEmail",
-        (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id) as "memberCount",
+        (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id AND status <> 'EXITED') as "memberCount",
         (SELECT COUNT(*) FROM "Loan" WHERE "groupId" = g.id) as "loanCount"
       FROM "Group" g
       JOIN "User" u ON u.id = g."adminUserId"

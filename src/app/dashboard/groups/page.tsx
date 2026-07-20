@@ -356,6 +356,8 @@ export default function GroupsPage() {
   const [location, setLocation]          = useState({ countryCode:'', provinceCode:'', city:'', currency:'' })
   const [groupMembers, setGroupMembers]  = useState<any[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
+  const [blockedRemoveIds, setBlockedRemoveIds] = useState<Set<string>>(new Set())
+  const [removingMemberId, setRemovingMemberId] = useState<string | null>(null)
   const [editForm, setEditForm]          = useState<any>(null)
   const [editSaving, setEditSaving]      = useState(false)
   const [editLocation, setEditLocation]  = useState({ countryCode:'', provinceCode:'', city:'', currency:'' })
@@ -476,8 +478,13 @@ export default function GroupsPage() {
   const fetchGroupMembers = useCallback(async (groupId: string) => {
     setMembersLoading(true)
     try {
-      const res  = await fetch(`/api/members?groupId=${groupId}`)
-      const data = await res.json()
+      // Roster + the set of members with a financial footprint (blocked from
+      // removal) fetched in parallel — never sequential.
+      const [mRes, bRes] = await Promise.all([
+        fetch(`/api/members?groupId=${groupId}`),
+        fetch(`/api/members/remove?groupId=${groupId}`),
+      ])
+      const data = await mRes.json()
       if (data.success) {
         const members = data.data || []
         // Normalise: ensure every member has a userId field
@@ -488,9 +495,38 @@ export default function GroupsPage() {
         }))
         setGroupMembers(normalised)
       } else setGroupMembers([])
-    } catch { setGroupMembers([]) }
+
+      try {
+        const bData = await bRes.json()
+        setBlockedRemoveIds(new Set<string>(bData?.success ? (bData.data?.blockedUserIds || []) : []))
+      } catch { setBlockedRemoveIds(new Set<string>()) }
+    } catch { setGroupMembers([]); setBlockedRemoveIds(new Set<string>()) }
     finally { setMembersLoading(false) }
   }, [])
+
+  // ── Remove a member from the group ──────────────────────────
+  // Soft-remove (status → EXITED). The API is the source of truth for the
+  // financial-integrity rule: a member with ANY transaction under the group,
+  // across every Windfall Scheme, cannot be removed.
+  async function handleRemoveMember(groupId: string, userId: string, memberName: string) {
+    if (removingMemberId) return
+    if (!window.confirm(`Remove ${memberName} from this group? They can be re-invited later.\n\nMembers with any group transactions cannot be removed.`)) return
+    setRemovingMemberId(userId)
+    try {
+      const res  = await fetch(`/api/members/remove?groupId=${groupId}&userId=${userId}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (data.success) {
+        showToast(data.message || 'Member removed')
+        fetchGroupMembers(groupId)
+        fetchGroups()
+      } else {
+        // Blocked by the financial-integrity rule → keep the button locked.
+        if (data.blocked) setBlockedRemoveIds(prev => new Set(prev).add(userId))
+        showToast(data.error || 'Could not remove member', 'error')
+      }
+    } catch { showToast('Network error', 'error') }
+    finally { setRemovingMemberId(null) }
+  }
 
   // ── Invitations: lazy-load list for a group ─────────────────
   const fetchInvitations = useCallback(async (groupId: string) => {
@@ -1747,7 +1783,7 @@ export default function GroupsPage() {
                 <table style={{ width:'100%', borderCollapse:'collapse' }}>
                   <thead>
                     <tr style={{ background:'#F8FAFC' }}>
-                      {['#','Member','Contact','Country','Tier','KYC','Score','Status','Joined'].map(h => (
+                      {['#','Member','Contact','Country','Tier','KYC','Score','Status','Joined','Actions'].map(h => (
                         <th key={h} style={{ padding:'9px 12px', textAlign:'left', fontSize:'10px', fontWeight:'600', color:'#64748B', borderBottom:'1px solid #E2E8F0', textTransform:'uppercase', whiteSpace:'nowrap' }}>{h}</th>
                       ))}
                     </tr>
@@ -1822,13 +1858,39 @@ export default function GroupsPage() {
                           <td style={{ padding:'10px 12px', fontSize:'11px', color:'#94A3B8', whiteSpace:'nowrap' }}>
                             {m.joinedAt ? new Date(m.joinedAt).toLocaleDateString('en-GB',{day:'numeric',month:'short',year:'numeric'}) : '—'}
                           </td>
+                          <td style={{ padding:'10px 12px', whiteSpace:'nowrap' }}>
+                            {(() => {
+                              const uid      = m.userId || m.id
+                              const isOwner  = uid === g.adminUserId
+                              const isExited = m.status === 'EXITED'
+                              const blocked  = blockedRemoveIds.has(uid)
+                              const busy     = removingMemberId === uid
+                              if (isOwner)  return <span style={{ fontSize:'10px', color:'#94A3B8', fontWeight:'600' }}>Owner</span>
+                              if (isExited) return <span style={{ fontSize:'10px', color:'#94A3B8' }}>Removed</span>
+                              const disabled = blocked || busy
+                              return (
+                                <button
+                                  onClick={() => handleRemoveMember(g.id, uid, m.fullName)}
+                                  disabled={disabled}
+                                  title={blocked ? 'This member has group transactions and cannot be removed' : 'Remove member from group'}
+                                  style={{ padding:'6px 12px',
+                                    background: disabled ? '#F1F5F9' : 'white',
+                                    color:      disabled ? '#94A3B8' : '#991B1B',
+                                    border:     `1px solid ${disabled ? '#E2E8F0' : '#FECACA'}`,
+                                    borderRadius:'7px', fontSize:'11px', fontWeight:'600',
+                                    cursor: disabled ? 'not-allowed' : 'pointer', whiteSpace:'nowrap' }}>
+                                  {busy ? '…' : blocked ? '🔒 Locked' : '✕ Remove'}
+                                </button>
+                              )
+                            })()}
+                          </td>
                         </tr>
                       )
                     })}
                   </tbody>
                   <tfoot>
                     <tr style={{ background:'#F8FAFC', borderTop:'2px solid #E2E8F0' }}>
-                      <td colSpan={9} style={{ padding:'10px 12px', fontSize:'12px', color:'#64748B' }}>
+                      <td colSpan={10} style={{ padding:'10px 12px', fontSize:'12px', color:'#64748B' }}>
                         {groupMembers.filter((m:any)=>m.status==='ACTIVE').length} active ·{' '}
                         {groupMembers.filter((m:any)=>m.kycStatus==='VERIFIED').length} KYC verified ·{' '}
                         Avg score: {groupMembers.length > 0 ? (groupMembers.reduce((s:number,m:any)=>s+Number(m.reputationScore||0),0)/groupMembers.length).toFixed(0) : '—'}
