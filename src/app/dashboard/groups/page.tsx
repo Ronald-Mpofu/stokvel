@@ -171,9 +171,87 @@ const SCHEMES = [
   { id:'assets',     icon:'🏗️', label:'Assets',        desc:'Track and distribute group physical assets',     color:'#475569', bg:'#F1F5F9', available:true  },
 ]
 
+// Card id → WindfallScheme.schemeType in the database
+const CARD_TO_SCHEME_TYPE: Record<string, string> = {
+  grocery:    'GROCERY_CLUB',
+  savings:    'SAVINGS_POOL',
+  property:   'PROPERTY',
+  loans:      'LOANS',
+  investment: 'INVESTMENT',
+  assets:     'ASSETS',
+}
+
 function WindfallSchemesHub({ groupId, groupMembers }: { groupId: string; groupMembers: any[] }) {
   const TEAL2 = '#0F6E56'; const NAVY2 = '#0D2137'
   const [activeId, setActiveId] = useState<string|null>(null)
+
+  // Scheme rows from the WindfallScheme table — drives Remove / Enable.
+  // One lightweight fetch when the Schemes tab opens (the hub only mounts then).
+  const [schemeRows, setSchemeRows]           = useState<any[]>([])
+  const [confirmRemoveId, setConfirmRemoveId] = useState<string|null>(null)
+  const [removingId, setRemovingId]           = useState<string|null>(null)
+  const [enablingId, setEnablingId]           = useState<string|null>(null)
+  const [schemeError, setSchemeError]         = useState<{ cardId: string; blockers: string[] }|null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    fetch(`/api/windfall?groupId=${groupId}`)
+      .then(r => r.json())
+      .then(d => { if (!cancelled) setSchemeRows(d.success ? (d.data || []) : []) })
+      .catch(() => { if (!cancelled) setSchemeRows([]) })
+    return () => { cancelled = true }
+  }, [groupId])
+
+  // Legacy mode: if the group has no WindfallScheme rows at all, the grid
+  // behaves exactly as before (no Remove/Enable controls shown).
+  const managed = schemeRows.length > 0
+
+  function activeRowFor(cardId: string) {
+    const type = CARD_TO_SCHEME_TYPE[cardId]
+    return schemeRows.find((r: any) => r.schemeType === type && r.status === 'ACTIVE') || null
+  }
+
+  // ── Remove a scheme (Group Admin) ───────────────────────────
+  // The API is the source of truth for the financial-integrity rule:
+  // a scheme with ANY transactions or financial records cannot be removed.
+  async function handleRemoveScheme(cardId: string) {
+    const row = activeRowFor(cardId)
+    if (!row || removingId) return
+    setRemovingId(cardId)
+    setSchemeError(null)
+    try {
+      const res  = await fetch(`/api/windfall?id=${row.id}`, { method: 'DELETE' })
+      const data = await res.json()
+      if (data.success) {
+        setSchemeRows(prev => prev.filter((r: any) => r.id !== row.id))
+      } else {
+        setSchemeError({ cardId, blockers: data.blockers?.length ? data.blockers : [data.error || 'Could not remove scheme'] })
+      }
+    } catch { setSchemeError({ cardId, blockers: ['Network error — please try again'] }) }
+    finally { setRemovingId(null); setConfirmRemoveId(null) }
+  }
+
+  // ── Re-enable a removed scheme ──────────────────────────────
+  async function handleEnableScheme(cardId: string) {
+    if (enablingId) return
+    const meta = SCHEMES.find(s => s.id === cardId)
+    setEnablingId(cardId)
+    setSchemeError(null)
+    try {
+      const res  = await fetch('/api/windfall', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groupId, schemeType: CARD_TO_SCHEME_TYPE[cardId], name: meta ? meta.label : cardId }),
+      })
+      const data = await res.json()
+      if (data.success && data.data && data.data.id) {
+        setSchemeRows(prev => [...prev, { id: data.data.id, groupId, schemeType: CARD_TO_SCHEME_TYPE[cardId], name: meta ? meta.label : cardId, status: 'ACTIVE' }])
+      } else {
+        setSchemeError({ cardId, blockers: [data.error || 'Could not enable scheme'] })
+      }
+    } catch { setSchemeError({ cardId, blockers: ['Network error — please try again'] }) }
+    finally { setEnablingId(null) }
+  }
 
   // ── Render active scheme module ────────────────────────────
   if (activeId) {
@@ -206,44 +284,94 @@ function WindfallSchemesHub({ groupId, groupMembers }: { groupId: string; groupM
     <div>
       <div style={{ marginBottom:'16px' }}>
         <h3 style={{ fontSize:'15px', fontWeight:'700', color:NAVY2, margin:'0 0 4px' }}>🌀 Windfall Schemes</h3>
-        <p style={{ fontSize:'12px', color:'#64748B', margin:0 }}>Select a scheme to manage for this group. Members can participate in multiple schemes simultaneously.</p>
+        <p style={{ fontSize:'12px', color:'#64748B', margin:0 }}>Select a scheme to manage for this group. Members can participate in multiple schemes simultaneously.{managed ? ' Schemes without any transactions can be removed.' : ''}</p>
       </div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'12px' }}>
-        {SCHEMES.map(s => (
-          <div key={s.id}
-            onClick={() => setActiveId(s.id)}
-            style={{ background:'white', borderRadius:'14px', border:`2px solid ${s.available ? '#E2E8F0' : '#F1F5F9'}`,
-              padding:'20px 16px', cursor:'pointer', transition:'all 0.2s', position:'relative', textAlign:'center' }}
-            onMouseEnter={e => {
-              const el = e.currentTarget as HTMLElement
-              el.style.border = `2px solid ${s.color}`
-              el.style.boxShadow = `0 6px 20px rgba(0,0,0,0.10)`
-              el.style.transform = 'translateY(-2px)'
-            }}
-            onMouseLeave={e => {
-              const el = e.currentTarget as HTMLElement
-              el.style.border = `2px solid ${s.available ? '#E2E8F0' : '#F1F5F9'}`
-              el.style.boxShadow = 'none'
-              el.style.transform = 'translateY(0)'
-            }}>
-            {!s.available && (
-              <span style={{ position:'absolute', top:'8px', right:'8px', background:'#F1F5F9', color:'#94A3B8', fontSize:'9px', fontWeight:'700', padding:'2px 6px', borderRadius:'4px', letterSpacing:'0.04em' }}>
-                SOON
-              </span>
-            )}
-            <div style={{ width:'52px', height:'52px', borderRadius:'14px', background:s.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'24px', margin:'0 auto 12px' }}>
-              {s.icon}
+        {SCHEMES.map(s => {
+          const row        = activeRowFor(s.id)
+          const isDisabled = managed && !row
+          const confirming = confirmRemoveId === s.id
+          const cardError  = schemeError && schemeError.cardId === s.id ? schemeError : null
+          return (
+            <div key={s.id}
+              onClick={() => { if (!isDisabled && !confirming) setActiveId(s.id) }}
+              style={{ background:'white', borderRadius:'14px', border:`2px solid ${s.available ? '#E2E8F0' : '#F1F5F9'}`,
+                padding:'20px 16px', cursor: isDisabled ? 'default' : 'pointer', transition:'all 0.2s', position:'relative', textAlign:'center',
+                opacity: isDisabled ? 0.55 : 1 }}
+              onMouseEnter={e => {
+                if (isDisabled) return
+                const el = e.currentTarget as HTMLElement
+                el.style.border = `2px solid ${s.color}`
+                el.style.boxShadow = `0 6px 20px rgba(0,0,0,0.10)`
+                el.style.transform = 'translateY(-2px)'
+              }}
+              onMouseLeave={e => {
+                const el = e.currentTarget as HTMLElement
+                el.style.border = `2px solid ${s.available ? '#E2E8F0' : '#F1F5F9'}`
+                el.style.boxShadow = 'none'
+                el.style.transform = 'translateY(0)'
+              }}>
+              {!s.available && (
+                <span style={{ position:'absolute', top:'8px', right:'8px', background:'#F1F5F9', color:'#94A3B8', fontSize:'9px', fontWeight:'700', padding:'2px 6px', borderRadius:'4px', letterSpacing:'0.04em' }}>
+                  SOON
+                </span>
+              )}
+              {row && !confirming && (
+                <button type="button" title="Remove this scheme"
+                  onClick={e => { e.stopPropagation(); setSchemeError(null); setConfirmRemoveId(s.id) }}
+                  style={{ position:'absolute', top:'8px', left:'8px', background:'#FEF2F2', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'6px', fontSize:'11px', padding:'2px 6px', cursor:'pointer', lineHeight:'1.4' }}>
+                  🗑️
+                </button>
+              )}
+              <div style={{ width:'52px', height:'52px', borderRadius:'14px', background:s.bg, display:'flex', alignItems:'center', justifyContent:'center', fontSize:'24px', margin:'0 auto 12px' }}>
+                {s.icon}
+              </div>
+              <div style={{ fontSize:'14px', fontWeight:'700', color:NAVY2, marginBottom:'6px' }}>{s.label}</div>
+              <div style={{ fontSize:'11px', color:'#94A3B8', lineHeight:'1.5', marginBottom:'12px' }}>{s.desc}</div>
+              {cardError && (
+                <div onClick={e => e.stopPropagation()}
+                  style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'8px', padding:'8px 10px', marginBottom:'10px', textAlign:'left' }}>
+                  <div style={{ fontSize:'11px', fontWeight:'700', color:'#991B1B', marginBottom:'4px' }}>🚫 Cannot remove:</div>
+                  {cardError.blockers.map((b: string, i: number) => (
+                    <div key={i} style={{ fontSize:'11px', color:'#991B1B', marginBottom:'2px' }}>• {b}</div>
+                  ))}
+                  <button type="button" onClick={e => { e.stopPropagation(); setSchemeError(null) }}
+                    style={{ marginTop:'4px', padding:'3px 10px', background:'white', color:'#991B1B', border:'1px solid #FECACA', borderRadius:'5px', fontSize:'10px', cursor:'pointer' }}>
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              {confirming ? (
+                <div onClick={e => e.stopPropagation()}
+                  style={{ display:'inline-flex', alignItems:'center', gap:'6px', fontSize:'11px', fontWeight:'600', background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'999px', padding:'4px 10px' }}>
+                  <span style={{ color:'#991B1B' }}>Remove?</span>
+                  <button type="button" onClick={() => handleRemoveScheme(s.id)} disabled={removingId === s.id}
+                    style={{ padding:'2px 10px', background:'#991B1B', color:'white', border:'none', borderRadius:'999px', fontSize:'11px', fontWeight:'600', cursor: removingId === s.id ? 'not-allowed' : 'pointer' }}>
+                    {removingId === s.id ? '⏳' : 'Yes'}
+                  </button>
+                  <button type="button" onClick={() => setConfirmRemoveId(null)}
+                    style={{ padding:'2px 10px', background:'white', color:'#475569', border:'1px solid #E2E8F0', borderRadius:'999px', fontSize:'11px', cursor:'pointer' }}>
+                    No
+                  </button>
+                </div>
+              ) : isDisabled ? (
+                <button type="button" onClick={e => { e.stopPropagation(); handleEnableScheme(s.id) }} disabled={enablingId === s.id}
+                  style={{ display:'inline-flex', alignItems:'center', gap:'4px', fontSize:'11px', fontWeight:'600',
+                    color:'#475569', background:'#F1F5F9', border:'1px dashed #CBD5E1',
+                    padding:'4px 12px', borderRadius:'999px', cursor: enablingId === s.id ? 'not-allowed' : 'pointer' }}>
+                  {enablingId === s.id ? '⏳ Enabling...' : '＋ Enable'}
+                </button>
+              ) : (
+                <div style={{ display:'inline-flex', alignItems:'center', gap:'4px', fontSize:'11px', fontWeight:'600',
+                  color: s.available ? s.color : '#94A3B8',
+                  background: s.available ? s.bg : '#F8FAFC',
+                  padding:'4px 12px', borderRadius:'999px' }}>
+                  {s.available ? 'Open →' : 'Coming Soon'}
+                </div>
+              )}
             </div>
-            <div style={{ fontSize:'14px', fontWeight:'700', color:NAVY2, marginBottom:'6px' }}>{s.label}</div>
-            <div style={{ fontSize:'11px', color:'#94A3B8', lineHeight:'1.5', marginBottom:'12px' }}>{s.desc}</div>
-            <div style={{ display:'inline-flex', alignItems:'center', gap:'4px', fontSize:'11px', fontWeight:'600',
-              color: s.available ? s.color : '#94A3B8',
-              background: s.available ? s.bg : '#F8FAFC',
-              padding:'4px 12px', borderRadius:'999px' }}>
-              {s.available ? 'Open →' : 'Coming Soon'}
-            </div>
-          </div>
-        ))}
+          )
+        })}
       </div>
     </div>
   )
