@@ -1,5 +1,7 @@
 // src/app/login/page.tsx — role-aware redirect after login
-// Mobile: single-column layout, branding panel hidden, compact logo header.
+// Mobile: single column — logo/title/subtitle header, form, forgot-password
+// link, create-account line, then the feature list. Desktop keeps the
+// two-panel layout (features in the left branding panel).
 'use client'
 import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -8,6 +10,13 @@ const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR']
+
+const FEATURES = [
+  { icon:'👥', text:'Stokvel & savings groups' },
+  { icon:'💰', text:'Community loans & assets' },
+  { icon:'🏠', text:'Property & investment pools' },
+  { icon:'🔒', text:'Secure & transparent' },
+]
 
 // Matches the 640px breakpoint used elsewhere in the app. Defaults to
 // false so SSR renders the desktop layout, then corrects on mount.
@@ -97,7 +106,7 @@ function LoginForm() {
   return (
     <div style={{ minHeight:'100vh', display:'flex', flexDirection: isMobile ? 'column' : 'row', fontFamily:'system-ui, sans-serif', background:'#F8FAFC', width:'100%', overflowX:'hidden' }}>
 
-      {/* Left panel — branding (hidden on mobile) */}
+      {/* Left panel — branding (desktop only) */}
       {!isMobile && (
         <div style={{ flex:1, background:`linear-gradient(135deg, ${NAVY} 0%, #1A3A5C 100%)`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'48px', minHeight:'100vh' }}>
           <div style={{ maxWidth:'400px', textAlign:'center' }}>
@@ -105,12 +114,7 @@ function LoginForm() {
             <h1 style={{ fontSize:'32px', fontWeight:'800', color:'white', margin:'0 0 12px', lineHeight:1.2 }}>Windfall<br/>Community Deals</h1>
             <p style={{ fontSize:'16px', color:'rgba(255,255,255,0.65)', margin:'0 0 40px', lineHeight:1.6 }}>Your community. Your savings. Your future.</p>
             <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
-              {[
-                { icon:'👥', text:'Stokvel & savings groups' },
-                { icon:'💰', text:'Community loans & assets' },
-                { icon:'🏠', text:'Property & investment pools' },
-                { icon:'🔒', text:'Secure & transparent' },
-              ].map(f => (
+              {FEATURES.map(f => (
                 <div key={f.text} style={{ display:'flex', alignItems:'center', gap:'12px', background:'rgba(255,255,255,0.08)', borderRadius:'10px', padding:'12px 16px' }}>
                   <span style={{ fontSize:'20px' }}>{f.icon}</span>
                   <span style={{ fontSize:'14px', color:'rgba(255,255,255,0.8)', fontWeight:'500' }}>{f.text}</span>
@@ -129,12 +133,13 @@ function LoginForm() {
           {isMobile && (
             <div style={{ textAlign:'center', marginBottom:'28px' }}>
               <div style={{ width:'56px', height:'56px', background:TEAL, borderRadius:'16px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'28px', margin:'0 auto 12px' }}>🔄</div>
-              <div style={{ fontSize:'20px', fontWeight:'800', color:NAVY, lineHeight:1.2 }}>Windfall Community Deals</div>
+              <div style={{ fontSize:'20px', fontWeight:'800', color:NAVY, lineHeight:1.2, marginBottom:'6px' }}>Windfall Community Deals</div>
+              <div style={{ fontSize:'13px', color:'#64748B', lineHeight:1.5 }}>Your community. Your savings. Your future.</div>
             </div>
           )}
 
-          <h2 style={{ fontSize:'26px', fontWeight:'700', color:NAVY, margin:'0 0 6px', textAlign: isMobile ? 'center' : 'left' }}>Welcome back</h2>
-          <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 32px', textAlign: isMobile ? 'center' : 'left' }}>Sign in to your account</p>
+          <h2 style={{ fontSize:'26px', fontWeight:'700', color:NAVY, margin:'0 0 6px', textAlign: isMobile ? 'center' : 'left' }}>Welcome</h2>
+          <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 32px', textAlign: isMobile ? 'center' : 'left' }}>Sign in to your account, or create a new one to get started.</p>
 
           {error && (
             <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'10px', padding:'12px 16px', marginBottom:'20px', color:'#991B1B', fontSize:'13px', display:'flex', alignItems:'center', gap:'8px' }}>
@@ -173,28 +178,32 @@ function LoginForm() {
             </button>
           </form>
 
-          <p style={{ textAlign:'center', fontSize:'13px', color:'#64748B', margin:'20px 0 0' }}>
+          {/* Forgot password */}
+          <p style={{ textAlign:'center', fontSize:'13px', margin:'16px 0 0' }}>
+            <a href="/forgot-password" style={{ color:'#64748B', fontWeight:'600', textDecoration:'none' }}>Forgot password?</a>
+          </p>
+
+          <p style={{ textAlign:'center', fontSize:'13px', color:'#64748B', margin:'12px 0 0' }}>
             New to Community Deals?{' '}
             <a href="/register" style={{ color:TEAL, fontWeight:'600', textDecoration:'none' }}>Create account</a>
           </p>
 
-          {/* Role guide */}
-          <div style={{ marginTop:'32px', padding:'16px', background:'#F8FAFC', borderRadius:'10px', border:'1px solid #E2E8F0' }}>
-            <div style={{ fontSize:'11px', fontWeight:'600', color:'#64748B', marginBottom:'10px', textTransform:'uppercase', letterSpacing:'0.05em' }}>After login you will be directed to</div>
-            <div style={{ display:'flex', flexDirection:'column', gap:'8px' }}>
-              {[
-                { role:'System Admin',  icon:'🔑', dest:'Full Dashboard',   color:'#5B21B6' },
-                { role:'Group Admin',   icon:'👥', dest:'Group Dashboard',  color:TEAL },
-                { role:'Member',        icon:'👤', dest:'Member Portal',    color:'#1E40AF' },
-              ].map(r => (
-                <div key={r.role} style={{ display:'flex', alignItems:'center', gap:'10px', fontSize:'12px' }}>
-                  <span style={{ fontSize:'16px' }}>{r.icon}</span>
-                  <span style={{ color:'#374151', fontWeight:'500', minWidth:'100px' }}>{r.role}</span>
-                  <span style={{ color:r.color, fontWeight:'600' }}>→ {r.dest}</span>
-                </div>
-              ))}
+          {/* Feature list — mobile only (desktop shows these in the left panel) */}
+          {isMobile && (
+            <div style={{ marginTop:'32px', paddingTop:'28px', borderTop:'1px solid #E2E8F0' }}>
+              <div style={{ fontSize:'14px', fontWeight:'700', color:NAVY, marginBottom:'16px', textAlign:'center', lineHeight:1.4 }}>
+                Join the community and see what groups are building together
+              </div>
+              <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+                {FEATURES.map(f => (
+                  <div key={f.text} style={{ display:'flex', alignItems:'center', gap:'12px', background:'#F8FAFC', border:'1px solid #E2E8F0', borderRadius:'10px', padding:'12px 16px' }}>
+                    <span style={{ fontSize:'20px' }}>{f.icon}</span>
+                    <span style={{ fontSize:'14px', color:'#374151', fontWeight:'500' }}>{f.text}</span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
           <p style={{ textAlign:'center', fontSize:'12px', color:'#94A3B8', marginTop:'24px' }}>
             Windfall Community Deals · Secure Platform
