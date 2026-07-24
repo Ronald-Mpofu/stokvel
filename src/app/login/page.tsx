@@ -1,4 +1,5 @@
 // src/app/login/page.tsx — role-aware redirect after login
+// Mobile: single-column layout, branding panel hidden, compact logo header.
 'use client'
 import { useState, useEffect, Suspense } from 'react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -8,10 +9,25 @@ const NAVY = '#0D2137'
 
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR']
 
+// Matches the 640px breakpoint used elsewhere in the app. Defaults to
+// false so SSR renders the desktop layout, then corrects on mount.
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 640px)')
+    const update = () => setIsMobile(mq.matches)
+    update()
+    mq.addEventListener('change', update)
+    return () => mq.removeEventListener('change', update)
+  }, [])
+  return isMobile
+}
+
 function LoginForm() {
   const router       = useRouter()
   const searchParams = useSearchParams()
   const redirectTo   = searchParams.get('redirect')
+  const isMobile     = useIsMobile()
 
   const [email, setEmail]       = useState('')
   const [password, setPassword] = useState('')
@@ -79,35 +95,46 @@ function LoginForm() {
   }
 
   return (
-    <div style={{ minHeight:'100vh', display:'flex', fontFamily:'system-ui, sans-serif', background:'#F8FAFC' }}>
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection: isMobile ? 'column' : 'row', fontFamily:'system-ui, sans-serif', background:'#F8FAFC', width:'100%', overflowX:'hidden' }}>
 
-      {/* Left panel — branding */}
-      <div style={{ flex:1, background:`linear-gradient(135deg, ${NAVY} 0%, #1A3A5C 100%)`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'48px', minHeight:'100vh' }}>
-        <div style={{ maxWidth:'400px', textAlign:'center' }}>
-          <div style={{ width:'72px', height:'72px', background:TEAL, borderRadius:'20px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'36px', margin:'0 auto 24px' }}>🔄</div>
-          <h1 style={{ fontSize:'32px', fontWeight:'800', color:'white', margin:'0 0 12px', lineHeight:1.2 }}>Windfall<br/>Community Deals</h1>
-          <p style={{ fontSize:'16px', color:'rgba(255,255,255,0.65)', margin:'0 0 40px', lineHeight:1.6 }}>Your community. Your savings. Your future.</p>
-          <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
-            {[
-              { icon:'👥', text:'Stokvel & savings groups' },
-              { icon:'💰', text:'Community loans & assets' },
-              { icon:'🏠', text:'Property & investment pools' },
-              { icon:'🔒', text:'Secure & transparent' },
-            ].map(f => (
-              <div key={f.text} style={{ display:'flex', alignItems:'center', gap:'12px', background:'rgba(255,255,255,0.08)', borderRadius:'10px', padding:'12px 16px' }}>
-                <span style={{ fontSize:'20px' }}>{f.icon}</span>
-                <span style={{ fontSize:'14px', color:'rgba(255,255,255,0.8)', fontWeight:'500' }}>{f.text}</span>
-              </div>
-            ))}
+      {/* Left panel — branding (hidden on mobile) */}
+      {!isMobile && (
+        <div style={{ flex:1, background:`linear-gradient(135deg, ${NAVY} 0%, #1A3A5C 100%)`, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'48px', minHeight:'100vh' }}>
+          <div style={{ maxWidth:'400px', textAlign:'center' }}>
+            <div style={{ width:'72px', height:'72px', background:TEAL, borderRadius:'20px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'36px', margin:'0 auto 24px' }}>🔄</div>
+            <h1 style={{ fontSize:'32px', fontWeight:'800', color:'white', margin:'0 0 12px', lineHeight:1.2 }}>Windfall<br/>Community Deals</h1>
+            <p style={{ fontSize:'16px', color:'rgba(255,255,255,0.65)', margin:'0 0 40px', lineHeight:1.6 }}>Your community. Your savings. Your future.</p>
+            <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+              {[
+                { icon:'👥', text:'Stokvel & savings groups' },
+                { icon:'💰', text:'Community loans & assets' },
+                { icon:'🏠', text:'Property & investment pools' },
+                { icon:'🔒', text:'Secure & transparent' },
+              ].map(f => (
+                <div key={f.text} style={{ display:'flex', alignItems:'center', gap:'12px', background:'rgba(255,255,255,0.08)', borderRadius:'10px', padding:'12px 16px' }}>
+                  <span style={{ fontSize:'20px' }}>{f.icon}</span>
+                  <span style={{ fontSize:'14px', color:'rgba(255,255,255,0.8)', fontWeight:'500' }}>{f.text}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Right panel — login form */}
-      <div style={{ width:'480px', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding:'48px', background:'white' }}>
+      <div style={{ width: isMobile ? '100%' : '480px', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', padding: isMobile ? '32px 20px' : '48px', background:'white', boxSizing:'border-box' as any, minHeight: isMobile ? '100vh' : undefined }}>
         <div style={{ width:'100%', maxWidth:'360px' }}>
-          <h2 style={{ fontSize:'26px', fontWeight:'700', color:NAVY, margin:'0 0 6px' }}>Welcome back</h2>
-          <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 32px' }}>Sign in to your account</p>
+
+          {/* Compact brand header — mobile only */}
+          {isMobile && (
+            <div style={{ textAlign:'center', marginBottom:'28px' }}>
+              <div style={{ width:'56px', height:'56px', background:TEAL, borderRadius:'16px', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'28px', margin:'0 auto 12px' }}>🔄</div>
+              <div style={{ fontSize:'20px', fontWeight:'800', color:NAVY, lineHeight:1.2 }}>Windfall Community Deals</div>
+            </div>
+          )}
+
+          <h2 style={{ fontSize:'26px', fontWeight:'700', color:NAVY, margin:'0 0 6px', textAlign: isMobile ? 'center' : 'left' }}>Welcome back</h2>
+          <p style={{ fontSize:'14px', color:'#64748B', margin:'0 0 32px', textAlign: isMobile ? 'center' : 'left' }}>Sign in to your account</p>
 
           {error && (
             <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'10px', padding:'12px 16px', marginBottom:'20px', color:'#991B1B', fontSize:'13px', display:'flex', alignItems:'center', gap:'8px' }}>
@@ -121,7 +148,7 @@ function LoginForm() {
               <input
                 type="email" value={email} onChange={e => setEmail(e.target.value)}
                 placeholder="you@example.com" required autoComplete="email" autoFocus
-                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #E2E8F0', borderRadius:'10px', fontSize:'14px', outline:'none', boxSizing:'border-box' as any, transition:'border-color 0.15s' }}
+                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #E2E8F0', borderRadius:'10px', fontSize:'16px', outline:'none', boxSizing:'border-box' as any, transition:'border-color 0.15s' }}
                 onFocus={e => e.target.style.borderColor = TEAL}
                 onBlur={e => e.target.style.borderColor = '#E2E8F0'}
               />
@@ -132,7 +159,7 @@ function LoginForm() {
               <input
                 type="password" value={password} onChange={e => setPassword(e.target.value)}
                 placeholder="••••••••" required autoComplete="current-password"
-                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #E2E8F0', borderRadius:'10px', fontSize:'14px', outline:'none', boxSizing:'border-box' as any, transition:'border-color 0.15s' }}
+                style={{ width:'100%', padding:'11px 14px', border:'1.5px solid #E2E8F0', borderRadius:'10px', fontSize:'16px', outline:'none', boxSizing:'border-box' as any, transition:'border-color 0.15s' }}
                 onFocus={e => e.target.style.borderColor = TEAL}
                 onBlur={e => e.target.style.borderColor = '#E2E8F0'}
               />
