@@ -264,6 +264,53 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    // ── Seed the Windfall Schemes (added v2) ──────────────────
+    // v1 never created these, so every group made after
+    // seed-windfall-schemes.sql ran had ZERO scheme rows. The UI hid it:
+    // WindfallSchemesHub falls into legacy mode when schemeRows is empty
+    // and just omits the Remove/Enable controls, so nothing looked broken
+    // while group admins quietly lost the ability to manage schemes.
+    //
+    // Scheme types come from pg_enum rather than a hardcoded list, so
+    // this cannot drift from the actual WindfallSchemeType enum and picks
+    // up any new value automatically.
+    //
+    // Names and descriptions are copied from existing rows of the same
+    // type so new groups match the ones the original seed created.
+    //
+    // ON CONFLICT DO NOTHING against WindfallScheme_groupId_schemeType_key
+    // makes this idempotent and safe alongside the backfill migration.
+    // A failure here must NOT lose the group — it is recoverable by
+    // re-running 07-backfill-windfall-schemes.sql.
+    try {
+      await exec(`
+        INSERT INTO "WindfallScheme" ("groupId", "schemeType", "name", "description", "status")
+        SELECT
+          $1::text,
+          e.enumlabel::"WindfallSchemeType",
+          COALESCE(
+            (SELECT w.name FROM "WindfallScheme" w
+              WHERE w."schemeType" = e.enumlabel::"WindfallSchemeType"
+              ORDER BY w."createdAt" LIMIT 1),
+            initcap(replace(e.enumlabel, '_', ' '))
+          ),
+          (SELECT w.description FROM "WindfallScheme" w
+            WHERE w."schemeType" = e.enumlabel::"WindfallSchemeType"
+              AND w.description IS NOT NULL
+            ORDER BY w."createdAt" LIMIT 1),
+          'ACTIVE'::"WindfallSchemeStatus"
+        FROM (
+          SELECT en.enumlabel
+          FROM pg_enum en
+          JOIN pg_type ty ON ty.oid = en.enumtypid
+          WHERE ty.typname = 'WindfallSchemeType'
+        ) e
+        ON CONFLICT ("groupId", "schemeType") DO NOTHING
+      `, [group.id])
+    } catch (e: any) {
+      console.error('POST /api/groups scheme seed failed for', group.id, e?.message)
+    }
+
     await prisma.auditLog.create({
       data: {
         action:      'CREATE',
