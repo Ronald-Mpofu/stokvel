@@ -2,10 +2,24 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
-import { getSessionFromRequest, hasPermission } from '@/lib/auth'
+import { getClaimsFromRequest, getSessionFromRequest, requireGroupManager, hasPermission } from '@/lib/auth'
 import { syncGroupSubscriptionTier } from '@/lib/payments/groupTier'
 
 export const dynamic = 'force-dynamic'
+
+// Raw driver errors leak table names, column names and SQL fragments to
+// the client. Log the real thing, return something safe in production.
+const IS_PROD = process.env.NODE_ENV === 'production'
+function safeError(e: any, fallback: string): string {
+  return IS_PROD ? fallback : (e?.message || fallback)
+}
+
+// Page size ceiling. The Groups page currently loads everything and
+// filters client-side; DEFAULT_LIMIT is far above today's row count so
+// nothing changes yet, but the endpoint can no longer return an
+// unbounded array. `pagination` in the response carries the cursor.
+const DEFAULT_LIMIT = 200
+const MAX_LIMIT = 500
 
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
@@ -44,25 +58,34 @@ export async function GET(req: NextRequest) {
     // ── Role-based scoping (BR 1 & 4) ────────────────────────
     // SYSTEM_ADMIN / NATIONAL_ADMIN / AUDITOR see all groups.
     // Everyone else sees only groups they created (adminUserId)
-    // OR groups where they hold an ACTIVE GROUP_ADMIN member role.
-    const session = await getSessionFromRequest(req)
-    if (!session) {
+    // OR groups where they hold an ACTIVE GROUP_ADMIN / TREASURER role.
+    //
+    // v2: reads verified JWT claims instead of loading the user row —
+    // this handler only needed id and role, both of which are claims.
+    // Saves one round trip on every call.
+    const claims = await getClaimsFromRequest(req)
+    if (!claims) {
       return NextResponse.json({ success: false, error: 'Not authenticated' }, { status: 401 })
     }
-    const seesAll  = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'AUDITOR'].includes(session.role)
-    const scopeSql = seesAll ? '' : `AND (
-        g."adminUserId" = $1
-        OR EXISTS (
-          SELECT 1 FROM "GroupMember" gm
-          WHERE gm."groupId" = g.id
-            AND gm."userId"  = $1
-            AND gm.role      = 'GROUP_ADMIN'
-            AND gm.status    = 'ACTIVE'
-        )
-      )`
-    const params = seesAll ? [] : [session.id]
+    const seesAll = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'AUDITOR'].includes(claims.role)
 
-    // Use raw SQL to include branding column (not in Prisma schema yet)
+    const { searchParams } = new URL(req.url)
+    const cursor = searchParams.get('cursor')
+    const search = searchParams.get('search')?.trim() || null
+    const status = searchParams.get('status')
+    const limit = Math.min(
+      Math.max(Number(searchParams.get('limit')) || DEFAULT_LIMIT, 1),
+      MAX_LIMIT
+    )
+
+    // Scope is now a bound parameter rather than concatenated SQL, so
+    // there is one query shape regardless of role. $2 short-circuits
+    // the whole predicate for platform-wide roles.
+    //
+    // Cursor resolves the anchor row's createdAt via subquery instead of
+    // casting a client-supplied timestamp — that keeps the comparison in
+    // the column's own type and avoids a cast that would defeat
+    // idx_group_createdat_live.
     const groups = await sql(`
       SELECT
         g.id, g.name, g.description, g.status, g.currency,
@@ -85,11 +108,32 @@ export async function GET(req: NextRequest) {
       FROM "Group" g
       JOIN "User" u ON u.id = g."adminUserId"
       WHERE g."deletedAt" IS NULL
-      ${scopeSql}
-      ORDER BY g."createdAt" DESC
-    `, params)
+        AND (
+          $2::boolean IS TRUE
+          OR g."adminUserId" = $1::text
+          OR EXISTS (
+            SELECT 1 FROM "GroupMember" gm
+            WHERE gm."groupId" = g.id
+              AND gm."userId"  = $1::text
+              AND gm.role      IN ('GROUP_ADMIN', 'TREASURER')
+              AND gm.status    = 'ACTIVE'
+          )
+        )
+        AND (
+          $3::text IS NULL
+          OR (g."createdAt", g.id) <
+             ((SELECT c."createdAt" FROM "Group" c WHERE c.id = $3::text), $3::text)
+        )
+        AND ($4::text IS NULL OR g.name ILIKE '%' || $4::text || '%')
+        AND ($5::text IS NULL OR g.status::text = $5::text)
+      ORDER BY g."createdAt" DESC, g.id DESC
+      LIMIT $6::int
+    `, [claims.id, seesAll, cursor, search, status && status !== 'ALL' ? status : null, limit + 1])
 
-    const formatted = groups.map((g: any) => ({
+    const hasMore = groups.length > limit
+    const page = hasMore ? groups.slice(0, limit) : groups
+
+    const formatted = page.map((g: any) => ({
       id:                    g.id,
       name:                  g.name,
       description:           g.description,
@@ -126,10 +170,21 @@ export async function GET(req: NextRequest) {
       updatedAt:             g.updatedAt,
     }))
 
-    return NextResponse.json({ success: true, data: formatted })
+    // `data` stays a plain array so the existing page needs no changes.
+    // `pagination` is additive — wire it up when the list grows.
+    return NextResponse.json({
+      success: true,
+      data: formatted,
+      pagination: {
+        limit,
+        returned: formatted.length,
+        hasMore,
+        nextCursor: hasMore ? formatted[formatted.length - 1].id : null,
+      },
+    })
   } catch (e: any) {
     console.error('GET /api/groups error:', e)
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Failed to load groups') }, { status: 500 })
   }
 }
 
@@ -225,7 +280,7 @@ export async function POST(req: NextRequest) {
     }, { status: 201 })
   } catch (e: any) {
     console.error('POST /api/groups error:', e)
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Request failed') }, { status: 500 })
   }
 }
 
@@ -234,6 +289,18 @@ export async function PUT(req: NextRequest) {
   try {
     const body = await req.json()
     const data = updateSchema.parse(body)
+
+    // ── AUTHORISATION (added v2) ──────────────────────────────
+    // v1 had NO guard here. Middleware only enforces that the caller is
+    // authenticated, so any logged-in user could rename any group,
+    // change its contribution amount, penalty rate, currency, officers
+    // or status simply by passing that group's id.
+    //
+    // verifyStatus: true costs one extra query to re-check live account
+    // standing rather than trusting the token snapshot — appropriate for
+    // a financial mutation.
+    const guardErr = await requireGroupManager(req, data.id, { verifyStatus: true })
+    if (guardErr) return guardErr
 
     // Check group exists (status + maxMembers also needed below:
     // status for the activation payment gate, maxMembers to detect
@@ -349,7 +416,7 @@ export async function PUT(req: NextRequest) {
       }, { status: 400 })
     }
     console.error('PUT /api/groups error:', e)
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Request failed') }, { status: 500 })
   }
 }
 
@@ -362,6 +429,13 @@ export async function DELETE(req: NextRequest) {
     const forceDelete = searchParams.get('force') === 'true'
 
     if (!id) return NextResponse.json({ success: false, error: 'Group ID required' }, { status: 400 })
+
+    // ── AUTHORISATION (added v2) ──────────────────────────────
+    // v1 had NO guard here either. Any authenticated user could
+    // soft-delete any group whose blocker checks came back clear —
+    // including groups they had never been a member of.
+    const guardErr = await requireGroupManager(req, id, { verifyStatus: true })
+    if (guardErr) return guardErr
 
     const rows = await sql(`
       SELECT g.id, g.name, g."deletedAt",
@@ -421,6 +495,6 @@ export async function DELETE(req: NextRequest) {
     return NextResponse.json({ success: true, message: `"${group.name}" has been deleted successfully` })
   } catch (e: any) {
     console.error('DELETE /api/groups error:', e)
-    return NextResponse.json({ success: false, error: `Delete check failed: ${e.message}` }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Delete check failed') }, { status: 500 })
   }
 }

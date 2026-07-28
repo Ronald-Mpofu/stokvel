@@ -1,7 +1,8 @@
 // src/app/api/dashboard/route.ts
 // GET — everything the Overview tab needs in ONE request AND ONE query.
 //
-// Version 2.0 — performance pass. RESPONSE SHAPE IS UNCHANGED.
+// Version 2.1 — performance pass + two business-rule corrections.
+// RESPONSE SHAPE IS UNCHANGED.
 // OverviewPage in dashboard/page.tsx needs no edits.
 //
 // WHY THIS CHANGED
@@ -23,7 +24,7 @@
 //
 // Role scoping (BR 1 & 4): SYSTEM_ADMIN / NATIONAL_ADMIN / AUDITOR see
 // platform-wide totals; everyone else sees totals ONLY for groups they
-// manage (creator, or ACTIVE GROUP_ADMIN member role).
+// manage (creator, or ACTIVE GROUP_ADMIN / TREASURER member role).
 //
 // NOTE: sums span groups regardless of currency — fine while testing in
 // one currency; revisit with ExchangeRate conversion when groups go
@@ -87,7 +88,7 @@ WITH scoped AS MATERIALIZED (
         SELECT 1 FROM "GroupMember" gm
         WHERE gm."groupId" = g."id"
           AND gm."userId"  = $1::text
-          AND gm."role"    = 'GROUP_ADMIN'
+          AND gm."role"    IN ('GROUP_ADMIN', 'TREASURER')
           AND gm."status"  = 'ACTIVE'
       )
     )
@@ -100,15 +101,20 @@ SELECT
       AND ($2::boolean IS TRUE OR g."id" IN (SELECT "id" FROM scoped))
   ) AS "activeGroups",
 
+  -- Both balances count ACTIVE groups only. A DRAFT group has collected
+  -- nothing, and a DISSOLVED one has paid out and closed — neither
+  -- belongs in a figure the UI labels "Held securely".
   (SELECT COALESCE(SUM(g."escrowBalance"), 0)
      FROM "Group" g
     WHERE g."deletedAt" IS NULL
+      AND g."status" = 'ACTIVE'
       AND ($2::boolean IS TRUE OR g."id" IN (SELECT "id" FROM scoped))
   ) AS "escrowBalance",
 
   (SELECT COALESCE(SUM(g."insurancePoolBalance"), 0)
      FROM "Group" g
     WHERE g."deletedAt" IS NULL
+      AND g."status" = 'ACTIVE'
       AND ($2::boolean IS TRUE OR g."id" IN (SELECT "id" FROM scoped))
   ) AS "insurancePool",
 
@@ -261,25 +267,29 @@ export async function GET(req: NextRequest) {
 }
 
 // ============================================================
-// KNOWN ISSUE CARRIED OVER FROM v1 — NOT CHANGED HERE
+// RESOLVED IN v2.1
 //
-// "Escrow Balance" and "Insurance Pool" sum across ALL non-deleted
-// groups, while "Active Groups" counts only those with status = ACTIVE.
-// So a DRAFT or DISSOLVED group still contributes to the escrow figure
-// shown as "Held securely".
+// 1. Escrow / insurance balances now count ACTIVE groups only.
+//    Expect both figures to DROP if any DRAFT or DISSOLVED group
+//    currently holds a balance. That is the intended correction, not a
+//    regression — check the numbers after deploying so the change is
+//    one you have seen rather than one you discover later.
 //
-// I have deliberately NOT changed this. Silently altering a financial
-// figure is not something to slip into a performance refactor — you
-// should decide whether DISSOLVED groups belong in that total.
-//
-// If they should not, add to both escrow subqueries:
-//     AND g."status" = 'ACTIVE'
+// 2. Dashboard scope now includes TREASURER, matching canManageGroup()
+//    in src/lib/auth. The two definitions of "can manage this group"
+//    are now identical. If you ever change one, change both — or
+//    better, export a single shared SQL fragment.
 //
 // ------------------------------------------------------------
-// AUTHORISATION INCONSISTENCY — WORTH A SEPARATE LOOK
+// STILL INCONSISTENT — NOT CHANGED, FLAGGING ONLY
 //
-// This route scopes to GROUP_ADMIN only. canManageGroup() in
-// src/lib/auth also grants TREASURER. So a TREASURER can manage a group
-// through the API but sees zero data for it on the dashboard. One of
-// the two definitions is wrong; deciding which is a business call.
+// "Total Members" counts ACTIVE members across all NON-DELETED groups,
+// including DRAFT ones. Now that escrow counts ACTIVE groups only, the
+// dashboard mixes two different definitions of which groups are real.
+//
+// Not changed because you did not ask for it and it moves a number.
+// If members should follow the same rule, add to that subquery:
+//     AND gm."groupId" IN (SELECT "id" FROM "Group"
+//                           WHERE "status" = 'ACTIVE' AND "deletedAt" IS NULL)
+// The same question applies to "Active Loans".
 // ============================================================
