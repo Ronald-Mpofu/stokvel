@@ -37,15 +37,6 @@ enum MemberStatus {
   PENDING
 }
 
-model Cycle {
-  schemeId  String
-  groupId   String
-  // ...
-  @@unique([schemeId, cycleNumber])
-  @@index([schemeId, status])
-}
-
-
 enum KycStatus {
   PENDING
   UNDER_REVIEW
@@ -614,6 +605,11 @@ model GroupMember {
 
 model Cycle {
   id             String      @id @default(uuid())
+  // schemeId: cycles moved from group level to Windfall scheme level
+  // (migration 08). No relation field — WindfallScheme is a raw-SQL table
+  // and is not a Prisma model, so only the scalar can be expressed here.
+  // The foreign key exists in the database regardless.
+  schemeId       String
   groupId        String
   cycleNumber    Int
   status         CycleStatus @default(PENDING)
@@ -635,7 +631,8 @@ model Cycle {
   contributions   Contribution[]
   payouts         Payout[]
 
-  @@unique([groupId, cycleNumber])
+  @@unique([schemeId, cycleNumber])
+  @@index([schemeId, status])
   @@index([groupId])
   @@index([status])
 }
