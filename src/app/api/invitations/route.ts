@@ -2,10 +2,20 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
-import bcrypt from 'bcryptjs'
-import { getSessionFromRequest, unauthorized, forbidden, canManageGroup, SUPER_ROLES } from '@/lib/auth'
+import {
+  getSessionFromRequest, unauthorized, forbidden, canManageGroup, SUPER_ROLES,
+  hashPassword, verifyPasswordSafe,
+} from '@/lib/auth'
+import { sendEmail } from '@/lib/email/send'
 
 export const dynamic = 'force-dynamic'
+
+// Raw driver and validation errors leak table names, column names and
+// SQL fragments. Log the real thing; return something safe in prod.
+const IS_PROD = process.env.NODE_ENV === 'production'
+function safeError(e: any, fallback: string): string {
+  return IS_PROD ? fallback : (e?.message || fallback)
+}
 
 const sendSchema = z.object({
   groupId:         z.string().uuid(),
@@ -99,7 +109,7 @@ export async function GET(req: NextRequest) {
     })
   } catch (e: any) {
     console.error('GET /api/invitations error:', e)
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Request failed') }, { status: 500 })
   }
 }
 
@@ -263,7 +273,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: e.errors.map(x => x.message).join('; ') }, { status: 400 })
     }
     console.error('POST /api/invitations error:', e)
-    return NextResponse.json({ success: false, error: e.message || 'Failed to send invitation' }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Failed to send invitation') }, { status: 500 })
   }
 }
 
@@ -293,7 +303,10 @@ async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> 
       let verified = false
       const session = await getSessionFromRequest(req)
       if (session && session.id === existingUser.id) verified = true
-      else if (data.password) verified = await bcrypt.compare(data.password, existingUser.passwordHash)
+      // verifyPasswordSafe always runs a compare, including against a
+      // dummy hash when none is supplied, so this path has one timing
+      // profile regardless of input. Same helper the login route uses.
+      else if (data.password) verified = await verifyPasswordSafe(data.password, existingUser.passwordHash)
 
       if (!verified) {
         return NextResponse.json({
@@ -359,7 +372,10 @@ async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> 
     if (!data.agreedToTerms)                                fieldErrs.push('You must agree to the terms')
     if (fieldErrs.length) return NextResponse.json({ success: false, error: fieldErrs.join('; ') }, { status: 400 })
 
-    const passwordHash = await bcrypt.hash(data.password as string, 12)
+    // hashPassword() reads BCRYPT_COST from env (default 12, floored at
+    // 10). v1 hardcoded 12 here, so accounts created through invitations
+    // ignored the platform setting entirely.
+    const passwordHash = await hashPassword(data.password as string)
 
     // Create user + group member in one transaction
     const { user } = await prisma.$transaction(async (tx) => {
@@ -438,7 +454,7 @@ async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> 
   } catch (e: any) {
     if (e instanceof z.ZodError) return NextResponse.json({ success: false, error: e.errors.map(x => x.message).join('; ') }, { status: 400 })
     console.error('Accept invitation error:', e)
-    return NextResponse.json({ success: false, error: e.message || 'Failed to accept invitation' }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Failed to accept invitation') }, { status: 500 })
   }
 }
 
@@ -481,7 +497,7 @@ async function handleResend(body: any): Promise<NextResponse> {
 
     return NextResponse.json({ success: true, message: `Invitation resent. New expiry: ${newExpiry.toLocaleDateString()}` })
   } catch (e: any) {
-    return NextResponse.json({ success: false, error: e.message }, { status: 500 })
+    return NextResponse.json({ success: false, error: safeError(e, 'Request failed') }, { status: 500 })
   }
 }
 
@@ -563,7 +579,7 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
 </body>
 </html>`
 
-  await sendViaResend({
+  await sendEmail({
     to,
     subject,
     html,
@@ -575,7 +591,7 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
 async function sendWelcomeEmail({ to, fullName, groupName, contribution, currency, loginUrl }: any) {
   const currencySymbol = currency === 'USD' ? '$' : currency
 
-  await sendViaResend({
+  await sendEmail({
     to,
     subject: `Welcome to ${groupName} — Your account is ready`,
     html: `
@@ -653,23 +669,6 @@ function formatInvitation(inv: any) {
 }
 
 // ── Resend transport (replaces SMTP/nodemailer) ───────────────
-async function sendViaResend({ to, subject, html, text }: { to: string; subject: string; html: string; text?: string }) {
-  const apiKey = process.env.RESEND_API_KEY
-  if (!apiKey) throw new Error('Email not configured — add RESEND_API_KEY to environment variables')
 
-  const from = process.env.FROM_EMAIL || 'Windfall Community Deals <noreply@thecommunitydeals.com>'
-
-  const res = await fetch('https://api.resend.com/emails', {
-    method:  'POST',
-    headers: {
-      'Content-Type':  'application/json',
-      'Authorization': `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({ from, to: [to], subject, html, text: text || undefined }),
-  })
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({} as any))
-    throw new Error(err?.message || `Email provider error (${res.status})`)
-  }
-}
+// sendViaResend removed in v2 — the Resend transport now lives in
+// src/lib/email/send.ts so every route can use it. See sendEmail().
