@@ -37,6 +37,14 @@ enum MemberStatus {
   PENDING
 }
 
+model Cycle {
+  schemeId  String
+  groupId   String
+  // ...
+  @@unique([schemeId, cycleNumber])
+  @@index([schemeId, status])
+}
+
 
 enum KycStatus {
   PENDING
