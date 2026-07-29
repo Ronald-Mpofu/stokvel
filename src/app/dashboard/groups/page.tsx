@@ -8,6 +8,9 @@ import SavingsPage    from '../savings/SavingsPage'
 import PropertyPage   from '../property/PropertyPage'
 import LoansPage      from '../loans/LoansPage'
 import CountrySelector from '../../../components/CountrySelector'
+import { useIsMobile } from '@/lib/mobile/useIsMobile'
+import MobileGroupsList from './MobileGroupsList'
+import MobileGroupDetail from './MobileGroupDetail'
 // Brand type → visual style map (replaces broken getStokvels static import)
 const STOKVEL_TYPE_COLORS: Record<string, { icon: string; color: string; bg: string }> = {
   SAVINGS:    { icon: '💰', color: '#1A5EA8', bg: '#DBEAFE' },
@@ -454,6 +457,7 @@ function BrandingSelector({ countryCode, value, onChange }: { countryCode:string
 
 
 export default function GroupsPage() {
+  const isMobile = useIsMobile()
   const [view, setView]                 = useState<'list'|'detail'|'create'>('list')
   const [groups, setGroups]             = useState<any[]>([])
   const [loading, setLoading]           = useState(true)
@@ -939,6 +943,37 @@ export default function GroupsPage() {
     } finally {
       setSaving(false)
     }
+  }
+
+  // ── MOBILE BRANCHES ─────────────────────────────────────────
+  // Phone layouts return early; the desktop JSX below is untouched.
+  // DETAIL IS CHECKED FIRST — with the order reversed, tapping a group
+  // on a phone falls straight back to the list.
+  if (isMobile && view === 'detail' && selectedGroup) {
+    return (
+      <MobileGroupDetail
+        group={selectedGroup}
+        members={groupMembers}
+        membersLoading={membersLoading}
+        currentUserId={currentUserId}
+        canManage={selectedGroup.adminUserId === currentUserId}
+        onBack={() => { setView('list'); setSelectedGroup(null) }}
+        onInvite={() => { setInviteGroupId(selectedGroup.id); setShowInviteModal(true) }}
+        onOpenScheme={() => { setDetailTab('schemes') }}
+      />
+    )
+  }
+
+  if (isMobile && view === 'list') {
+    return (
+      <MobileGroupsList
+        groups={groups}
+        loading={loading}
+        currentUserId={currentUserId}
+        onOpenGroup={(g: any) => { setSelectedGroup(g); setView('detail') }}
+        onCreateGroup={() => setView('create')}
+      />
+    )
   }
 
   // ── LIST VIEW ───────────────────────────────────────────────
