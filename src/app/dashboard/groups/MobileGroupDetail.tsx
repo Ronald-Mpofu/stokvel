@@ -4,55 +4,40 @@
 // Phone layout for a single group. Rendered by groups/page.tsx when
 // useIsMobile() is true — the desktop detail view is untouched.
 //
-// DESIGN NOTES
+// WHAT CHANGED
 //
-// No horizontal scroll anywhere. The old mobile pattern wrapped tables
-// in overflow-x, which is the single most reliable way to lose a user on
-// a 360px screen. Everything here is a vertical list of rows.
+// This screen used to BE the passbook: one ledger, resolved by groupId.
+// Cycles now belong to schemes, so a group running a savings pool and a
+// grocery club has two active cycles, and one screen cannot hold both.
+// A member in four schemes keeps four books — exactly as they would on
+// paper.
 //
-// Accordion sections rather than tabs. Four tab labels do not fit at
-// 360px without truncating, and truncated labels are unusable. This also
-// matches the accordion convention already used in Settings and Overview.
+// So this became a two-level screen. Level one is the hub: every scheme
+// with this member's standing in it. Level two is one scheme's passbook.
+// The switch is local state, not a route, because back should return to
+// the hub with the list where the member left it — not reload it.
 //
-// The passbook empty state is the PRIMARY state today — Cycle,
-// Contribution and PayoutSchedule are all empty — so it is written as an
-// invitation with a next action, not as a placeholder.
+// The passbook fetch, PassbookRow and NoCycleYet all moved out. The empty
+// state's "set up first cycle" action survived: it now lives in
+// MobileSchemePassbook, which passes it to PassbookShell.
+//
+// DESIGN NOTES THAT STILL HOLD
+//
+// No horizontal scroll anywhere. Everything is a vertical list of rows.
+//
+// Accordion sections rather than tabs. Four tab labels do not fit at 360px
+// without truncating, and truncated labels are unusable.
 //
 // All helper components are at module level. Defined inside render they
 // remount on every keystroke and steal input focus.
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import {
-  C, S, T, TOUCH, FONT_STACK, MONEY_STYLE, money,
+  C, S, T, TOUCH, FONT_STACK,
 } from '@/lib/mobile/tokens'
-
-// ── Types ─────────────────────────────────────────────────────
-type PassbookEntry = {
-  monthNumber: number
-  dueDate: string
-  amountDue: number
-  amountPaid: number
-  status: string
-  paidAt: string | null
-  paymentMethod: string | null
-}
-
-type RotationEntry = {
-  monthNumber: number
-  scheduledDate: string
-  amount: number
-  status: string
-  recipientName: string | null
-  isMe: boolean
-}
-
-type PassbookData = {
-  group: { id: string; name: string; currency: string; status: string; contributionAmount: number }
-  cycle: { id: string; number: number; startDate: string; endDate: string; totalMembers: number; poolAmount: number } | null
-  me: { userId: string; position: number | null; totalPaid: number; monthsPaid: number; monthsTotal: number }
-  passbook: PassbookEntry[]
-  rotation: RotationEntry[]
-}
+import MobileSchemeHub from './MobileSchemeHub'
+import type { HubScheme } from './MobileSchemeHub'
+import MobileSchemePassbook from './MobileSchemePassbook'
 
 type Props = {
   group: any
@@ -115,101 +100,6 @@ function SectionHeader({
   )
 }
 
-// Row height, icon size and padding are shared so the ledger scans as a
-// single column even as statuses differ.
-function PassbookRow({ entry, currency }: { entry: PassbookEntry; currency: string }) {
-  const paid = entry.status === 'PAID' || entry.status === 'PRE_PAID'
-  const overdue = !paid && new Date(entry.dueDate) < new Date()
-  const notDue = !paid && !overdue
-
-  const tone = overdue
-    ? { bg: C.amberBg, chip: '#EF9F27', chipFg: C.amberText, title: C.amberText, sub: '#854F0B' }
-    : paid
-      ? { bg: 'transparent', chip: C.tealBg, chipFg: C.teal, title: C.text, sub: C.textFaint }
-      : { bg: 'transparent', chip: C.surfaceAlt, chipFg: C.textFaint, title: C.textMuted, sub: C.textFaint }
-
-  const monthLabel = new Date(entry.dueDate).toLocaleDateString(undefined, { month: 'long' })
-
-  return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: S.md,
-      padding: `13px ${S.screenX}px`, borderTop: `1px solid ${C.border}`,
-      background: tone.bg, minHeight: TOUCH.min, opacity: notDue ? 0.6 : 1,
-    }}>
-      <div style={{
-        width: 34, height: 34, borderRadius: 8, background: tone.chip,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        color: tone.chipFg, fontSize: 17, flexShrink: 0,
-      }}>
-        {paid ? '✓' : overdue ? '!' : '–'}
-      </div>
-
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: T.body.fontSize, fontWeight: 500, color: tone.title }}>
-          {monthLabel}
-        </div>
-        <div style={{
-          fontSize: T.caption.fontSize, color: tone.sub,
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-        }}>
-          {paid
-            ? `Paid ${entry.paidAt ? new Date(entry.paidAt).toLocaleDateString(undefined, { day: 'numeric', month: 'short' }) : ''}${entry.paymentMethod ? ` · ${entry.paymentMethod.replace(/_/g, ' ').toLowerCase()}` : ''}`
-            : overdue
-              ? `Due ${new Date(entry.dueDate).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}`
-              : 'Not yet due'}
-        </div>
-      </div>
-
-      <span style={{
-        ...MONEY_STYLE, fontSize: 15, flexShrink: 0,
-        fontWeight: paid ? 400 : 500,
-        color: overdue ? C.amberText : paid ? C.textMuted : C.textFaint,
-      }}>
-        {money(entry.amountDue, currency)}
-      </span>
-    </div>
-  )
-}
-
-// The empty state is the screen most admins will see today. It names the
-// situation and gives one next action — not a shrug.
-function NoCycleYet({ canManage, onStartCycle }: { canManage: boolean; onStartCycle?: () => void }) {
-  return (
-    <div style={{ padding: `${S.xxl}px ${S.screenX}px`, textAlign: 'center' }}>
-      <div style={{
-        width: 56, height: 56, borderRadius: 16, background: C.tealBg,
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        margin: '0 auto 14px', fontSize: 26, color: C.teal,
-      }}>
-        ↻
-      </div>
-      <div style={{ fontSize: T.title.fontSize, fontWeight: 500, color: C.text, marginBottom: 6 }}>
-        {canManage ? 'Start the first cycle' : 'Saving hasn’t started yet'}
-      </div>
-      <p style={{
-        fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.55,
-        margin: '0 auto', maxWidth: 280,
-      }}>
-        {canManage
-          ? 'A cycle sets the contribution schedule and the payout order. Once it starts, everyone’s passbook fills in here.'
-          : 'Your passbook appears here once the group admin opens the first cycle.'}
-      </p>
-      {canManage && onStartCycle ? (
-        <button
-          onClick={onStartCycle}
-          style={{
-            marginTop: S.xl, minHeight: TOUCH.primary, width: '100%',
-            background: C.teal, color: '#fff', border: 'none', borderRadius: 12,
-            fontSize: 16, fontWeight: 500, fontFamily: FONT_STACK, cursor: 'pointer',
-          }}
-        >
-          Set up first cycle
-        </button>
-      ) : null}
-    </div>
-  )
-}
-
 function MemberRow({ member, isMe }: { member: any; isMe: boolean }) {
   const name = member.fullName || 'Member'
   const initials = name.split(' ').map((n: string) => n[0]).join('').slice(0, 2).toUpperCase()
@@ -241,204 +131,146 @@ function MemberRow({ member, isMe }: { member: any; isMe: boolean }) {
   )
 }
 
+function EmptyMembers({ canManage, onInvite }: { canManage: boolean; onInvite: () => void }) {
+  return (
+    <div style={{ padding: `${S.xl}px ${S.screenX}px` }}>
+      <p style={{ fontSize: T.small.fontSize, color: C.textMuted, margin: `0 0 ${S.lg}px` }}>
+        No members yet. Invite people to start building the group.
+      </p>
+      {canManage ? (
+        <button
+          onClick={onInvite}
+          style={{
+            minHeight: TOUCH.min, width: '100%', background: C.surface,
+            color: C.teal, border: `1px solid ${C.teal}`, borderRadius: 12,
+            fontSize: 15, fontWeight: 500, fontFamily: FONT_STACK, cursor: 'pointer',
+          }}
+        >
+          Invite members
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
 // ── Main ──────────────────────────────────────────────────────
 export default function MobileGroupDetail({
   group, members, membersLoading, currentUserId, canManage,
   onBack, onInvite, onOpenScheme, onStartCycle,
 }: Props) {
-  const [data, setData] = useState<PassbookData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [open, setOpen] = useState<string[]>(['passbook'])
+  // Which scheme's passbook is open, if any. Local state rather than a
+  // route: returning to the hub must not refetch it or lose scroll.
+  const [openPassbook, setOpenPassbook] = useState<HubScheme | null>(null)
+  const [open, setOpen] = useState<string[]>(['members'])
   const [showAllMembers, setShowAllMembers] = useState(false)
 
   const toggle = useCallback((key: string) => {
     setOpen(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
   }, [])
 
-  useEffect(() => {
-    if (!group?.id) return
-    let cancelled = false
-    setLoading(true)
-    fetch(`/api/groups/passbook?groupId=${group.id}`)
-      .then(r => r.json())
-      .then(d => { if (!cancelled && d.success) setData(d.data) })
-      .catch(() => {})
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }, [group?.id])
+  const closePassbook = useCallback(() => setOpenPassbook(null), [])
 
-  const currency = data?.group.currency || group?.currency || 'USD'
-  const cycle = data?.cycle ?? null
-  const passbook = data?.passbook ?? []
-  const me = data?.me
+  // Level two: one scheme's ledger, full screen.
+  if (openPassbook) {
+    return (
+      <MobileSchemePassbook
+        schemeId={openPassbook.id}
+        schemeName={openPassbook.name}
+        onBack={closePassbook}
+        canManage={canManage}
+        onStartCycle={onStartCycle}
+        // The pay action keeps the contract the parent already handles.
+        // groups/page.tsx receives the same sentinel it received from the
+        // old sticky bar, so nothing upstream needs changing today. When a
+        // real payment flow exists this should pass a scheme id instead.
+        onPay={() => onOpenScheme('contribute')}
+      />
+    )
+  }
 
-  const nextDue = passbook.find(p => p.status !== 'PAID' && p.status !== 'PRE_PAID')
-  const receiver = data?.rotation.find(r => r.status !== 'COMPLETED')
   const visibleMembers = showAllMembers ? members : members.slice(0, 5)
 
-  return (
-    <div style={{
-      fontFamily: FONT_STACK, background: C.surfaceAlt, minHeight: '100vh',
-      paddingBottom: nextDue ? 'calc(84px + env(safe-area-inset-bottom, 0px))' : S.xxl,
-    }}>
-
-      {/* Header */}
-      <div style={{ background: C.navy, padding: `14px ${S.screenX}px 16px` }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: S.sm, marginBottom: 14 }}>
-          <button
-            onClick={onBack}
-            aria-label="Back to groups"
-            style={{
-              width: TOUCH.icon, height: TOUCH.icon, marginLeft: -12,
-              background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.8)',
-              fontSize: 22, cursor: 'pointer',
-            }}
-          >
-            ←
-          </button>
-          <span style={{
-            flex: 1, color: '#fff', fontSize: T.heading.fontSize, fontWeight: 500,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}>
-            {group?.name}
-          </span>
-          <StatusPill status={group?.status || 'DRAFT'} />
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: S.sm }}>
-          <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: T.caption.fontSize }}>
-            Your total in
-          </span>
-          <span style={{ ...MONEY_STYLE, color: '#fff', fontSize: T.display.fontSize, fontWeight: 500 }}>
-            {money(me?.totalPaid ?? 0, currency)}
-          </span>
-        </div>
-        <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: T.caption.fontSize, marginTop: 2 }}>
-          {cycle && me
-            ? `${me.monthsPaid} of ${me.monthsTotal} months paid`
-            : `${group?.memberCount ?? 0} members · ${money(group?.contributionAmount ?? 0, currency)} per month`}
-        </div>
-      </div>
-
-      {/* Rotation strip — the thing members open the app to check */}
-      {receiver ? (
-        <div style={{
-          background: C.tealBg, padding: `12px ${S.screenX}px`,
-          display: 'flex', alignItems: 'center', gap: 11,
-        }}>
-          <span style={{ fontSize: 20, color: C.teal }}>◷</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <div style={{ fontSize: T.small.fontSize, color: C.tealDark, fontWeight: 500 }}>
-              {receiver.isMe ? 'You receive this month' : `${receiver.recipientName || 'A member'} receives this month`}
-            </div>
-            <div style={{ fontSize: T.caption.fontSize, color: C.teal }}>
-              {me?.position ? `You are ${me.position} in the rotation` : 'You are not in this rotation'}
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      {/* Passbook */}
-      <div style={{ background: C.surface, marginTop: S.md }}>
-        <SectionHeader
-          label="Your passbook"
-          hint={cycle ? `Cycle ${cycle.number}` : undefined}
-          open={open.includes('passbook')}
-          onToggle={() => toggle('passbook')}
-        />
-        {open.includes('passbook') ? (
-          loading ? (
+  // Passed to the hub as its footer. Plain JSX, not a component defined in
+  // render — nothing here holds input focus, so there is no remount cost.
+  const membersSection = (
+    <div style={{ background: C.surface, marginTop: S.md }}>
+      <SectionHeader
+        label="Members"
+        hint={String(members.length || group?.memberCount || 0)}
+        open={open.includes('members')}
+        onToggle={() => toggle('members')}
+      />
+      {open.includes('members') ? (
+        <div>
+          {membersLoading ? (
             <div style={{ padding: `${S.xl}px ${S.screenX}px`, color: C.textFaint, fontSize: T.small.fontSize }}>
               Loading…
             </div>
-          ) : passbook.length === 0 ? (
-            <NoCycleYet canManage={canManage} onStartCycle={onStartCycle} />
+          ) : members.length === 0 ? (
+            <EmptyMembers canManage={canManage} onInvite={onInvite} />
           ) : (
-            passbook.map(entry => (
-              <PassbookRow key={entry.monthNumber} entry={entry} currency={currency} />
-            ))
-          )
-        ) : null}
-      </div>
-
-      {/* Members */}
-      <div style={{ background: C.surface, marginTop: S.md }}>
-        <SectionHeader
-          label="Members"
-          hint={String(members.length || group?.memberCount || 0)}
-          open={open.includes('members')}
-          onToggle={() => toggle('members')}
-        />
-        {open.includes('members') ? (
-          <div>
-            {membersLoading ? (
-              <div style={{ padding: `${S.xl}px ${S.screenX}px`, color: C.textFaint, fontSize: T.small.fontSize }}>
-                Loading…
-              </div>
-            ) : members.length === 0 ? (
-              <div style={{ padding: `${S.xl}px ${S.screenX}px` }}>
-                <p style={{ fontSize: T.small.fontSize, color: C.textMuted, margin: `0 0 ${S.lg}px` }}>
-                  No members yet. Invite people to start building the group.
-                </p>
-                {canManage ? (
-                  <button
-                    onClick={onInvite}
-                    style={{
-                      minHeight: TOUCH.min, width: '100%', background: C.surface,
-                      color: C.teal, border: `1px solid ${C.teal}`, borderRadius: 12,
-                      fontSize: 15, fontWeight: 500, fontFamily: FONT_STACK, cursor: 'pointer',
-                    }}
-                  >
-                    Invite members
-                  </button>
-                ) : null}
-              </div>
-            ) : (
-              <div>
-                {visibleMembers.map((m: any) => (
-                  <MemberRow key={m.userId || m.id} member={m} isMe={m.userId === currentUserId} />
-                ))}
-                {members.length > 5 && !showAllMembers ? (
-                  <button
-                    onClick={() => setShowAllMembers(true)}
-                    style={{
-                      width: '100%', minHeight: TOUCH.min, background: 'transparent',
-                      border: 'none', borderTop: `1px solid ${C.borderLight}`,
-                      color: C.teal, fontSize: T.small.fontSize, fontFamily: FONT_STACK,
-                      cursor: 'pointer',
-                    }}
-                  >
-                    Show all {members.length} members
-                  </button>
-                ) : null}
-              </div>
-            )}
-          </div>
-        ) : null}
-      </div>
-
-      {/* Sticky pay bar — thumb reach, names the amount and the month */}
-      {nextDue ? (
-        <div style={{
-          position: 'fixed', left: 0, right: 0, bottom: 0,
-          background: C.surface, borderTop: `1px solid ${C.border}`,
-          padding: `${S.md}px ${S.screenX}px calc(${S.md}px + env(safe-area-inset-bottom, 0px))`,
-          zIndex: 40,
-        }}>
-          <button
-            onClick={() => onOpenScheme('contribute')}
-            style={{
-              width: '100%', minHeight: TOUCH.primary, background: C.teal, color: '#fff',
-              border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 500,
-              fontFamily: FONT_STACK, cursor: 'pointer',
-            }}
-          >
-            Pay {money(nextDue.amountDue, currency)} for{' '}
-            {new Date(nextDue.dueDate).toLocaleDateString(undefined, { month: 'long' })}
-          </button>
+            <div>
+              {visibleMembers.map((m: any) => (
+                <MemberRow key={m.userId || m.id} member={m} isMe={m.userId === currentUserId} />
+              ))}
+              {members.length > 5 && !showAllMembers ? (
+                <button
+                  onClick={() => setShowAllMembers(true)}
+                  style={{
+                    width: '100%', minHeight: TOUCH.min, background: 'transparent',
+                    border: 'none', borderTop: `1px solid ${C.borderLight}`,
+                    color: C.teal, fontSize: T.small.fontSize, fontFamily: FONT_STACK,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Show all {members.length} members
+                </button>
+              ) : null}
+            </div>
+          )}
         </div>
       ) : null}
-
     </div>
+  )
+
+  // A group with no id cannot be loaded. Say so rather than rendering a
+  // hub that will fail its own fetch.
+  if (!group?.id) {
+    return (
+      <div style={{
+        fontFamily: FONT_STACK, background: C.surfaceAlt, minHeight: '100vh',
+        padding: `${S.xxl}px ${S.screenX}px`,
+      }}>
+        <div style={{ fontSize: T.body.fontSize, color: C.text, marginBottom: 6 }}>
+          Group not available
+        </div>
+        <p style={{ fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5, margin: `0 0 ${S.xl}px` }}>
+          This group could not be opened. Go back and try again.
+        </p>
+        <button
+          onClick={onBack}
+          style={{
+            minHeight: TOUCH.primary, width: '100%', background: C.teal, color: '#fff',
+            border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 500,
+            fontFamily: FONT_STACK, cursor: 'pointer',
+          }}
+        >
+          Back to groups
+        </button>
+      </div>
+    )
+  }
+
+  // Level one: the hub owns the screen chrome — navy header, group name,
+  // holdings and what is owed. The status pill and the members list are
+  // still this screen's, so they go in through slots.
+  return (
+    <MobileSchemeHub
+      groupId={group.id}
+      onBack={onBack}
+      onOpenScheme={setOpenPassbook}
+      statusPill={<StatusPill status={group?.status || 'DRAFT'} />}
+      footer={membersSection}
+    />
   )
 }
