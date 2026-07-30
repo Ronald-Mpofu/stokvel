@@ -274,10 +274,14 @@ type Props = {
   // Rendered below the scheme list. Members, settings, anything else the
   // group screen still carries.
   footer?: ReactNode
+  // Set when the hub is mounted inside a page that already provides its
+  // own chrome and background — the member portal, for instance. It then
+  // does not claim a full viewport height on top of the host page.
+  embedded?: boolean
 }
 
 export default function MobileSchemeHub({
-  groupId, onOpenScheme, onBack, statusPill, footer,
+  groupId, onOpenScheme, onBack, statusPill, footer, embedded,
 }: Props) {
   const [data, setData] = useState<HubData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -319,7 +323,15 @@ export default function MobileSchemeHub({
   ].filter(Boolean).join(' · ')
 
   return (
-    <div style={{ fontFamily: FONT_STACK, background: C.surfaceAlt, minHeight: '100vh' }}>
+    <div
+      style={{
+        fontFamily: FONT_STACK,
+        background: C.surfaceAlt,
+        minHeight: embedded ? undefined : '100vh',
+        borderRadius: embedded ? 14 : undefined,
+        overflow: embedded ? 'hidden' : undefined,
+      }}
+    >
 
       <div style={{ background: C.navy, padding: `14px ${S.screenX}px 18px` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: S.sm }}>
