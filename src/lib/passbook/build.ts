@@ -230,11 +230,21 @@ function payoutGoalRow(
   const mine = rotation.find(r => r.isMe) || rotation.find(r => r.monthNumber === position)
   if (!mine) return null
   const when = d(mine.scheduledDate)
+
+  // Already received. A member holding position 1 collects in month 1, so
+  // the payout lands in the SAME month as their first contribution — two
+  // rows reading "April 2026" with nothing to tell them apart. The label
+  // carries the word Payout for that reason, and a settled payout is not
+  // a goal the member is still waiting for.
+  const received = mine.status === 'COMPLETED'
+
   return {
     id: `payout-${mine.monthNumber}`,
-    kind: 'GOAL',
-    label: monthYear(when),
-    detail: `Your payout · position ${mine.monthNumber} of ${rotation.length}`,
+    kind: received ? 'NOTE' : 'GOAL',
+    label: `Payout · ${monthYear(when)}`,
+    detail: received
+      ? `Received · position ${mine.monthNumber} of ${rotation.length}`
+      : `Your payout · position ${mine.monthNumber} of ${rotation.length}`,
     amount: num(mine.payoutAmount),
   }
 }
@@ -277,7 +287,7 @@ export function buildRotatingView(
     const mine = rotation.find(r => r.isMe)
     kpis.push({
       label: 'You collect',
-      value: mine ? String(num(mine.payoutAmount)) : String(cycle ? cycle.poolAmount : 0),
+      amount: mine ? num(mine.payoutAmount) : (cycle ? cycle.poolAmount : 0),
     })
   }
   if (currentRecipient) {
@@ -295,11 +305,10 @@ export function buildRotatingView(
       groupName: scheme.groupName,
       currency: scheme.currency,
     },
-    terms: [
-      'Rotating',
-      scheme.contributionAmount ? `${scheme.contributionAmount} ${scheme.contributionFrequency || 'monthly'}` : null,
-      cycle ? `cycle ${cycle.cycleNumber}` : null,
-    ].filter(Boolean).join(' · '),
+    terms: ['Rotating', cycle ? `cycle ${cycle.cycleNumber}` : null]
+      .filter(Boolean).join(' · '),
+    termsAmount: scheme.contributionAmount,
+    termsFrequency: scheme.contributionFrequency,
     hero: {
       label: 'Paid this cycle',
       amount: me.totalPaid,
@@ -386,11 +395,10 @@ export function buildAccumulatingView(
       groupName: scheme.groupName,
       currency: scheme.currency,
     },
-    terms: [
-      'Accumulating',
-      scheme.contributionAmount ? `${scheme.contributionAmount} ${scheme.contributionFrequency || 'monthly'}` : null,
-      cycle ? `cycle ${cycle.cycleNumber}` : null,
-    ].filter(Boolean).join(' · '),
+    terms: ['Accumulating', cycle ? `cycle ${cycle.cycleNumber}` : null]
+      .filter(Boolean).join(' · '),
+    termsAmount: scheme.contributionAmount,
+    termsFrequency: scheme.contributionFrequency,
     hero: {
       label: queue ? 'Toward your unit' : 'Saved so far',
       amount: me.totalPaid,

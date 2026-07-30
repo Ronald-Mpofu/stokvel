@@ -29,13 +29,16 @@ import {
   C, S, T, TOUCH, FONT_STACK, MONEY_STYLE, money,
 } from '@/lib/mobile/tokens'
 import {
-  safeRows, safeKpis, HERO_DEBIT_ON_NAVY,
+  safeRows, safeKpis, HERO_DEBIT_ON_NAVY, APP_BOTTOM_NAV_HEIGHT,
 } from '@/lib/mobile/passbook'
 import type { PassbookView, PassbookKpi, PassbookQueue } from '@/lib/mobile/passbook'
 import LedgerRow from './LedgerRow'
 
 // ── Header pieces ─────────────────────────────────────────────
-function HeaderKpi({ kpi }: { kpi: PassbookKpi }) {
+function HeaderKpi({ kpi, currency }: { kpi: PassbookKpi; currency: string }) {
+  // A numeric amount wins over pre-formatted text, so money is formatted
+  // here with the group's currency rather than shipped as a bare figure.
+  const text = typeof kpi.amount === 'number' ? money(kpi.amount, currency) : (kpi.value || '')
   return (
     <div style={{ minWidth: 0 }}>
       <div
@@ -58,7 +61,7 @@ function HeaderKpi({ kpi }: { kpi: PassbookKpi }) {
           whiteSpace: 'nowrap',
         }}
       >
-        {kpi.value}
+        {text}
       </div>
     </div>
   )
@@ -280,9 +283,11 @@ export default function PassbookShell({
         fontFamily: FONT_STACK,
         background: C.surfaceAlt,
         minHeight: '100vh',
+        // Clear the application bottom nav, plus the pay bar when shown.
+        // Without this the nav slices through the final ledger row.
         paddingBottom: showBar
-          ? 'calc(84px + env(safe-area-inset-bottom, 0px))'
-          : S.xxl,
+          ? `calc(${APP_BOTTOM_NAV_HEIGHT + 84}px + env(safe-area-inset-bottom, 0px))`
+          : `calc(${APP_BOTTOM_NAV_HEIGHT}px + ${S.xxl}px + env(safe-area-inset-bottom, 0px))`,
       }}
     >
 
@@ -334,7 +339,12 @@ export default function PassbookShell({
           {view?.scheme.name || ' '}
         </div>
         <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: T.caption.fontSize, marginTop: 3 }}>
-          {view?.terms || ''}
+          {[
+            view?.terms || '',
+            typeof view?.termsAmount === 'number'
+              ? `${money(view.termsAmount, currency)} ${view.termsFrequency || 'monthly'}`
+              : '',
+          ].filter(Boolean).join(' · ')}
         </div>
 
         {view ? (
@@ -376,7 +386,7 @@ export default function PassbookShell({
             }}
           >
             {kpis.map(k => (
-              <HeaderKpi key={k.label} kpi={k} />
+              <HeaderKpi key={k.label} kpi={k} currency={currency} />
             ))}
           </div>
         ) : null}
@@ -421,7 +431,8 @@ export default function PassbookShell({
             position: 'fixed',
             left: 0,
             right: 0,
-            bottom: 0,
+            // Sits ON TOP of the application bottom nav, never under it.
+            bottom: APP_BOTTOM_NAV_HEIGHT,
             zIndex: 40,
             background: C.surface,
             borderTop: `1px solid ${C.border}`,

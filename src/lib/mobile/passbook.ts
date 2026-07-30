@@ -74,7 +74,15 @@ export type PassbookRow = {
 
 export type PassbookKpi = {
   label: string
-  value: string
+  // Pre-formatted text, for anything that is not money: "#1", "3 of 5",
+  // "Yenzelani".
+  value?: string
+  // Money. Sent as a number and formatted by the client, so a currency
+  // change never needs a server deploy. When present this wins over value.
+  //
+  // The first build composed amounts into value server-side and shipped
+  // "You collect 750" to an AUD group. Amounts are numbers, everywhere.
+  amount?: number | null
 }
 
 // The headline number. CREDIT counts up and reads teal; DEBIT counts down
@@ -129,8 +137,13 @@ export type PassbookView = {
     groupName: string
     currency: string
   }
-  // "Rotating · $150 monthly · cycle 1 of 12"
+  // The non-money part of the terms line: "Rotating · cycle 1". Any
+  // amount in it travels separately, for the reason given on PassbookKpi.
   terms: string
+  // Rendered by the client as "· <formatted amount> monthly", appended to
+  // terms. Null when the scheme has no contribution amount.
+  termsAmount?: number | null
+  termsFrequency?: string | null
   hero: PassbookHero
   // Zero to three. Three fit across a 360px screen; a fourth truncates.
   kpis: PassbookKpi[]
@@ -251,6 +264,16 @@ export function rowTone(
       return base
   }
 }
+
+// Height reserved for the application's fixed bottom navigation bar
+// (Home / Groups / Pool / Alerts / More). Screens that pin anything to the
+// bottom must clear it, or the nav slices through their last row — which
+// is exactly what happened to the sixth scheme card and would have hidden
+// the Pay button too.
+//
+// ONE place to change if the nav is ever resized. Both the hub and the
+// passbook shell import it rather than each carrying a magic number.
+export const APP_BOTTOM_NAV_HEIGHT = 64
 
 // The hero number on the dark header. Amber-on-navy rather than the token
 // amber, which is tuned for light surfaces and goes muddy on the header.

@@ -33,6 +33,7 @@ import type { ReactNode } from 'react'
 import {
   C, S, T, TOUCH, FONT_STACK, MONEY_STYLE, money,
 } from '@/lib/mobile/tokens'
+import { APP_BOTTOM_NAV_HEIGHT } from '@/lib/mobile/passbook'
 
 export type HubScheme = {
   id: string
@@ -44,6 +45,8 @@ export type HubScheme = {
   openable: boolean
   subtitle: string
   trailing: string
+  contributionAmount: number | null
+  contributionFrequency: string | null
   amount: number | null
   overdue: boolean
   monthsPaid: number
@@ -97,6 +100,15 @@ function SchemeCard({
   const chipBg = dim ? C.surfaceAlt : owed ? C.amberBg : C.tealBg
   const chipFg = dim ? C.textFaint : owed ? C.amberText : C.teal
 
+  // Money is formatted here, not on the server. The route sends the terms
+  // as a number so a group in AUD does not read "150 monthly".
+  const subtitle = [
+    scheme.subtitle,
+    typeof scheme.contributionAmount === 'number' && scheme.contributionAmount > 0
+      ? `${money(scheme.contributionAmount, currency)} ${scheme.contributionFrequency || 'monthly'}`
+      : '',
+  ].filter(Boolean).join(' · ')
+
   // A card that cannot be opened renders as a div, not a disabled button.
   // A member should not be able to tap into a dead end and be told nothing
   // happened.
@@ -145,7 +157,7 @@ function SchemeCard({
             whiteSpace: 'nowrap',
           }}
         >
-          {scheme.subtitle}
+          {subtitle}
         </div>
       </div>
 
@@ -443,7 +455,15 @@ export default function MobileSchemeHub({
 
       {footer}
 
-      <div style={{ height: S.xxl }} />
+      {/* Clears the app's fixed bottom nav. Without it the last scheme
+          card sits underneath Home / Groups / Pool / Alerts / More. */}
+      <div
+        style={{
+          height: embedded
+            ? S.xxl
+            : `calc(${APP_BOTTOM_NAV_HEIGHT}px + ${S.xxl}px + env(safe-area-inset-bottom, 0px))`,
+        }}
+      />
     </div>
   )
 }
