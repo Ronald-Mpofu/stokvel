@@ -5,12 +5,35 @@
 // Performance: ONE request on load (/api/joining-fee?type=config for the country
 // dropdown + live fee preview). Registration auto-logs-in via cookies set by the
 // API, then routes straight to the joining fee page.
+//
+// RESPONSIVE PASS
+//
+//   The desktop layout is unchanged. Below 640px it becomes a single column:
+//
+//   1. The branding panel is hidden and replaced by a compact header. It was
+//      flex:1 beside a FIXED width:480 form panel, so the two together
+//      demanded 480px minimum — at 360px that is a sideways-scrolling form.
+//
+//   2. Inputs are 16px on mobile. Below 16px, iOS Safari zooms the page on
+//      focus and the member must pinch back out. This screen has seven
+//      fields, so that is seven zooms between arriving and having an account.
+//
+//   3. The account-type cards stack. Side by side at 360px they are ~165px
+//      wide holding a title and two lines of 11px description.
+//
+//   4. Inputs, cards and buttons are at least 44px tall.
+//
+//   5. The account-type cards became buttons rather than clickable divs, so
+//      they are reachable by keyboard and announced to a screen reader.
 
 import React, { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 
 const TEAL = '#0F6E56';
 const NAVY = '#0D2137';
+
+// 640px matches the breakpoint already used across the mobile screens.
+const MOBILE_BREAKPOINT = 640;
 
 type FeeConfig = {
   countryCode: string;
@@ -20,15 +43,35 @@ type FeeConfig = {
 };
 
 // Module-level helpers (never inside render — prevents cursor-focus loss)
-const inputStyle: React.CSSProperties = {
-  width: '100%',
-  padding: '11px 14px',
-  border: '1.5px solid #E2E8F0',
-  borderRadius: 10,
-  fontSize: 14,
-  outline: 'none',
-  boxSizing: 'border-box',
-};
+function useIsMobile() {
+  // Starts false so the server render and the first client render agree;
+  // useEffect corrects it before paint on the client.
+  const [isMobile, setIsMobile] = useState(false);
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < MOBILE_BREAKPOINT);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
+  return isMobile;
+}
+
+// fontSize is the load-bearing part: 16 on mobile stops iOS Safari zooming
+// on focus. minHeight keeps the tap target at 44px.
+function inputStyle(isMobile: boolean): React.CSSProperties {
+  return {
+    width: '100%',
+    padding: isMobile ? '13px 14px' : '11px 14px',
+    border: '1.5px solid #E2E8F0',
+    borderRadius: 10,
+    fontSize: isMobile ? 16 : 14,
+    minHeight: 44,
+    outline: 'none',
+    boxSizing: 'border-box',
+    background: 'white',
+    color: NAVY,
+  };
+}
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
@@ -48,8 +91,14 @@ const BRAND_FEATURES = [
   { icon: '🔒', text: 'Secure & transparent' },
 ];
 
+const ACCOUNT_TYPES: ['MEMBER' | 'GROUP_ADMIN', string, string][] = [
+  ['MEMBER', '👤 Join the Members Pool', 'Discover Public groups advertised to you and request to join them'],
+  ['GROUP_ADMIN', '👥 Create my own Group', 'Start and administer your own group'],
+];
+
 export default function RegisterPage() {
   const router = useRouter();
+  const isMobile = useIsMobile();
 
   const [config, setConfig] = useState<FeeConfig[]>([]);
   const [fullName, setFullName] = useState('');
@@ -79,6 +128,7 @@ export default function RegisterPage() {
   }, []);
 
   const selectedFee = config.find(c => c.countryCode === country) || null;
+  const inp = inputStyle(isMobile);
 
   const handleRegister = useCallback(async () => {
     setError('');
@@ -117,27 +167,54 @@ export default function RegisterPage() {
   return (
     <div style={{ minHeight: '100vh', display: 'flex', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
 
-      {/* Left panel — branding (mirrors login page) */}
-      <div style={{ flex: 1, background: `linear-gradient(135deg, ${NAVY} 0%, #1A3A5C 100%)`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 48, minHeight: '100vh' }}>
-        <div style={{ maxWidth: 400, textAlign: 'center' }}>
-          <div style={{ width: 72, height: 72, background: TEAL, borderRadius: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, margin: '0 auto 24px' }}>🔄</div>
-          <h1 style={{ fontSize: 32, fontWeight: 800, color: 'white', margin: '0 0 12px', lineHeight: 1.2 }}>Windfall<br />Community Deals</h1>
-          <p style={{ fontSize: 16, color: 'rgba(255,255,255,0.65)', margin: '0 0 40px', lineHeight: 1.6 }}>Your community. Your savings. Your future.</p>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            {BRAND_FEATURES.map(f => (
-              <div key={f.text} style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 16px' }}>
-                <span style={{ fontSize: 20 }}>{f.icon}</span>
-                <span style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', fontWeight: 500 }}>{f.text}</span>
-              </div>
-            ))}
+      {/* Left panel — branding (mirrors login page). Hidden on mobile: it and
+          the fixed-width form panel together demand more than a 360px screen. */}
+      {!isMobile ? (
+        <div style={{ flex: 1, background: `linear-gradient(135deg, ${NAVY} 0%, #1A3A5C 100%)`, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 48, minHeight: '100vh' }}>
+          <div style={{ maxWidth: 400, textAlign: 'center' }}>
+            <div style={{ width: 72, height: 72, background: TEAL, borderRadius: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 36, margin: '0 auto 24px' }}>🔄</div>
+            <h1 style={{ fontSize: 32, fontWeight: 800, color: 'white', margin: '0 0 12px', lineHeight: 1.2 }}>Windfall<br />Community Deals</h1>
+            <p style={{ fontSize: 16, color: 'rgba(255,255,255,0.65)', margin: '0 0 40px', lineHeight: 1.6 }}>Your community. Your savings. Your future.</p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              {BRAND_FEATURES.map(f => (
+                <div key={f.text} style={{ display: 'flex', alignItems: 'center', gap: 12, background: 'rgba(255,255,255,0.08)', borderRadius: 10, padding: '12px 16px' }}>
+                  <span style={{ fontSize: 20 }}>{f.icon}</span>
+                  <span style={{ fontSize: 14, color: 'rgba(255,255,255,0.8)', fontWeight: 500 }}>{f.text}</span>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
-      </div>
+      ) : null}
 
-      {/* Right panel — registration form */}
-      <div style={{ width: 480, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 48, background: 'white', overflowY: 'auto' }}>
+      {/* Right panel — registration form. Full width on mobile, and aligned to
+          the top rather than centred: a seven-field form is taller than the
+          viewport, and centring pushes the first field off-screen. */}
+      <div style={{
+        width: isMobile ? '100%' : 480,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: isMobile ? 'flex-start' : 'center',
+        padding: isMobile ? '20px 18px 40px' : 48,
+        background: 'white',
+        overflowY: 'auto',
+        boxSizing: 'border-box',
+      }}>
         <div style={{ width: '100%', maxWidth: 360 }}>
-          <h2 style={{ fontSize: 26, fontWeight: 700, color: NAVY, margin: '0 0 6px' }}>Create your account</h2>
+
+          {/* Compact brand header — mobile only, standing in for the panel */}
+          {isMobile ? (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 22 }}>
+              <div style={{ width: 44, height: 44, background: TEAL, borderRadius: 13, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, flexShrink: 0 }}>🔄</div>
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 16, fontWeight: 800, color: NAVY, lineHeight: 1.2 }}>Windfall</div>
+                <div style={{ fontSize: 12, color: '#64748B' }}>Community Deals</div>
+              </div>
+            </div>
+          ) : null}
+
+          <h2 style={{ fontSize: isMobile ? 22 : 26, fontWeight: 700, color: NAVY, margin: '0 0 6px' }}>Create your account</h2>
           <p style={{ fontSize: 14, color: '#64748B', margin: '0 0 28px' }}>Join your community in minutes</p>
 
           {error ? (
@@ -147,19 +224,19 @@ export default function RegisterPage() {
           ) : null}
 
           <Field label="Full name">
-            <input style={inputStyle} value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Thandiwe Moyo" autoComplete="name" autoFocus />
+            <input style={inp} value={fullName} onChange={e => setFullName(e.target.value)} placeholder="Thandiwe Moyo" autoComplete="name" autoFocus={!isMobile} />
           </Field>
 
           <Field label="Email address">
-            <input style={inputStyle} type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" />
+            <input style={inp} type="email" inputMode="email" autoCapitalize="none" value={email} onChange={e => setEmail(e.target.value)} placeholder="you@example.com" autoComplete="email" />
           </Field>
 
           <Field label="Phone number">
-            <input style={inputStyle} type="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="+263 7X XXX XXXX" autoComplete="tel" />
+            <input style={inp} type="tel" inputMode="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="+263 7X XXX XXXX" autoComplete="tel" />
           </Field>
 
           <Field label="Country">
-            <select style={inputStyle} value={country} onChange={e => setCountry(e.target.value)}>
+            <select style={inp} value={country} onChange={e => setCountry(e.target.value)}>
               <option value="">Choose your country</option>
               {config.map(c => (
                 <option key={c.countryCode} value={c.countryCode}>{c.countryName}</option>
@@ -168,24 +245,32 @@ export default function RegisterPage() {
           </Field>
 
           <Field label="How do you want to join?">
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-              {([
-                ['MEMBER', '👤 Join the Members Pool', 'Discover Public groups advertised to you and request to join them'],
-                ['GROUP_ADMIN', '👥 Create my own Group', 'Start and administer your own group'],
-              ] as ['MEMBER' | 'GROUP_ADMIN', string, string][]).map(([v, title, desc]) => (
-                <div key={v} onClick={() => setAccountType(v)}
-                  style={{ padding: '12px 12px', borderRadius: 10, cursor: 'pointer', border: `2px solid ${accountType === v ? TEAL : '#E2E8F0'}`, background: accountType === v ? '#F0FDF4' : 'white' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: 10 }}>
+              {ACCOUNT_TYPES.map(([v, title, desc]) => (
+                <button key={v} type="button" onClick={() => setAccountType(v)}
+                  aria-pressed={accountType === v}
+                  style={{
+                    padding: '12px 12px',
+                    borderRadius: 10,
+                    cursor: 'pointer',
+                    minHeight: 44,
+                    width: '100%',
+                    textAlign: 'left',
+                    font: 'inherit',
+                    border: `2px solid ${accountType === v ? TEAL : '#E2E8F0'}`,
+                    background: accountType === v ? '#F0FDF4' : 'white',
+                  }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: NAVY, marginBottom: 3 }}>{title}</div>
                   <div style={{ fontSize: 11, color: '#64748B', lineHeight: 1.4 }}>{desc}</div>
-                </div>
+                </button>
               ))}
             </div>
           </Field>
 
           {accountType === 'MEMBER' && selectedFee ? (
-            <div style={{ background: '#f0fdf9', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: NAVY, display: 'flex', justifyContent: 'space-between' }}>
+            <div style={{ background: '#f0fdf9', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: NAVY, display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 4 : 0, justifyContent: 'space-between' }}>
               <span>Once-off joining fee — Members Pool access</span>
-              <strong style={{ color: TEAL }}>{selectedFee.currency} {selectedFee.amount.toFixed(2)}</strong>
+              <strong style={{ color: TEAL, whiteSpace: 'nowrap' }}>{selectedFee.currency} {selectedFee.amount.toFixed(2)}</strong>
             </div>
           ) : null}
 
@@ -196,11 +281,11 @@ export default function RegisterPage() {
           ) : null}
 
           <Field label="Password">
-            <input style={inputStyle} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 8 characters" autoComplete="new-password" />
+            <input style={inp} type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="At least 8 characters" autoComplete="new-password" />
           </Field>
 
           <Field label="Confirm password">
-            <input style={inputStyle} type="password" value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Repeat your password" autoComplete="new-password" />
+            <input style={inp} type="password" value={confirm} onChange={e => setConfirm(e.target.value)} placeholder="Repeat your password" autoComplete="new-password" />
           </Field>
 
           <button
@@ -210,6 +295,7 @@ export default function RegisterPage() {
             style={{
               width: '100%',
               padding: 13,
+              minHeight: 48,
               border: 'none',
               borderRadius: 10,
               fontSize: 15,
@@ -226,7 +312,7 @@ export default function RegisterPage() {
 
           <p style={{ textAlign: 'center', fontSize: 13, color: '#64748B', marginTop: 20 }}>
             Already have an account?{' '}
-            <a href="/login" style={{ color: TEAL, fontWeight: 600, textDecoration: 'none' }}>Sign in</a>
+            <a href="/login" style={{ color: TEAL, fontWeight: 600, textDecoration: 'none', display: 'inline-block', minHeight: 44, lineHeight: '44px' }}>Sign in</a>
           </p>
 
           <p style={{ textAlign: 'center', fontSize: 12, color: '#94A3B8', marginTop: 24 }}>
