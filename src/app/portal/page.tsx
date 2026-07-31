@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import NotificationBell from '../dashboard/notifications/NotificationBell'
 import LogoutButton from '../../components/LogoutButton'
+import PortalGroupView from './PortalGroupView'
 
 const TEAL   = '#0F6E56'
 const NAVY   = '#0D2137'
@@ -398,7 +399,7 @@ function DiscoverTab({ showToast, user }: any) {
 }
 
 // ── Overview Tab ──────────────────────────────────────────────
-function OverviewTab({ data, onViewCert, onPay }: any) {
+function OverviewTab({ data, onViewCert, onPay, onOpenGroup }: any) {
   const isMobile = useIsMobile()
   const { user, memberships, summary, recentContributions, upcomingContributions, payoutPositions, assetOwnerships, queueEntries, recentIncome } = data
 
@@ -491,7 +492,10 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
         <SectionCard title="👥 My Groups">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))', gap: '10px' }}>
             {memberships.map((m: any) => (
-              <div key={m.groupId} style={{ background: '#F8FAFC', borderRadius: '10px', padding: '14px', border: '1px solid #E2E8F0' }}>
+              <button key={m.groupId}
+                onClick={() => onOpenGroup?.(m.groupId, m.groupName)}
+                aria-label={`Open ${m.groupName}`}
+                style={{ background: '#F8FAFC', borderRadius: '10px', padding: '14px', border: '1px solid #E2E8F0', width: '100%', textAlign: 'left', font: 'inherit', cursor: 'pointer', minHeight: '44px', display: 'block' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '10px' }}>
                   <div>
                     <div style={{ fontSize: '14px', fontWeight: '600', color: NAVY }}>{m.groupName}</div>
@@ -513,7 +517,10 @@ function OverviewTab({ data, onViewCert, onPay }: any) {
                     </div>
                   ))}
                 </div>
-              </div>
+                <div style={{ fontSize: '11px', color: TEAL, fontWeight: 600, marginTop: '10px' }}>
+                  View passbooks →
+                </div>
+              </button>
             ))}
           </div>
         </SectionCard>
@@ -1006,6 +1013,9 @@ export default function MemberPortal() {
   const [loading, setLoading] = useState(true)
   const [error, setError]     = useState<string>('')
   const [tab, setTab]         = useState('overview')
+  // Which group's schemes are open, if any. Local state rather than a
+  // route, so returning to the list keeps the portal's loaded data.
+  const [openGroup, setOpenGroup] = useState<{ id: string; name: string } | null>(null)
   const [certEntry, setCertEntry] = useState<any>(null)
   const [userId, setUserId]   = useState<string>('')
   const [payItem, setPayItem] = useState<any>(null)
@@ -1164,9 +1174,15 @@ export default function MemberPortal() {
             {error && <div style={{ fontSize: '13px', color: '#DC2626', background: '#FEF2F2', padding: '10px 16px', borderRadius: '8px', maxWidth: '500px', margin: '0 auto', textAlign: 'left' }}>{error}</div>}
             <button onClick={() => window.location.reload()} style={{ marginTop: '16px', padding: '8px 20px', background: '#0F6E56', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px' }}>↻ Retry</button>
           </div>
+        ) : openGroup ? (
+          <PortalGroupView
+            groupId={openGroup.id}
+            groupName={openGroup.name}
+            onBack={() => setOpenGroup(null)}
+          />
         ) : (
           <>
-            {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} />}
+            {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} onOpenGroup={(id: string, name: string) => setOpenGroup({ id, name })} />}
             {tab === 'discover'      && <DiscoverTab showToast={showToast} user={data?.user} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}
             {tab === 'assets'        && <AssetsTab data={data} onViewCert={setCertEntry} />}
