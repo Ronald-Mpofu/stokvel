@@ -89,6 +89,35 @@ function monthYear(dt: Date | null): string {
   return `${MONTHS[dt.getUTCMonth()]} ${dt.getUTCFullYear()}`
 }
 
+// How a row is titled depends on how often the scheme collects.
+//
+// A monthly scheme gets "August 2026" — the month IS the period, and the
+// year is always shown because a twelve-month cycle crosses a year end.
+//
+// A weekly pool cannot use that. Your Sydney pool runs weekly for twelve
+// months, which is 52 rows, so month labelling would produce four or five
+// consecutive rows all reading "August 2026" with nothing to tell them
+// apart. Those rows get their period number and date instead.
+//
+// Frequency arrives as WEEKLY / FORTNIGHTLY / MONTHLY from the savings
+// module, or lowercase 'monthly' from the older scheme config, so it is
+// compared case-insensitively.
+function periodLabel(
+  frequency: string | null | undefined,
+  periodNumber: number,
+  due: Date | null
+): string {
+  const f = (frequency || 'MONTHLY').toUpperCase()
+
+  if (f === 'WEEKLY') {
+    return due ? `Week ${periodNumber} · ${dayMonth(due)}` : `Week ${periodNumber}`
+  }
+  if (f === 'FORTNIGHTLY') {
+    return due ? `Period ${periodNumber} · ${dayMonth(due)}` : `Period ${periodNumber}`
+  }
+  return monthYear(due)
+}
+
 // "6 May"
 function dayMonth(dt: Date | null): string {
   if (!dt) return ''
@@ -158,6 +187,8 @@ export type CycleInput = {
 } | null
 
 export type ContributionInput = {
+  // Sequence within the cycle or pool. Called monthNumber for historical
+  // reasons; for a weekly pool it is a week number.
   monthNumber: number
   dueDate: string
   amountDue: unknown
@@ -188,7 +219,8 @@ export type MeInput = {
 // themselves are identical, so they are built once.
 function contributionRows(
   contributions: ContributionInput[],
-  now: Date
+  now: Date,
+  frequency?: string | null
 ): PassbookRow[] {
   return contributions.map(c => {
     const due = d(c.dueDate)
@@ -211,7 +243,7 @@ function contributionRows(
     return {
       id: `c-${c.monthNumber}`,
       kind,
-      label: monthYear(due),
+      label: periodLabel(frequency, c.monthNumber, due),
       detail,
       amount: num(c.amountDue),
     }
@@ -224,7 +256,8 @@ function contributionRows(
 // bottom, because a paper passbook has it on the page where it falls.
 function payoutGoalRow(
   rotation: RotationInput[],
-  position: number | null
+  position: number | null,
+  frequency?: string | null
 ): PassbookRow | null {
   if (!position) return null
   const mine = rotation.find(r => r.isMe) || rotation.find(r => r.monthNumber === position)
@@ -241,7 +274,7 @@ function payoutGoalRow(
   return {
     id: `payout-${mine.monthNumber}`,
     kind: received ? 'NOTE' : 'GOAL',
-    label: `Payout · ${monthYear(when)}`,
+    label: `Payout · ${periodLabel(frequency, mine.monthNumber, when)}`,
     detail: received
       ? `Received · position ${mine.monthNumber} of ${rotation.length}`
       : `Your payout · position ${mine.monthNumber} of ${rotation.length}`,
@@ -262,8 +295,8 @@ export function buildRotatingView(
   me: MeInput,
   now: Date
 ): PassbookView {
-  const rows = contributionRows(contributions, now)
-  const goal = payoutGoalRow(rotation, me.position)
+  const rows = contributionRows(contributions, now, scheme.contributionFrequency)
+  const goal = payoutGoalRow(rotation, me.position, scheme.contributionFrequency)
 
   // The goal row is inserted at its month, so the member sees the payout
   // sitting between the months either side of it.
@@ -308,7 +341,7 @@ export function buildRotatingView(
     terms: ['Rotating', cycle ? `cycle ${cycle.cycleNumber}` : null]
       .filter(Boolean).join(' · '),
     termsAmount: scheme.contributionAmount,
-    termsFrequency: scheme.contributionFrequency,
+    termsFrequency: (scheme.contributionFrequency || 'monthly').toLowerCase(),
     hero: {
       label: 'Paid this cycle',
       amount: me.totalPaid,
@@ -354,7 +387,7 @@ export function buildAccumulatingView(
     goalDetail: 'Everyone collects at the end',
   }
 ): PassbookView {
-  const rows = contributionRows(contributions, now)
+  const rows = contributionRows(contributions, now, scheme.contributionFrequency)
   const monthsTotal = contributions.length
   const target = num(scheme.contributionAmount) * monthsTotal
   const nextDue = contributions.find(c => !PAID_STATUSES.has(c.status))
@@ -398,7 +431,7 @@ export function buildAccumulatingView(
     terms: ['Accumulating', cycle ? `cycle ${cycle.cycleNumber}` : null]
       .filter(Boolean).join(' · '),
     termsAmount: scheme.contributionAmount,
-    termsFrequency: scheme.contributionFrequency,
+    termsFrequency: (scheme.contributionFrequency || 'monthly').toLowerCase(),
     hero: {
       label: queue ? 'Toward your unit' : 'Saved so far',
       amount: me.totalPaid,

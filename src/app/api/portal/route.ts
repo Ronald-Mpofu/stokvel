@@ -45,6 +45,103 @@ export async function GET(req: NextRequest) {
       },
     }), [])
 
+    // ── Scheme-level facts for this member ────────────────────
+    //
+    // WHY THIS EXISTS
+    //   Contribution terms moved from Group to WindfallScheme. Group still
+    //   HAS contributionAmount — it is NOT NULL and cannot be dropped yet —
+    //   but it is no longer maintained, which is why the portal was showing
+    //   0.00 for a member who has paid 450.
+    //
+    //   The passbook reads the Contribution ledger under a scheme's active
+    //   cycle. This reads the same rows, so the portal and the passbook can
+    //   no longer disagree about what a member has paid.
+    //
+    // Raw SQL because WindfallScheme and SchemeMember are not in
+    // schema.prisma. One statement, LATERAL joins rather than a query per
+    // scheme.
+    const schemeRows = await safeQuery(() => prisma.$queryRawUnsafe(`
+      SELECT
+        ws.id                       AS "schemeId",
+        ws.name                     AS "schemeName",
+        ws."groupId"                AS "groupId",
+        ws."isContributory"         AS "isContributory",
+        ws."contributionAmount"     AS "contributionAmount",
+        ws."contributionFrequency"  AS "contributionFrequency",
+        ws."contributionDay"        AS "contributionDay",
+        sm."payoutPosition"         AS "payoutPosition",
+        cyc."cycleNumber"           AS "cycleNumber",
+        COALESCE(agg."totalPaid", 0) AS "totalPaid",
+        nd."amountDue"              AS "nextDueAmount",
+        nd."dueDate"                AS "nextDueDate"
+      FROM "SchemeMember" sm
+      JOIN "WindfallScheme" ws ON ws.id = sm."schemeId"
+      JOIN "Group" g           ON g.id  = ws."groupId"
+      LEFT JOIN LATERAL (
+        SELECT c.id, c."cycleNumber"
+          FROM "Cycle" c
+         WHERE c."schemeId" = ws.id
+           AND c.status = 'ACTIVE'::"CycleStatus"
+         ORDER BY c."cycleNumber" DESC
+         LIMIT 1
+      ) cyc ON true
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(co."amountPaid"), 0) AS "totalPaid"
+          FROM "Contribution" co
+         WHERE co."cycleId" = cyc.id
+           AND co."userId"  = $1::text
+      ) agg ON true
+      LEFT JOIN LATERAL (
+        SELECT co."amountDue", co."dueDate"
+          FROM "Contribution" co
+         WHERE co."cycleId" = cyc.id
+           AND co."userId"  = $1::text
+           AND co.status NOT IN ('PAID'::"ContributionStatus",
+                                 'PRE_PAID'::"ContributionStatus",
+                                 'WAIVED'::"ContributionStatus")
+         ORDER BY co."monthNumber"
+         LIMIT 1
+      ) nd ON true
+      WHERE sm."userId" = $1::text
+        AND sm.status <> 'EXITED'::"MemberStatus"
+        AND g."deletedAt" IS NULL
+    `, userId), [] as any[])
+
+    // Per-group rollup, so a membership card can show real terms and the
+    // upcoming list can show a real amount.
+    const schemeByGroup: Record<string, {
+      contribution: number
+      day: number | null
+      paid: number
+      nextDueAmount: number | null
+      nextDueDate: Date | null
+    }> = {}
+
+    for (const r of (schemeRows as any[])) {
+      const gid = r.groupId
+      if (!schemeByGroup[gid]) {
+        schemeByGroup[gid] = { contribution: 0, day: null, paid: 0, nextDueAmount: null, nextDueDate: null }
+      }
+      const bucket = schemeByGroup[gid]
+      if (r.isContributory && r.contributionAmount) {
+        bucket.contribution += Number(r.contributionAmount)
+        if (bucket.day === null && r.contributionDay) bucket.day = Number(r.contributionDay)
+      }
+      bucket.paid += Number(r.totalPaid || 0)
+      // Earliest unpaid row across the group's schemes wins — that is the
+      // next thing the member actually has to pay.
+      if (r.nextDueDate) {
+        const due = new Date(r.nextDueDate)
+        if (!bucket.nextDueDate || due < bucket.nextDueDate) {
+          bucket.nextDueDate = due
+          bucket.nextDueAmount = Number(r.nextDueAmount || 0)
+        }
+      }
+    }
+
+    const schemePaidTotal = (schemeRows as any[])
+      .reduce((sum: number, r: any) => sum + Number(r.totalPaid || 0), 0)
+
     if (section === 'overview') {
       // Transactions — exists in original schema
       const transactions = await safeQuery(() => prisma.transaction.findMany({
@@ -139,10 +236,34 @@ export async function GET(req: NextRequest) {
       const now = new Date()
 
       // Group monthly contributions (computed from membership)
+      //
+      // The payId shape is deliberately unchanged — POST still receives
+      // GROUP:<groupId>:<periodKey> and records the same Transaction
+      // metadata. Only the AMOUNT and DUE DATE now come from the scheme
+      // ledger instead of the stale Group.contributionAmount column, so
+      // the Pay button keeps working exactly as before.
+      //
+      // A member with no scheme dues is filtered out rather than shown a
+      // row for 0.00, which is what produced "AUD0.00 due in 2 days".
       const groupUpcoming = (memberships as any[]).map((m: any) => {
-        const day  = m.group.contributionDay || 1
-        const next = new Date(now.getFullYear(), now.getMonth(), day)
-        if (next <= now) next.setMonth(next.getMonth() + 1)
+        const sch = schemeByGroup[m.groupId]
+
+        // Real due row from the ledger where there is one; otherwise fall
+        // back to the scheme's contribution day so a configured-but-not-yet
+        // -started scheme still shows something honest.
+        let next: Date
+        let amount: number
+
+        if (sch?.nextDueDate && sch.nextDueAmount !== null) {
+          next   = sch.nextDueDate
+          amount = sch.nextDueAmount
+        } else {
+          const day = sch?.day || m.group.contributionDay || 1
+          next = new Date(now.getFullYear(), now.getMonth(), day)
+          if (next <= now) next.setMonth(next.getMonth() + 1)
+          amount = sch?.contribution || 0
+        }
+
         const periodKey = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, '0')}`
         return {
           type:      'GROUP',
@@ -152,11 +273,11 @@ export async function GET(req: NextRequest) {
           groupName: m.group.name,
           currency:  m.group.currency,
           country:   m.group.country || null,
-          amount:    Number(m.group.contributionAmount),
+          amount,
           dueDate:   next,
           daysUntil: Math.ceil((next.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)),
         }
-      })
+      }).filter((c: any) => c.amount > 0)
 
       // Savings pool contributions still owed (raw SQL — not in Prisma schema)
       const savingsRows = await safeQuery(() => prisma.$queryRawUnsafe(
@@ -211,7 +332,11 @@ export async function GET(req: NextRequest) {
             role:           m.role,
             joinedAt:       m.joinedAt,
             currency:       m.group.currency,
-            contribution:   Number(m.group.contributionAmount),
+            // Sum of the member's contributory schemes in this group.
+            // Group.contributionAmount is retained in the database but no
+            // longer maintained, so reading it showed 0.00/mo.
+            contribution:   schemeByGroup[m.groupId]?.contribution
+                              ?? Number(m.group.contributionAmount),
             memberCount:    m.group._count.members,
             maxMembers:     m.group.maxMembers,
             escrowBalance:  Number(m.group.escrowBalance),
@@ -219,7 +344,15 @@ export async function GET(req: NextRequest) {
             groupStatus:    m.group.status,
           })),
           summary: {
-            totalContributed: Number((totalAgg as any)._sum?.amount || 0),
+            // The Contribution ledger, matching the passbook. The old
+            // figure summed COMPLETED Transaction rows, of which there are
+            // none — contributions are recorded as Contribution rows, so
+            // this read 0.00 for a member who had paid three months.
+            // Falls back to the Transaction sum if no scheme rows exist,
+            // so groups predating the scheme model are not zeroed out.
+            totalContributed: schemePaidTotal > 0
+              ? schemePaidTotal
+              : Number((totalAgg as any)._sum?.amount || 0),
             totalGroups:      memberships.length,
             totalAssets:      assetOwnerships.length,
             totalIncome:      Number((totalIncome as any)._sum?.shareAmount || 0),
