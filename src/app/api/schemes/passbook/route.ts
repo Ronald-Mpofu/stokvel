@@ -1,158 +1,190 @@
-// src/app/api/schemes/passbook/route.ts
+// src/app/api/schemes/passbook/route.ts — v2
 //
-// One member's passbook for ONE windfall scheme, in one query.
+// One member's passbook for ONE windfall scheme.
 //
-// GET /api/schemes/passbook?schemeId=xxx
+// GET /api/schemes/passbook?schemeId=xxx[&poolId=yyy]
 //
-// REPLACES /api/groups/passbook, which resolved the cycle by groupId. That
-// worked only while a group had a single scheme with a cycle. Cycles now
-// hang off schemes, so a group running both a savings pool and a grocery
-// club has two active cycles and the old query picked whichever had the
-// higher cycleNumber — silently returning a plausible passbook from the
-// wrong scheme. Delete the old route once the mobile screen is switched
-// over; leaving both live invites the same bug back in.
+// WHAT CHANGED IN v2
 //
-// AUTHORISATION
-//   Membership of the SCHEME, not the group. Group admins assign members
-//   per scheme, so being in the group no longer implies being in the
-//   scheme. SchemeMember is the authoritative roster.
+//   v1 read Cycle and Contribution. Those are the OLD group-level ROSCA
+//   tables; migration 12 removed the seeded cycle and they are now empty.
+//
+//   The real ledger for a savings scheme is the SavingsPool module —
+//   SavingsPool, SavingsContribution, SavingsPoolMember,
+//   SavingsRotationPayout. That is consistent with every other scheme
+//   type: Property has PropertyGroup, Assets has Asset, Loans has Loan.
+//   WindfallScheme is the REGISTRY of which scheme types a group runs;
+//   the ledger lives in the type's own module.
+//
+//   Migration 12 added SavingsPool.schemeId, so a scheme now resolves to
+//   its pool directly rather than by sharing a groupId — which would have
+//   picked arbitrarily the moment a group ran two pools.
+//
+// GRAMMAR
+//   poolType ROTATING  → the rotating book. One member collects per
+//                        period; the payout row is theirs.
+//   poolType MATURITY  → the accumulating book. Everyone collects at
+//                        maturityDate.
+//   The savings module arrived at the same two shapes independently, which
+//   is why no translation is needed beyond naming.
+//
+// ENUM HANDLING
+//   SavingsContribution.status is a SavingsContributionStatus enum whose
+//   labels are not confirmed, so it is compared as ::text. A cast to a
+//   label that does not exist fails at runtime, and ::text cannot.
+//   SavingsRotationPayout.status is already plain text.
 //
 // PAYLOAD DISCIPLINE
-//   Returns a render-ready view: rows with their meaning already decided,
-//   three standing figures, one action. No scheme config, no fee
-//   percentages, no member list. Members pay for these bytes out of
-//   airtime.
+//   A render-ready view. No pool config, no interest rate, no other
+//   members' contributions. Members pay for these bytes out of airtime.
 
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma/client'
 import { getClaimsFromRequest, unauthorized, forbidden, SUPER_ROLES } from '@/lib/auth'
-import { buildView, grammarFor, GRAMMAR_READY } from '@/lib/passbook/build'
-import type {
-  ContributionInput, RotationInput,
-} from '@/lib/passbook/build'
+import { buildRotatingView, buildAccumulatingView } from '@/lib/passbook/build'
+import type { ContributionInput, RotationInput, SchemeInput } from '@/lib/passbook/build'
 
 export const dynamic = 'force-dynamic'
 
-type Row = {
-  schemeId: string | null
-  schemeName: string | null
-  schemeType: string | null
-  schemeStatus: string | null
-  groupId: string | null
-  groupName: string | null
-  currency: string | null
-  isContributory: boolean | null
-  isRotating: boolean | null
-  contributionAmount: string | null
-  contributionFrequency: string | null
-  isSchemeMember: boolean | null
-  isGroupMember: boolean | null
+// Statuses that mean the member owes nothing further for that period.
+// Compared against status::text, so this list is the single place to
+// adjust once the SavingsContributionStatus labels are confirmed.
+const SETTLED = ['PAID', 'WAIVED']
+
+type SchemeRow = {
+  schemeId: string
+  schemeName: string
+  schemeType: string
+  groupId: string
+  groupName: string
+  currency: string
+  isGroupMember: boolean
+  poolCount: number
+}
+
+type PoolRow = {
+  poolId: string
+  poolName: string
+  poolType: string
+  poolStatus: string
+  currency: string
+  contributionAmount: string
+  contributionFrequency: string
+  maturityDate: string | null
+  isPoolMember: boolean
   myPosition: number | null
-  cycleId: string | null
-  cycleNumber: number | null
-  totalMembers: number | null
-  poolAmount: string | null
-  totalPaid: string | null
-  monthsPaid: number | null
+  totalPaid: string
+  periodsPaid: number
   contributions: ContributionInput[] | null
-  rotation: (Omit<RotationInput, 'isMe'> & { recipientId: string })[] | null
+  rotation: (Omit<RotationInput, 'isMe'> & { userId: string })[] | null
 }
 
 // $1 = userId, $2 = schemeId
-//
-// WindfallScheme and SchemeMember are raw-SQL tables, so the whole query
-// is raw rather than half Prisma. One round trip: Supabase is in Tokyo and
-// Vercel is not, so each extra hop costs roughly 160ms before any work
-// happens.
-const SQL = `
-WITH cyc AS MATERIALIZED (
-  SELECT c.id, c."cycleNumber", c."totalMembers", c."poolAmount"
-    FROM "Cycle" c
-   WHERE c."schemeId" = $2::text
-     AND c.status = 'ACTIVE'::"CycleStatus"
-   ORDER BY c."cycleNumber" DESC
-   LIMIT 1
-)
+const SCHEME_SQL = `
 SELECT
-  ws.id                                         AS "schemeId",
-  ws."name"                                     AS "schemeName",
-  ws."schemeType"::text                         AS "schemeType",
-  ws."status"::text                             AS "schemeStatus",
-  ws."groupId"                                  AS "groupId",
-  g."name"                                      AS "groupName",
-  g.currency::text                              AS currency,
-  ws."isContributory"                           AS "isContributory",
-  ws."isRotating"                               AS "isRotating",
-  ws."contributionAmount"                       AS "contributionAmount",
-  ws."contributionFrequency"                    AS "contributionFrequency",
-
-  EXISTS (
-    SELECT 1 FROM "SchemeMember" sm
-     WHERE sm."schemeId" = ws.id
-       AND sm."userId"   = $1::text
-       AND sm."status" <> 'EXITED'::"MemberStatus"
-  )                                             AS "isSchemeMember",
-
+  ws.id                    AS "schemeId",
+  ws.name                  AS "schemeName",
+  ws."schemeType"::text    AS "schemeType",
+  ws."groupId"             AS "groupId",
+  g.name                   AS "groupName",
+  g.currency::text         AS currency,
   EXISTS (
     SELECT 1 FROM "GroupMember" gm
      WHERE gm."groupId" = ws."groupId"
        AND gm."userId"  = $1::text
-       AND gm."status" <> 'EXITED'::"MemberStatus"
-  )                                             AS "isGroupMember",
-
-  -- Position comes from the roster, which is the single authoritative
-  -- source. Reading it from PayoutSchedule as well would be two answers
-  -- to one question, and they would eventually disagree.
-  (SELECT sm."payoutPosition" FROM "SchemeMember" sm
-    WHERE sm."schemeId" = ws.id
-      AND sm."userId"   = $1::text
-    LIMIT 1)                                    AS "myPosition",
-
-  (SELECT id             FROM cyc)              AS "cycleId",
-  (SELECT "cycleNumber"  FROM cyc)              AS "cycleNumber",
-  (SELECT "totalMembers" FROM cyc)              AS "totalMembers",
-  (SELECT "poolAmount"   FROM cyc)              AS "poolAmount",
-
-  (SELECT COALESCE(SUM(co."amountPaid"), 0) FROM "Contribution" co
-    WHERE co."cycleId" = (SELECT id FROM cyc)
-      AND co."userId"  = $1::text)              AS "totalPaid",
-
-  (SELECT COUNT(*)::int FROM "Contribution" co
-    WHERE co."cycleId" = (SELECT id FROM cyc)
-      AND co."userId"  = $1::text
-      AND co.status IN ('PAID'::"ContributionStatus",
-                        'PRE_PAID'::"ContributionStatus"))
-                                                AS "monthsPaid",
-
-  (SELECT COALESCE(json_agg(p ORDER BY p."monthNumber"), '[]'::json)
-     FROM (
-       SELECT co."monthNumber", co."dueDate", co."amountDue", co."amountPaid",
-              co.status::text AS status, co."paidAt",
-              co."paymentMethod"::text AS "paymentMethod"
-         FROM "Contribution" co
-        WHERE co."cycleId" = (SELECT id FROM cyc)
-          AND co."userId"  = $1::text
-        ORDER BY co."monthNumber"
-     ) p
-  )                                             AS contributions,
-
-  (SELECT COALESCE(json_agg(r ORDER BY r."monthNumber"), '[]'::json)
-     FROM (
-       SELECT ps."monthNumber", ps."scheduledDate", ps."payoutAmount",
-              ps.status::text AS status, ps."recipientId",
-              u."fullName" AS "recipientName"
-         FROM "PayoutSchedule" ps
-         LEFT JOIN "User" u ON u.id = ps."recipientId"
-        WHERE ps."cycleId" = (SELECT id FROM cyc)
-        ORDER BY ps."monthNumber"
-     ) r
-  )                                             AS rotation
-
+       AND gm.status <> 'EXITED'::"MemberStatus"
+  )                        AS "isGroupMember",
+  (SELECT count(*)::int FROM "SavingsPool" sp
+    WHERE sp."schemeId" = ws.id)  AS "poolCount"
 FROM "WindfallScheme" ws
 JOIN "Group" g ON g.id = ws."groupId"
 WHERE ws.id = $2::text
   AND g."deletedAt" IS NULL
 `
+
+// $1 = userId, $2 = schemeId, $3 = poolId or NULL
+//
+// One round trip. LATERAL joins carry the caller's aggregate, their
+// rotation position, their ledger and the pool's rotation schedule.
+const POOL_SQL = `
+SELECT
+  sp.id                          AS "poolId",
+  sp.name                        AS "poolName",
+  sp."poolType"                  AS "poolType",
+  sp.status                      AS "poolStatus",
+  sp.currency::text              AS currency,
+  sp."contributionAmount"        AS "contributionAmount",
+  sp."contributionFrequency"     AS "contributionFrequency",
+  sp."maturityDate"              AS "maturityDate",
+
+  EXISTS (
+    SELECT 1 FROM "SavingsPoolMember" m
+     WHERE m."poolId" = sp.id
+       AND m."userId" = $1::text
+       AND m."isActive" = true
+       AND m."exitedAt" IS NULL
+  )                              AS "isPoolMember",
+
+  (SELECT rp.position FROM "SavingsRotationPayout" rp
+    WHERE rp."poolId" = sp.id AND rp."userId" = $1::text
+    LIMIT 1)                     AS "myPosition",
+
+  COALESCE((SELECT SUM(sc."amountPaid") FROM "SavingsContribution" sc
+             WHERE sc."poolId" = sp.id AND sc."userId" = $1::text), 0)
+                                 AS "totalPaid",
+
+  COALESCE((SELECT count(*)::int FROM "SavingsContribution" sc
+             WHERE sc."poolId" = sp.id AND sc."userId" = $1::text
+               AND sc.status::text = ANY($4::text[])), 0)
+                                 AS "periodsPaid",
+
+  (SELECT COALESCE(json_agg(c ORDER BY c."monthNumber"), '[]'::json)
+     FROM (
+       SELECT sc."periodNumber" AS "monthNumber",
+              sc."dueDate", sc."amountDue", sc."amountPaid",
+              sc.status::text  AS status,
+              sc."paidAt",
+              sc."paymentMethod"
+         FROM "SavingsContribution" sc
+        WHERE sc."poolId" = sp.id
+          AND sc."userId" = $1::text
+        ORDER BY sc."periodNumber"
+     ) c
+  )                              AS contributions,
+
+  (SELECT COALESCE(json_agg(r ORDER BY r."monthNumber"), '[]'::json)
+     FROM (
+       SELECT rp.position       AS "monthNumber",
+              rp."scheduledDate",
+              rp.amount         AS "payoutAmount",
+              rp.status         AS status,
+              rp."userId",
+              u."fullName"      AS "recipientName"
+         FROM "SavingsRotationPayout" rp
+         LEFT JOIN "User" u ON u.id = rp."userId"
+        WHERE rp."poolId" = sp.id
+        ORDER BY rp.position
+     ) r
+  )                              AS rotation
+
+FROM "SavingsPool" sp
+WHERE sp."schemeId" = $2::text
+  AND ($3::text IS NULL OR sp.id = $3::text)
+ORDER BY sp."createdAt"
+LIMIT 1
+`
+
+function num(v: unknown): number {
+  const n = Number(v ?? 0)
+  return Number.isFinite(n) ? n : 0
+}
+
+function unavailable(reason: string, message: string, extra: Record<string, unknown> = {}) {
+  return NextResponse.json({
+    success: true,
+    data: { view: null, unavailable: { reason, message, ...extra } },
+  })
+}
 
 export async function GET(req: NextRequest) {
   const t0 = Date.now()
@@ -161,7 +193,10 @@ export async function GET(req: NextRequest) {
     const claims = await getClaimsFromRequest(req)
     if (!claims) return unauthorized()
 
-    const schemeId = new URL(req.url).searchParams.get('schemeId')
+    const url = new URL(req.url)
+    const schemeId = url.searchParams.get('schemeId')
+    const poolId = url.searchParams.get('poolId')
+
     if (!schemeId) {
       return NextResponse.json(
         { success: false, error: 'schemeId is required' },
@@ -169,143 +204,130 @@ export async function GET(req: NextRequest) {
       )
     }
 
-    const rows = await prisma.$queryRawUnsafe<Row[]>(SQL, claims.id, schemeId)
-    const dbRow = rows[0]
+    const schemeRows = await prisma.$queryRawUnsafe<SchemeRow[]>(SCHEME_SQL, claims.id, schemeId)
+    const scheme = schemeRows[0]
 
-    if (!dbRow || !dbRow.schemeId) {
-      return NextResponse.json(
-        { success: false, error: 'Scheme not found' },
-        { status: 404 }
-      )
+    if (!scheme) {
+      return NextResponse.json({ success: false, error: 'Scheme not found' }, { status: 404 })
     }
 
     const isStaff = SUPER_ROLES.includes(claims.role)
-
-    // A staff viewer is NOT silently shown an empty passbook. The old route
-    // let admins through and then queried their own contributions, so a
-    // SYSTEM_ADMIN outside the group saw a blank ledger that looked like
-    // missing data rather than a scope boundary. Staff get an explicit
-    // reason instead, until a "view as member" path exists.
-    if (!dbRow.isSchemeMember) {
-      if (isStaff) {
-        return NextResponse.json({
-          success: true,
-          data: {
-            view: null,
-            unavailable: {
-              reason: 'NOT_ENROLLED_STAFF',
-              message: 'A passbook belongs to a member. You are not enrolled in this scheme, so there is no passbook of yours to show.',
-            },
-          },
-        })
-      }
-
-      // A group member who has not been assigned to this scheme is a
-      // normal, expected state — admins assign per scheme. It is not a
-      // permission failure, so it must not read like one.
-      if (dbRow.isGroupMember) {
-        return NextResponse.json({
-          success: true,
-          data: {
-            view: null,
-            unavailable: {
-              reason: 'NOT_ENROLLED',
-              message: 'You are not in this scheme yet. Your group admin can add you.',
-            },
-          },
-        })
-      }
-
+    if (!scheme.isGroupMember && !isStaff) {
       return forbidden('You are not a member of this group')
     }
 
-    const grammar = grammarFor(dbRow.schemeType || '')
-
-    if (!GRAMMAR_READY[grammar]) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          view: null,
-          unavailable: {
-            reason: 'GRAMMAR_NOT_BUILT',
-            grammar,
-            message: `${dbRow.schemeName} keeps a ${grammar === 'REPAYMENT' ? 'repayment' : 'stake'} book, which is not built yet.`,
-          },
-        },
-      })
+    // Only savings has a reader today. Grocery and investment modules exist
+    // as tables but hold no rows; property, assets and loans keep their own
+    // ledgers and need their own readers. Saying so is better than
+    // rendering an empty book that looks like lost money.
+    if (scheme.schemeType !== 'SAVINGS_POOL') {
+      return unavailable(
+        'READER_NOT_BUILT',
+        `${scheme.schemeName} keeps its records in its own module, which does not have a passbook yet.`,
+        { schemeType: scheme.schemeType }
+      )
     }
 
-    if (!dbRow.isContributory) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          view: null,
-          unavailable: {
-            reason: 'NOT_CONTRIBUTORY',
-            message: `${dbRow.schemeName} has no contribution schedule, so it keeps no passbook.`,
-          },
-        },
-      })
+    if (scheme.poolCount === 0) {
+      return unavailable(
+        'NO_POOL',
+        'No savings pool has been created for this scheme yet.'
+      )
     }
 
-    const num = (v: unknown) => Number(v ?? 0)
-    const contributions = Array.isArray(dbRow.contributions) ? dbRow.contributions : []
-    const rotationRaw = Array.isArray(dbRow.rotation) ? dbRow.rotation : []
+    // More than one pool and no choice made. Picking one would be the
+    // arbitrary-selection bug this whole migration existed to remove, so
+    // the caller is asked instead.
+    if (scheme.poolCount > 1 && !poolId) {
+      const pools = await prisma.$queryRawUnsafe<{ id: string; name: string }[]>(
+        `SELECT id, name FROM "SavingsPool" WHERE "schemeId" = $1::text ORDER BY "createdAt"`,
+        schemeId
+      )
+      return unavailable(
+        'MULTIPLE_POOLS',
+        'This group runs more than one savings pool. Choose which one to open.',
+        { pools }
+      )
+    }
 
+    const poolRows = await prisma.$queryRawUnsafe<PoolRow[]>(
+      POOL_SQL, claims.id, schemeId, poolId, SETTLED
+    )
+    const pool = poolRows[0]
+
+    if (!pool) {
+      return unavailable('NO_POOL', 'That savings pool could not be found.')
+    }
+
+    if (!pool.isPoolMember) {
+      if (isStaff) {
+        return unavailable(
+          'NOT_ENROLLED_STAFF',
+          'A passbook belongs to a member. You are not in this pool, so there is no passbook of yours to show.'
+        )
+      }
+      return unavailable(
+        'NOT_ENROLLED',
+        'You are not in this savings pool yet. Your group admin can add you.'
+      )
+    }
+
+    const contributions = Array.isArray(pool.contributions) ? pool.contributions : []
+    const rotationRaw = Array.isArray(pool.rotation) ? pool.rotation : []
     const rotation: RotationInput[] = rotationRaw.map(r => ({
       monthNumber: r.monthNumber,
       scheduledDate: r.scheduledDate,
       payoutAmount: r.payoutAmount,
       status: r.status,
       recipientName: r.recipientName,
-      isMe: r.recipientId === claims.id,
+      isMe: r.userId === claims.id,
     }))
 
-    const view = buildView(
-      {
-        id: dbRow.schemeId,
-        name: dbRow.schemeName || 'Scheme',
-        schemeType: dbRow.schemeType || '',
-        groupName: dbRow.groupName || '',
-        currency: dbRow.currency || 'USD',
-        isContributory: Boolean(dbRow.isContributory),
-        isRotating: Boolean(dbRow.isRotating),
-        contributionAmount: dbRow.contributionAmount === null
-          ? null
-          : num(dbRow.contributionAmount),
-        contributionFrequency: dbRow.contributionFrequency,
-      },
-      dbRow.cycleId
-        ? {
-            id: dbRow.cycleId,
-            cycleNumber: num(dbRow.cycleNumber),
-            totalMembers: num(dbRow.totalMembers),
-            poolAmount: num(dbRow.poolAmount),
-          }
-        : null,
-      contributions,
-      rotation,
-      {
-        position: dbRow.myPosition,
-        totalPaid: num(dbRow.totalPaid),
-        monthsPaid: num(dbRow.monthsPaid),
-      }
-    )
+    const rotating = String(pool.poolType || '').toUpperCase() === 'ROTATING'
+
+    const schemeInput: SchemeInput = {
+      id: scheme.schemeId,
+      // The POOL's name, not the scheme's. "Sydney Rotation Scheme" is
+      // what the member joined; "Savings Pool" is a registry label.
+      name: pool.poolName || scheme.schemeName,
+      schemeType: scheme.schemeType,
+      groupName: scheme.groupName || '',
+      currency: pool.currency || scheme.currency || 'USD',
+      isContributory: true,
+      isRotating: rotating,
+      contributionAmount: num(pool.contributionAmount),
+      contributionFrequency: pool.contributionFrequency,
+    }
+
+    const me = {
+      position: pool.myPosition,
+      totalPaid: num(pool.totalPaid),
+      monthsPaid: num(pool.periodsPaid),
+    }
+
+    const view = rotating
+      ? buildRotatingView(schemeInput, null, contributions, rotation, me, new Date())
+      : buildAccumulatingView(schemeInput, null, contributions, rotation, me, new Date(), {
+          goalLabel: 'Maturity',
+          goalDetail: 'Everyone collects their share at maturity',
+        })
 
     console.log('GET /api/schemes/passbook db_ms=', Date.now() - t0)
 
-    // An empty ledger is NOT an error. A scheme with no cycle yet is where
-    // every group starts, and the screen renders it as an invitation with a
-    // next action. Returning 404 here would turn a normal state into a
-    // failure the member cannot act on.
-    return NextResponse.json({
-      success: true,
-      data: {
-        view,
-        unavailable: null,
-        hasCycle: Boolean(dbRow.cycleId),
+    return NextResponse.json(
+      {
+        success: true,
+        data: { view, unavailable: null, poolId: pool.poolId, hasLedger: contributions.length > 0 },
       },
-    })
+      {
+        headers: {
+          // A ledger changes only when a payment lands. A member checking
+          // twice around a due date — which is the common case — then costs
+          // no bytes at all. private, because this is one member's book.
+          'Cache-Control': 'private, max-age=60',
+        },
+      }
+    )
   } catch (e: any) {
     console.error('GET /api/schemes/passbook error:', e?.message)
     return NextResponse.json(
