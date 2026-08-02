@@ -996,8 +996,42 @@ function CertModal({ entry, onClose }: any) {
 }
 
 // ── Version Badge (remove before production) ─────────────────
-function VersionBadge({ label, ver }: { label: string; ver: string }) {
+// ── Discover prompt ───────────────────────────────────────────
+// Shown to a Community Member who belongs to NO group. That is exactly
+// the person the group adverts exist for, and without this the Discover
+// tab is just another item in the sidebar with nothing pointing at it.
+//
+// Gated on canSeeAdverts, not merely on having no group: an invited
+// member without a Community Membership cannot see adverts at all
+// (rule 2c), so sending them to Discover would be a dead end.
+//
+// Module-level, like every other helper here.
+function DiscoverPrompt({ onGo }: { onGo: () => void }) {
   return (
+    <div style={{ background: 'white', border: `1px solid #A6F4C5`, borderRadius: '16px', padding: '20px 24px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '16px' }}>
+      <div style={{ fontSize: '32px', lineHeight: 1 }}>🔎</div>
+      <div style={{ flex: 1, minWidth: '220px' }}>
+        <div style={{ fontSize: '15px', fontWeight: 700, color: NAVY, marginBottom: '4px' }}>
+          You&apos;re not in a group yet
+        </div>
+        <div style={{ fontSize: '13px', color: '#64748B', lineHeight: 1.55 }}>
+          Your membership lets you browse groups that are advertising for new members.
+          Have a look, and request to join any that suit you — the group admin reviews
+          each request.
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onGo}
+        style={{ padding: '11px 20px', minHeight: '44px', borderRadius: '10px', border: 'none', background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', fontSize: '14px', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}
+      >
+        Discover groups →
+      </button>
+    </div>
+  )
+}
+
+function VersionBadge({ label, ver }: { label: string; ver: string }) {  return (
     <div style={{ position:'fixed', bottom:'12px', right:'12px', background:'rgba(13,33,55,0.85)', color:'white', fontSize:'10px', padding:'4px 10px', borderRadius:'999px', zIndex:9998, fontFamily:'monospace', backdropFilter:'blur(4px)', display:'flex', alignItems:'center', gap:'6px' }}>
       <span style={{ opacity:0.5 }}>DEV</span>
       <span style={{ opacity:0.8 }}>Member Portal</span>
@@ -1018,6 +1052,10 @@ export default function MemberPortal() {
   const [openGroup, setOpenGroup] = useState<{ id: string; name: string } | null>(null)
   const [certEntry, setCertEntry] = useState<any>(null)
   const [userId, setUserId]   = useState<string>('')
+  // Entitlement comes back on the same /api/auth/me call that resolves
+  // the user, so this costs no extra request. Used only to decide
+  // whether to surface the Discover prompt.
+  const [entitlement, setEntitlement] = useState<any>(null)
   const [payItem, setPayItem] = useState<any>(null)
   const [toast, setToast]     = useState<{ msg: string; type: 'success' | 'error' } | null>(null)
 
@@ -1037,6 +1075,7 @@ export default function MemberPortal() {
       .then(d => {
         if (d.success && d.data?.id) {
           setUserId(d.data.id)
+          setEntitlement(d.entitlement || null)
         } else {
           setError(`Auth failed: ${d.error || 'No user returned'}`)
           setLoading(false)
@@ -1182,6 +1221,15 @@ export default function MemberPortal() {
           />
         ) : (
           <>
+            {tab === 'overview'
+              && entitlement?.canSeeAdverts
+              && (entitlement?.qualifyingGroupIds?.length ?? 0) === 0
+              && !data?.memberships?.length
+              && (
+                <div style={{ marginBottom: '20px' }}>
+                  <DiscoverPrompt onGo={() => setTab('discover')} />
+                </div>
+              )}
             {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} onOpenGroup={(id: string, name: string) => setOpenGroup({ id, name })} />}
             {tab === 'discover'      && <DiscoverTab showToast={showToast} user={data?.user} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}

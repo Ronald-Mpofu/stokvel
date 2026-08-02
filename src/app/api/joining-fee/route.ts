@@ -1,16 +1,46 @@
 // src/app/api/joining-fee/route.ts
 // GET  ?type=config                 → all active countries + fees + methods (single call, cache 5 min)
-// GET  ?userId=xxx                  → user's current invoice + latest attempt status
-// POST { userId, countryCode, provider, phone? } → create/reuse invoice, create attempt, call provider
+// GET  ?userId=xxx                  → user's current invoice + latest attempt status + fee eligibility
+// POST { userId, countryCode, provider, phone?, optIn? } → create/reuse invoice, create attempt, call provider
 //
-// CARD is now a real Stripe path: it returns data.checkoutUrl for the
+// CARD is a real Stripe path: it returns data.checkoutUrl for the
 // frontend to redirect to. Mobile money remains stubbed.
+//
+// Version 2.0 — rule 3b (invited members are fee-exempt).
+//
+// ── WHAT CHANGED ─────────────────────────────────────────────
+// 1. RULE 3b. The "already paid?" test read User.joiningFeePaid and
+//    joiningFeeExpiresAt. Under rule 3b that is the wrong question: an
+//    invited member who belongs to an active group is exempt from the
+//    annual fee regardless of what those columns say. This now resolves
+//    live entitlement instead.
+//
+// 2. RULE 3f PRESERVED. An exempt member MAY still choose to take a
+//    Community Membership — that is what rule 3f describes, and the
+//    fee is non-refundable once paid. So exemption does not hard-block
+//    payment; it requires an explicit optIn: true. Without it the
+//    request is refused with FEE_NOT_REQUIRED and an explanation.
+//    The point is that nobody is charged by accident for something
+//    they already have for free.
+//
+// 3. AUTHORISATION. userId came from the request body with no check, so
+//    any authenticated caller could open invoices and Stripe Checkout
+//    sessions against any other user's account, and read back their
+//    email. Both GET ?userId and POST are now bound to the session,
+//    with super roles able to act on someone's behalf.
+//
+// 4. The legacy User columns are no longer READ for any decision. The
+//    Stripe webhook still writes them during transition; nothing gates
+//    behaviour on them.
 
 import { NextRequest, NextResponse } from 'next/server';
 import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { prisma } from '@/lib/prisma/client';
 import { stripeProvider } from '@/lib/payments/stripe/adapter';
+import { getSessionFromRequest, unauthorized, forbidden, SUPER_ROLES } from '@/lib/auth';
+import { getCommunityMembership } from '@/lib/community-membership';
+import { resolveEntitlement } from '@/lib/entitlement';
 
 export const dynamic = 'force-dynamic';
 
@@ -21,6 +51,10 @@ const InitiateSchema = z.object({
   countryCode: z.string().length(2),
   provider: z.enum(PROVIDERS),
   phone: z.string().min(6).optional(), // required for mobile money
+  // Rule 3f — an already-exempt member deliberately choosing to take a
+  // Community Membership anyway. Without this the request is refused
+  // with FEE_NOT_REQUIRED, so nobody is charged by accident.
+  optIn: z.boolean().optional(),
 });
 
 // ------------------------------------------------------------------
@@ -56,6 +90,14 @@ export async function GET(req: NextRequest) {
     }
 
     if (userId) {
+      // Bound to the session — v1 let any caller read any user's
+      // invoice history by id.
+      const session = await getSessionFromRequest(req);
+      if (!session) return unauthorized();
+      if (userId !== session.id && !SUPER_ROLES.includes(session.role)) {
+        return forbidden('Not authorised to view this account');
+      }
+
       // Invoice + latest attempt in one round trip each — indexed lookups
       const invoices: any[] = await prisma.$queryRawUnsafe(
         `SELECT i."id", i."invoiceNo", i."currency", i."amount", i."status", i."paidAt",
@@ -71,7 +113,37 @@ export async function GET(req: NextRequest) {
          LIMIT 1`,
         userId
       );
-      return NextResponse.json({ success: true, data: invoices[0] || null });
+
+      // Eligibility, so the page can say "you don't need to pay" rather
+      // than presenting a payment form to somebody who is exempt.
+      const [membership, entitlement] = await Promise.all([
+        getCommunityMembership(userId),
+        resolveEntitlement(userId),
+      ]);
+
+      const membershipCurrent =
+        !!membership &&
+        membership.status === 'ACTIVE' &&
+        new Date(membership.expiresAt) > new Date();
+
+      const exemptViaStaff = entitlement.reasons.includes('STAFF_ROLE');
+      const exemptViaGroup = entitlement.qualifyingGroupIds.length > 0;
+
+      return NextResponse.json({
+        success: true,
+        data: invoices[0] || null,
+        eligibility: {
+          feeRequired: !membershipCurrent && !exemptViaStaff && !exemptViaGroup,
+          membershipCurrent,
+          membershipExpiresAt: membership?.expiresAt ?? null,
+          cancelAtPeriodEnd: membership?.cancelAtPeriodEnd ?? false,
+          exemptViaGroup,
+          exemptViaStaff,
+          // Rule 3f — exempt, but may opt in and pay if they want the
+          // group adverts. Requires optIn: true on the POST.
+          mayOptIn: !membershipCurrent && exemptViaGroup && !exemptViaStaff,
+        },
+      });
     }
 
     return NextResponse.json({ success: false, error: 'Missing type=config or userId' }, { status: 400 });
@@ -94,26 +166,81 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { userId, countryCode, provider, phone } = parsed.data;
+    const { userId, countryCode, provider, phone, optIn } = parsed.data;
 
-    // Already paid AND still current? Expiry matters now — a lapsed
-    // member must be able to pay again, so a bare joiningFeePaid check
-    // would wrongly block every renewal.
-    const paidCheck: any[] = await prisma.$queryRawUnsafe(
-      `SELECT "joiningFeePaid", "joiningFeeExpiresAt", "email"
-       FROM "User" WHERE "id" = $1`,
+    // ── AUTHORISATION ─────────────────────────────────────────
+    // userId came straight from the body with no check, so any
+    // authenticated caller could open invoices and Stripe Checkout
+    // sessions against someone else's account.
+    const session = await getSessionFromRequest(req);
+    if (!session) return unauthorized();
+    if (userId !== session.id && !SUPER_ROLES.includes(session.role)) {
+      return forbidden('Not authorised for this account');
+    }
+
+    const userRows: any[] = await prisma.$queryRawUnsafe(
+      `SELECT "email" FROM "User" WHERE "id" = $1 AND "deletedAt" IS NULL`,
       userId
     );
-    if (!paidCheck.length) {
+    if (!userRows.length) {
       return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
     }
-    const userRow = paidCheck[0];
-    const stillCurrent =
-      userRow.joiningFeePaid === true &&
-      (userRow.joiningFeeExpiresAt === null ||
-        new Date(userRow.joiningFeeExpiresAt) > new Date());
-    if (stillCurrent) {
-      return NextResponse.json({ success: false, error: 'Joining fee already paid' }, { status: 409 });
+    const userEmail: string = userRows[0].email;
+
+    // ── Do they need to pay at all? ───────────────────────────
+    // Resolved live rather than read from User.joiningFeePaid, which is
+    // a snapshot and says nothing about group membership.
+    const [membership, entitlement] = await Promise.all([
+      getCommunityMembership(userId),
+      resolveEntitlement(userId),
+    ]);
+
+    const membershipCurrent =
+      !!membership &&
+      membership.status === 'ACTIVE' &&
+      new Date(membership.expiresAt) > new Date();
+
+    if (membershipCurrent) {
+      // A pending cancellation is resumed, not re-bought — resuming
+      // consumes time they already paid for.
+      if (membership!.cancelAtPeriodEnd) {
+        return NextResponse.json({
+          success: false,
+          code: 'CANCELLATION_PENDING',
+          error: 'Your membership is active but set to end. Restart it from your membership page instead of paying again.',
+        }, { status: 409 });
+      }
+      return NextResponse.json({
+        success: false,
+        code: 'ALREADY_CURRENT',
+        error: 'Your Community Membership is already active.',
+      }, { status: 409 });
+    }
+
+    // Staff never pay, and there is no opt-in path for them.
+    if (entitlement.reasons.includes('STAFF_ROLE')) {
+      return NextResponse.json({
+        success: false,
+        code: 'FEE_NOT_REQUIRED',
+        error: 'Staff accounts are not charged a membership fee.',
+      }, { status: 409 });
+    }
+
+    // ── RULE 3b ───────────────────────────────────────────────
+    // A member of an active group is exempt. Not a hard block, because
+    // rule 3f lets them opt in anyway for the group adverts — but it
+    // takes an explicit optIn, so nobody is charged by accident for
+    // something they already have.
+    if (entitlement.qualifyingGroupIds.length > 0 && !optIn) {
+      return NextResponse.json({
+        success: false,
+        code: 'FEE_NOT_REQUIRED',
+        error:
+          'You already have full access through your group membership, so no fee is due. ' +
+          'You can still take a Community Membership if you want to see groups advertising ' +
+          'for new members — it is charged annually and is not refundable.',
+        data: { mayOptIn: true },
+      }, { status: 409 });
     }
 
     // Fee config
@@ -135,6 +262,23 @@ export async function POST(req: NextRequest) {
     if (['ECOCASH', 'MPESA', 'MTN_MOMO'].includes(provider) && !phone) {
       return NextResponse.json({ success: false, error: 'Mobile number is required for this payment method' }, { status: 400 });
     }
+
+    // ── Country back-fill (registration no longer asks for it) ─
+    // The register form dropped the country field, so User.country is
+    // null for anyone who signed up directly. This is where it becomes
+    // known, and it MUST be written back — the Stripe webhook's renewal
+    // path reads User.country and falls back to 'AU' when it is null,
+    // which would silently re-bill a Zimbabwean member at Australian
+    // pricing a year later.
+    //
+    // COALESCE, never overwrite: an existing country is the member's,
+    // and a later payment made from elsewhere must not change it.
+    await prisma.$executeRawUnsafe(
+      `UPDATE "User"
+       SET "country" = COALESCE("country", $2), "updatedAt" = now()
+       WHERE "id" = $1`,
+      userId, countryCode
+    );
 
     // Reuse pending invoice or create one (unique partial index guarantees single PENDING)
     let invoice: any;
@@ -177,7 +321,7 @@ export async function POST(req: NextRequest) {
       attemptId,
       invoiceId: invoice.id,
       userId,
-      userEmail: userRow.email,
+      userEmail: userEmail,
       countryCode,
       amount: Number(invoice.amount),
       currency: invoice.currency,

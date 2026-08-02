@@ -104,30 +104,29 @@ export default function RegisterPage() {
   const [fullName, setFullName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
-  const [country, setCountry] = useState('');
+  const [city, setCity] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [accountType, setAccountType] = useState<'MEMBER' | 'GROUP_ADMIN'>('MEMBER');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Single request on load — country list + fee preview
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/joining-fee?type=config')
-      .then(r => r.json())
-      .then(d => {
-        if (!cancelled && d.success) setConfig(d.data);
-      })
-      .catch(() => {
-        // Country dropdown degrades gracefully; registration still works without it
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  // ── Country removed from this form ──────────────────────────
+  // Country is captured at the joining-fee step, where it actually
+  // matters: it selects the fee and the currency. Asking twice invited
+  // a mismatch between the country on the profile and the country the
+  // member was billed under.
+  //
+  // Consequence: the /api/joining-fee?type=config request that powered
+  // the dropdown and the live fee preview is gone, so this page now
+  // makes ZERO requests on load. The fee is shown at the payment step
+  // instead, once the country is known.
+  //
+  // `config` is retained (empty) so the FeeConfig type and any future
+  // preview can be reinstated without reshaping the component.
+  void config;
+  void setConfig;
 
-  const selectedFee = config.find(c => c.countryCode === country) || null;
   const inp = inputStyle(isMobile);
 
   const handleRegister = useCallback(async () => {
@@ -146,7 +145,7 @@ export default function RegisterPage() {
           email: email.trim().toLowerCase(),
           phone: phone.trim(),
           password,
-          country: country || undefined,
+          city: city.trim() || undefined,
           accountType,
         }),
       });
@@ -162,7 +161,7 @@ export default function RegisterPage() {
       setError('Network error. Please try again.');
       setLoading(false);
     }
-  }, [fullName, email, phone, country, password, confirm, accountType, router]);
+  }, [fullName, email, phone, city, password, confirm, accountType, router]);
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', fontFamily: 'system-ui, sans-serif', background: '#F8FAFC' }}>
@@ -235,13 +234,14 @@ export default function RegisterPage() {
             <input style={inp} type="tel" inputMode="tel" value={phone} onChange={e => setPhone(e.target.value)} placeholder="+263 7X XXX XXXX" autoComplete="tel" />
           </Field>
 
-          <Field label="Country">
-            <select style={inp} value={country} onChange={e => setCountry(e.target.value)}>
-              <option value="">Choose your country</option>
-              {config.map(c => (
-                <option key={c.countryCode} value={c.countryCode}>{c.countryName}</option>
-              ))}
-            </select>
+          <Field label="City">
+            <input
+              style={inp}
+              value={city}
+              onChange={e => setCity(e.target.value)}
+              placeholder="Harare"
+              autoComplete="address-level2"
+            />
           </Field>
 
           <Field label="How do you want to join?">
@@ -267,10 +267,11 @@ export default function RegisterPage() {
             </div>
           </Field>
 
-          {accountType === 'MEMBER' && selectedFee ? (
-            <div style={{ background: '#f0fdf9', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 13, color: NAVY, display: 'flex', flexDirection: isMobile ? 'column' : 'row', gap: isMobile ? 4 : 0, justifyContent: 'space-between' }}>
-              <span>Once-off joining fee — Members Pool access</span>
-              <strong style={{ color: TEAL, whiteSpace: 'nowrap' }}>{selectedFee.currency} {selectedFee.amount.toFixed(2)}</strong>
+          {accountType === 'MEMBER' ? (
+            <div style={{ background: '#f0fdf9', border: '1px solid #A6F4C5', borderRadius: 10, padding: '10px 14px', marginBottom: 16, fontSize: 12, color: NAVY, lineHeight: 1.5 }}>
+              👤 An <strong>annual membership fee</strong> applies — the amount for your
+              country is shown at the payment step. If a group admin invites you instead,
+              you pay nothing while you belong to an active group.
             </div>
           ) : null}
 

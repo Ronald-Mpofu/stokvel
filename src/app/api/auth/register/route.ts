@@ -22,7 +22,12 @@ const registerSchema = z.object({
   phone: z.string().min(6, 'Enter a valid phone number').max(20)
     .regex(/^\+?[0-9\s-]+$/, 'Phone may only contain digits, spaces, dashes and a leading +'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
-  country: z.string().length(2, 'Choose your country').optional(),
+  // Country is NO LONGER collected here — it is captured at the
+  // joining-fee step, where it selects the fee and currency, and written
+  // back to the User by /api/joining-fee. Kept optional so any older
+  // client still posting it does not 400.
+  country: z.string().length(2).optional(),
+  city: z.string().min(1).max(120).optional(),
   // Strict whitelist — anything else fails validation with a 400.
   accountType: z.enum(['MEMBER', 'GROUP_ADMIN']).default('MEMBER'),
 })
@@ -40,7 +45,7 @@ export async function POST(req: NextRequest) {
 
     const email = parsed.data.email.toLowerCase().trim()
     const phone = parsed.data.phone.replace(/[\s-]/g, '')
-    const { fullName, password, country, accountType } = parsed.data
+    const { fullName, password, country, city, accountType } = parsed.data
 
     // Role is derived here and ONLY here — MEMBER, or GROUP_ADMIN for the
     // "create my own Group" path. Fee gate applies to both until paid.
@@ -71,6 +76,7 @@ export async function POST(req: NextRequest) {
           fullName: fullName.trim(),
           role: role as any,       // MEMBER or GROUP_ADMIN only — whitelisted above
           country: country || null,
+          city: city?.trim() || null,
           // joiningFeePaid defaults to false via the raw-SQL column default
         },
         select: {
