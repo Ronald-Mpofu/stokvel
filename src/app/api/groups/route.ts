@@ -4,6 +4,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { getClaimsFromRequest, getSessionFromRequest, requireGroupManager, hasPermission } from '@/lib/auth'
 import { syncGroupSubscriptionTier } from '@/lib/payments/groupTier'
+import { stampGroupActivated, stampGroupReachedMinimum } from '@/lib/group-entitlement'
 
 export const dynamic = 'force-dynamic'
 
@@ -256,6 +257,17 @@ export async function POST(req: NextRequest) {
       if (e?.code !== 'P2002') throw e   // already a member — fine
     }
 
+    // ── Entitlement: stamp reachedMinimumAt if applicable ──────
+    // A brand-new group has one member against a minMembers of 4, so
+    // this is normally a no-op. It runs anyway because minMembers can be
+    // configured lower, and because the helper is the single place that
+    // decision lives — duplicating the threshold check here would be a
+    // second copy to keep in sync.
+    //
+    // NOT stamping activatedAt: groups are created as DRAFT. Activation
+    // is a paid action handled in PUT and in the Stripe webhook.
+    await stampGroupReachedMinimum(group.id)
+
     // Set extra columns via raw SQL (not in Prisma schema)
     if (body.branding || body.treasurerId || body.secretaryId || body.city || body.zipCode || body.groupType || body.publicAdvert) {
       await exec(
@@ -432,6 +444,23 @@ export async function PUT(req: NextRequest) {
       data.status         || null,
       data.id,
     ])
+
+    // ── Entitlement: stamp activatedAt on transition to ACTIVE ─
+    // Starts the 60-day ramp-up window, during which members of a
+    // below-minimum group remain entitled. Without this, every group
+    // activated from here leaves activatedAt null and — if it never
+    // reaches minMembers — its members silently lose entitlement.
+    //
+    // This PUT path covers reactivation (PAUSED → ACTIVE on a live
+    // subscription). FIRST activation goes through the Stripe webhook,
+    // which flips status to ACTIVE after payment — stampGroupActivated
+    // MUST be called there too, or new groups are never stamped.
+    //
+    // Stamps only on an actual transition, and never overwrites an
+    // existing value, so repeated saves cannot restart the window.
+    if (data.status === 'ACTIVE' && existing[0].status !== 'ACTIVE') {
+      await stampGroupActivated(data.id)
+    }
 
     // ── Capacity changed → re-sync the Stripe tier ────────────
     // Billing is by configured capacity (maxMembers). If the admin

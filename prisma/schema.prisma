@@ -1952,6 +1952,7 @@ enum InvitationChannel {
   BOTH
 }
 
+
 model MemberInvitation {
   id              String            @id @default(uuid())
   groupId         String

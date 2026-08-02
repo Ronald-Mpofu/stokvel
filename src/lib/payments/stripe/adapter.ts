@@ -153,7 +153,6 @@ export const stripeProvider: PaymentProvider = {
   async cancelSubscription(subscriptionId: string): Promise<void> {
     await getStripe().subscriptions.cancel(subscriptionId);
   },
-
   async pauseSubscription(subscriptionId: string): Promise<void> {
     await getStripe().subscriptions.update(subscriptionId, {
       pause_collection: { behavior: 'void' },
@@ -166,3 +165,58 @@ export const stripeProvider: PaymentProvider = {
     });
   },
 };
+
+// ============================================================
+// Cancel at period end
+//
+// Exported as standalone functions rather than added to the
+// PaymentProvider interface, so ../types.ts needs no change and no
+// other implementation of that interface is forced to grow methods.
+//
+// WHY THESE EXIST
+// stripeProvider.cancelSubscription() terminates IMMEDIATELY. For a
+// member who opts out of Community Membership that is the wrong
+// behaviour: they have paid for a full year, and ending it on the spot
+// forfeits whatever remains. Under the non-refundable clause that reads
+// as keeping their money.
+//
+// Cancelling at period end means the member keeps access and advert
+// visibility through the period they paid for, is never charged again,
+// and nothing is forfeited. It is also reversible right up to the
+// period end, which the immediate cancel is not.
+//
+// Immediate cancellation is still the right tool elsewhere — fraud,
+// chargebacks, admin termination — so cancelSubscription stays.
+// ============================================================
+
+/**
+ * Schedule cancellation at the end of the current period.
+ *
+ * Stripe keeps status 'active' and sets canceled_at to now. Anything
+ * reading subscription state must therefore judge currency by status
+ * plus current_period_end, NOT by canceled_at being null.
+ *
+ * Pair with confirmOptOut() in src/lib/community-membership: call this
+ * FIRST, and record the opt-out only once Stripe has agreed.
+ */
+export async function scheduleSubscriptionCancellation(
+  subscriptionId: string
+): Promise<void> {
+  await getStripe().subscriptions.update(subscriptionId, {
+    cancel_at_period_end: true,
+  });
+}
+
+/**
+ * Undo a scheduled cancellation. Only valid before the period ends —
+ * once Stripe has actually cancelled, a new checkout is required.
+ *
+ * Pair with revokeCancellation() in src/lib/community-membership.
+ */
+export async function revokeSubscriptionCancellation(
+  subscriptionId: string
+): Promise<void> {
+  await getStripe().subscriptions.update(subscriptionId, {
+    cancel_at_period_end: false,
+  });
+}

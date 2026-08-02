@@ -1,6 +1,21 @@
 // src/lib/entitlement/index.ts
 // Community Membership + group entitlement resolver.
-// Phase 1c — SHADOW MODE. Resolves and logs. Enforces NOTHING.
+// Version 2 — SHADOW MODE. Resolves and logs. Enforces NOTHING.
+//
+// ── WHAT CHANGED FROM v1 ─────────────────────────────────────
+// Truth-table row 4 (group subscription) is now wired against
+// "PlatformSubscription", replacing the placeholder that passed every
+// group. The resolver now applies all four rows.
+//
+// It matches on ps."groupId" = g."id" rather than on ps."scope",
+// because groupId is populated ONLY for group-scoped subscriptions —
+// MEMBER_ANNUAL rows carry a userId and a null groupId. That avoids
+// depending on the exact scope string literal.
+//
+// A new reason, GROUP_SUBSCRIPTION_LAPSED, distinguishes "you are in no
+// qualifying group" from "your group qualifies on every axis except
+// that its subscription has lapsed". Those are very different support
+// conversations and the shadow log needs to tell them apart.
 //
 // ── THE MODEL ────────────────────────────────────────────────
 // Portal access is OR-based across two independent entitlement
@@ -11,33 +26,31 @@
 //             OR hasQualifyingGroupMembership
 //
 // A user who fails all three is NOT locked out. They drop to a
-// read-only floor: they keep sight of their own contributions,
-// stakes, loan balances and statements, and lose the ability to
-// transact. Hard-locking someone out of the record of money they
-// paid in is not a state this system produces.
+// read-only floor: they keep sight of their own contributions, stakes,
+// loan balances and statements, and lose the ability to transact.
+// Hard-locking someone out of the record of money they paid in is not a
+// state this system produces.
 //
 //   canAccessPortal  read-only floor — true for any valid user
 //   canTransact      the real gate — requires entitlement
 //   canSeeAdverts    Community Membership only (rule 2c)
 //
 // ── WHY NOT THE JWT ──────────────────────────────────────────
-// Entitlement goes stale for reasons that have nothing to do with
-// the user: their group is paused, its member count drops, its
-// subscription lapses. A 15-minute token would serve a stale
-// answer for up to 15 minutes after any of those. So this resolves
-// server-side, per request, against the database — and the
-// joiningFeePaid claim in the JWT is superseded, not extended.
+// Entitlement goes stale for reasons that have nothing to do with the
+// user: their group is paused, its member count drops, its subscription
+// lapses. A 15-minute token would serve a stale answer for up to 15
+// minutes after any of those. So this resolves server-side, per
+// request, and the joiningFeePaid claim is superseded, not extended.
 //
 // ── WHY NOT MIDDLEWARE ───────────────────────────────────────
 // middleware.ts runs on the Edge runtime and cannot reach Prisma.
-// Enforcement (phase 5) belongs in the dashboard/portal layout and
-// in a shared API guard, not in middleware.
+// Enforcement (phase 5) belongs in the dashboard/portal layout and in a
+// shared API guard.
 //
 // ── COST ─────────────────────────────────────────────────────
-// ONE database round trip, memoised per request. A layout, a page
-// and three API guards calling this in one request cost one query
-// between them. No aggregates on the hot path — the member-count
-// check is precomputed into Group.reachedMinimumAt by migration 1b.
+// ONE round trip, memoised per request. No aggregates on the hot path —
+// the member-count check is precomputed into Group.reachedMinimumAt by
+// migration 1b, and the subscription check is a correlated EXISTS.
 
 import { cache } from 'react'
 import type { NextRequest } from 'next/server'
@@ -63,26 +76,22 @@ const QUALIFYING_GROUP_STATUSES = ['ACTIVE', 'PAUSED', 'COMPLETED']
 const GROUP_RAMP_UP_DAYS = 60
 
 /**
- * Truth-table row 4 — group subscription currency.
+ * Truth-table row 4 — Stripe subscription statuses that count as
+ * current. Stripe's own vocabulary.
  *
- * NOT YET WIRED. The group subscription table has not been supplied, so
- * this predicate is a placeholder that passes every group. Consequence:
- * the shadow log UNDER-REPORTS — nobody is currently flagged on the
- * subscription axis. Treat phase-1 findings as provisional until this
- * is replaced.
- *
- * To wire: substitute a correlated EXISTS against the real table, e.g.
- *
- *   AND EXISTS (
- *     SELECT 1 FROM "GroupSubscription" gs
- *     WHERE gs."groupId" = g.id
- *       AND gs.status = 'ACTIVE'
- *       AND gs."currentPeriodEnd" > now() - interval '14 days'
- *   )
- *
- * Nothing else in this file changes.
+ * past_due is deliberately INCLUDED: Stripe is still retrying the card
+ * and the admin may well fix it. Dropping every member of the group the
+ * moment a renewal charge bounces is too sharp an edge for something
+ * outside those members' control.
  */
-const GROUP_SUBSCRIPTION_PREDICATE = 'TRUE /* TODO: group subscription check not wired */'
+const CURRENT_SUBSCRIPTION_STATUSES = ['active', 'trialing', 'past_due']
+
+/**
+ * Truth-table row 4 — member-side grace beyond the subscription's own
+ * period end. Members do not control their group's billing, so they get
+ * time to react to a lapse caused by someone else's card.
+ */
+const GROUP_SUBSCRIPTION_GRACE_DAYS = 30
 
 /** Phase 5 flips this. While false, nothing is enforced. */
 export const ENTITLEMENT_ENFORCED = false
@@ -97,6 +106,7 @@ export type EntitlementReason =
   | 'COMMUNITY_MEMBERSHIP_OPTED_OUT'
   | 'NO_COMMUNITY_MEMBERSHIP'
   | 'NO_QUALIFYING_GROUP'
+  | 'GROUP_SUBSCRIPTION_LAPSED'
   | 'USER_NOT_FOUND'
   | 'USER_BLACKLISTED'
 
@@ -117,7 +127,14 @@ export type Entitlement = {
     expiresAt: string | null
     optedOut: boolean
   } | null
+  /** Groups conferring entitlement — all four truth-table rows pass. */
   qualifyingGroupIds: string[]
+  /**
+   * Groups passing rows 1-3 but failing row 4. Non-empty here with an
+   * empty qualifyingGroupIds means the member is losing entitlement
+   * because of their group's billing, not their own conduct.
+   */
+  subscriptionLapsedGroupIds: string[]
   resolvedAt: string
 }
 
@@ -129,22 +146,28 @@ type ResolverRow = {
   cm_expires_at: Date | null
   cm_opted_out_at: Date | null
   qualifying_group_ids: string[] | null
+  sub_lapsed_group_ids: string[] | null
 }
 
 // ── The query ────────────────────────────────────────────────
-// One round trip. Three CTEs, each hitting a single index:
-//   me   → User primary key
-//   cm   → uq_communitymembership_userid
-//   grp  → idx_groupmember_userid_status + idx_group_entitlement
+// One round trip. Four CTEs, each hitting a single index:
+//   me       → User primary key
+//   cm       → uq_communitymembership_userid
+//   grp_base → idx_groupmember_userid_status + idx_group_entitlement
+//   grp      → grp_base minus groups whose subscription has lapsed
 //
-// Enum comparisons use explicit ::"Type" casts on the literal arrays.
-// Postgres will not implicitly resolve a text[] against an enum column.
+// Enum comparisons use explicit ::"Type" casts on the literals.
+// Postgres will not implicitly resolve a text list against an enum.
 function buildQuery(): string {
   const memberStatuses = QUALIFYING_MEMBER_STATUSES
     .map(s => `'${s}'::"MemberStatus"`)
     .join(', ')
   const groupStatuses = QUALIFYING_GROUP_STATUSES
     .map(s => `'${s}'::"GroupStatus"`)
+    .join(', ')
+  // PlatformSubscription.status is TEXT, not an enum — no cast needed.
+  const subStatuses = CURRENT_SUBSCRIPTION_STATUSES
+    .map(s => `'${s}'`)
     .join(', ')
 
   return `
@@ -158,7 +181,8 @@ function buildQuery(): string {
       FROM "CommunityMembership" c
       WHERE c."userId" = $1
     ),
-    grp AS (
+    grp_base AS (
+      -- Truth-table rows 1-3.
       SELECT gm."groupId"
       FROM "GroupMember" gm
       JOIN "Group" g ON g."id" = gm."groupId"
@@ -173,18 +197,45 @@ function buildQuery(): string {
             AND g."activatedAt" > now() - ($2::int * interval '1 day')
           )
         )
-        AND ${GROUP_SUBSCRIPTION_PREDICATE}
+    ),
+    grp AS (
+      -- Truth-table row 4. Matches on groupId rather than scope:
+      -- groupId is populated only for group-scoped subscriptions, so
+      -- MEMBER_ANNUAL rows (userId set, groupId null) cannot match.
+      SELECT b."groupId"
+      FROM grp_base b
+      WHERE EXISTS (
+        SELECT 1
+        FROM "PlatformSubscription" ps
+        -- Deliberately NOT checking canceledAt. Stripe sets
+        -- canceled_at the moment a cancel_at_period_end is REQUESTED,
+        -- while status stays 'active' until the period actually ends.
+        -- Testing canceledAt IS NULL would strip entitlement from every
+        -- member of a group that is still fully paid up. status plus
+        -- currentPeriodEnd is the correct pair.
+        WHERE ps."groupId" = b."groupId"
+          AND ps."status" IN (${subStatuses})
+          AND (
+            ps."currentPeriodEnd" IS NULL
+            OR ps."currentPeriodEnd" > now() - ($3::int * interval '1 day')
+          )
+      )
     )
     SELECT
-      (SELECT COUNT(*) FROM me) > 0                                    AS user_found,
-      (SELECT status FROM me)                                          AS user_status,
-      (SELECT role   FROM me)                                          AS user_role,
-      (SELECT "status"     FROM cm)                                    AS cm_status,
-      (SELECT "expiresAt"  FROM cm)                                    AS cm_expires_at,
-      (SELECT "optedOutAt" FROM cm)                                    AS cm_opted_out_at,
+      (SELECT COUNT(*) FROM me) > 0                       AS user_found,
+      (SELECT status FROM me)                             AS user_status,
+      (SELECT role   FROM me)                             AS user_role,
+      (SELECT "status"     FROM cm)                       AS cm_status,
+      (SELECT "expiresAt"  FROM cm)                       AS cm_expires_at,
+      (SELECT "optedOutAt" FROM cm)                       AS cm_opted_out_at,
       COALESCE(
         (SELECT array_agg("groupId") FROM grp), ARRAY[]::text[]
-      )                                                                AS qualifying_group_ids
+      )                                                   AS qualifying_group_ids,
+      COALESCE(
+        (SELECT array_agg(b."groupId") FROM grp_base b
+          WHERE b."groupId" NOT IN (SELECT "groupId" FROM grp)),
+        ARRAY[]::text[]
+      )                                                   AS sub_lapsed_group_ids
   `
 }
 
@@ -200,6 +251,7 @@ function denied(userId: string, reason: EntitlementReason): Entitlement {
     reasons: [reason],
     communityMembership: null,
     qualifyingGroupIds: [],
+    subscriptionLapsedGroupIds: [],
     resolvedAt: new Date().toISOString(),
   }
 }
@@ -211,7 +263,8 @@ async function resolve(userId: string): Promise<Entitlement> {
     const rows = await prisma.$queryRawUnsafe<ResolverRow[]>(
       buildQuery(),
       userId,
-      GROUP_RAMP_UP_DAYS
+      GROUP_RAMP_UP_DAYS,
+      GROUP_SUBSCRIPTION_GRACE_DAYS
     )
     row = rows?.[0]
   } catch (e: any) {
@@ -254,8 +307,14 @@ async function resolve(userId: string): Promise<Entitlement> {
 
   // Source 3 — qualifying group membership
   const groupIds = row.qualifying_group_ids ?? []
+  const lapsedIds = row.sub_lapsed_group_ids ?? []
+
   if (groupIds.length > 0) {
     reasons.push('QUALIFYING_GROUP')
+  } else if (lapsedIds.length > 0) {
+    // Passes rows 1-3, fails row 4. The member did nothing wrong —
+    // their group's billing did. Distinguished so support can say so.
+    reasons.push('GROUP_SUBSCRIPTION_LAPSED')
   } else {
     reasons.push('NO_QUALIFYING_GROUP')
   }
@@ -277,6 +336,7 @@ async function resolve(userId: string): Promise<Entitlement> {
         }
       : null,
     qualifyingGroupIds: groupIds,
+    subscriptionLapsedGroupIds: lapsedIds,
     resolvedAt: new Date().toISOString(),
   }
 }

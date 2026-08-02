@@ -25,6 +25,12 @@ import { randomUUID } from 'crypto';
 import type Stripe from 'stripe';
 import { prisma } from '@/lib/prisma/client';
 import { getStripe } from '@/lib/payments/stripe/client';
+import { stampGroupActivated } from '@/lib/group-entitlement';
+import {
+  enrolOrRenew,
+  recordPaymentFailure,
+  confirmOptOut,
+} from '@/lib/community-membership';
 
 export const dynamic = 'force-dynamic';
 
@@ -65,6 +71,10 @@ async function settleAttempt(params: {
   providerFee: number;
   expiresAt: Date | null;
   payload: unknown;
+  // Added for Community Membership. Optional so any caller that does
+  // not have them still compiles — enrolOrRenew tolerates nulls.
+  subscriptionId?: string | null;
+  customerId?: string | null;
 }) {
   const { attemptId, invoiceId, userId, amount, currency, providerRef, providerFee, expiresAt } = params;
   const net = amount - providerFee;
@@ -111,6 +121,39 @@ async function settleAttempt(params: {
      WHERE "id" = $1`,
     userId, invoiceId, expiresAt
   );
+
+  // ── Community Membership ──────────────────────────────────────
+  // The User columns above are the LEGACY clock. Both are written
+  // during the transition so nothing regresses while CommunityMembership
+  // is verified in production; the User writes come out afterwards.
+  //
+  // expiresAt is Stripe's period end, passed straight through. Writing
+  // an absolute date rather than computing +12 months locally is what
+  // keeps this idempotent — a replayed webhook writes the same value
+  // instead of stacking another year onto the term.
+  //
+  // Never throws: enrolOrRenew catches internally and returns a result
+  // object. A membership write failure must not make this handler
+  // return 500 and have Stripe redeliver a payment that already
+  // settled.
+  const membership = await enrolOrRenew({
+    userId,
+    currency,
+    expiresAt,
+    stripeSubscriptionId: params.subscriptionId ?? null,
+    stripeCustomerId: params.customerId ?? null,
+    autoRenew: true,
+    amountPaid: amount,
+    paymentRef: providerRef,
+    invoiceId,
+    source: 'DIRECT_REGISTRATION',
+  });
+  if (!membership.ok) {
+    console.error(
+      'POST /api/payments/webhook: CommunityMembership write failed for',
+      userId, membership.code
+    );
+  }
 }
 
 // ------------------------------------------------------------------
@@ -306,6 +349,17 @@ export async function POST(req: NextRequest) {
             groupId
           );
 
+          // ── Entitlement: stamp activatedAt ───────────────────
+          // THIS is where a group first becomes ACTIVE — the PUT on
+          // /api/groups only handles reactivation. Without this stamp,
+          // every genuinely new group leaves activatedAt null, gets no
+          // 60-day ramp-up window, and its members lose entitlement the
+          // moment they are checked against the size rule.
+          //
+          // Never overwrites, so a PAUSED → ACTIVE reactivation running
+          // through here cannot restart the window.
+          await stampGroupActivated(groupId);
+
           await recordGroupFeeTransaction({
             groupId, userId, amount, currency, providerRef: session.id,
           });
@@ -342,6 +396,8 @@ export async function POST(req: NextRequest) {
           providerFee: 0, // Stripe fees settle via Balance Transactions, not here
           expiresAt: periodEnd,
           payload: session,
+          subscriptionId,
+          customerId: (session.customer as string) || null,
         });
 
         if (subscriptionId) {
@@ -453,6 +509,8 @@ export async function POST(req: NextRequest) {
           providerFee: 0,
           expiresAt: periodEnd,
           payload: invoice,
+          subscriptionId,
+          customerId: (invoice.customer as string) || null,
         });
 
         await upsertSubscription({
@@ -485,6 +543,25 @@ export async function POST(req: NextRequest) {
         // Nothing is revoked here — Stripe Smart Retries run for ~2 weeks.
         // Members stay paid until joiningFeeExpiresAt lapses; groups stay
         // ACTIVE until the subscription is deleted outright.
+        //
+        // The failure IS recorded against the membership so the event
+        // trail later explains why one lapsed. Status is untouched for
+        // the same reason as above — Stripe is still retrying.
+        if (subscriptionId) {
+          try {
+            const failedSub = await getStripe().subscriptions.retrieve(subscriptionId);
+            const failedMeta = (failedSub as any).metadata || {};
+            if ((failedMeta.scope || 'MEMBER_ANNUAL') === 'MEMBER_ANNUAL' && failedMeta.userId) {
+              await recordPaymentFailure(failedMeta.userId, {
+                paymentRef: invoice.id as string,
+                reason: 'Stripe invoice.payment_failed',
+              });
+            }
+          } catch (e: any) {
+            console.error('POST /api/payments/webhook: failure logging skipped:', e?.message);
+          }
+        }
+
         console.error('POST /api/payments/webhook: payment failed for subscription', subscriptionId);
         return NextResponse.json({ success: true, message: 'Failure recorded' });
       }
@@ -516,6 +593,23 @@ export async function POST(req: NextRequest) {
         // MEMBER_ANNUAL: deliberately NOT flipping joiningFeePaid — the
         // member has paid through joiningFeeExpiresAt and keeps access
         // until then.
+        //
+        // Community Membership is marked as not renewing, for the same
+        // reason: expiresAt still stands, so access and advert
+        // visibility continue to the end of the paid period, and the
+        // expiry sweep flips it to EXPIRED afterwards. This also writes
+        // a CANCELLATION_REQUESTED event, which is the trail that
+        // evidences the member got what they paid for.
+        if (sub.metadata?.userId) {
+          const ended = await confirmOptOut(sub.metadata.userId);
+          if (!ended.ok && ended.code !== 'NOT_ACTIVE') {
+            console.error(
+              'POST /api/payments/webhook: membership cancellation not recorded for',
+              sub.metadata.userId, ended.code
+            );
+          }
+        }
+
         return NextResponse.json({ success: true, message: 'Subscription cancelled' });
       }
 
