@@ -1,27 +1,28 @@
 'use client'
 
 // src/app/verify-email/page.tsx
-// Verification landing page AND the post-registration waiting room.
+// Verification landing page, post-registration waiting room, and the
+// escape hatch for a mistyped address.
 //
-// Phase 6a, version 2 — verification now BLOCKS payment.
+// Phase 6a, version 3.
 //
-// ── WHY BLOCKING ─────────────────────────────────────────────
-// The email address is the sign-in ID. A typo means the member pays and
-// can then never reach their own account: a refund, a support case and
-// an orphaned Stripe subscription. Confirming first costs minutes;
-// getting it wrong costs all three.
+// ── WHY THE ESCAPE HATCH ─────────────────────────────────────
+// Verification blocks payment, so a member who mistyped their email is
+// stuck: the link goes somewhere they cannot read, and "send another"
+// only sends it to the same wrong address. Their only remaining option
+// would be to abandon the account — and the typo'd address is now taken
+// by that dead registration, so they cannot even re-register properly.
 //
-// ── THREE ENTRY POINTS ───────────────────────────────────────
-//   ?pending=1        straight after registering — "check your inbox"
-//   ?token=...        the link itself
-//   no parameters     someone navigating here directly
+// "Wrong email address?" is the way out. It is available only while
+// unverified, and the new address still has to be confirmed, so it
+// cannot be used to claim someone else's email.
 //
-// Must be in PUBLIC_ROUTES: the link may be opened on a different
-// device with no session.
+// ── ENTRY POINTS ─────────────────────────────────────────────
+//   ?pending=1   straight after registering
+//   ?token=...   the link itself
+//   neither      navigated here directly
 //
-// ── AFTER SUCCESS ────────────────────────────────────────────
-// Continues to /dashboard/join-fee, which is the next step in the flow
-// rather than a dead end at the dashboard.
+// Must be in PUBLIC_ROUTES — the link may be opened on another device.
 
 import { useEffect, useState, Suspense } from 'react'
 import { useSearchParams } from 'next/navigation'
@@ -43,15 +44,9 @@ function Shell({ children }: { children: React.ReactNode }) {
 }
 
 function ResendBlock({
-  resending,
-  note,
-  onResend,
-  label,
+  resending, note, onResend, label,
 }: {
-  resending: boolean
-  note: string
-  onResend: () => void
-  label: string
+  resending: boolean; note: string; onResend: () => void; label: string
 }) {
   return (
     <div>
@@ -70,6 +65,77 @@ function ResendBlock({
   )
 }
 
+// Module level — defined inside render it would remount on every
+// keystroke and lose cursor focus in the input below.
+function ChangeEmailBlock({
+  open, value, saving, note, onOpen, onChange, onSubmit, onCancel,
+}: {
+  open: boolean
+  value: string
+  saving: boolean
+  note: string
+  onOpen: () => void
+  onChange: (v: string) => void
+  onSubmit: () => void
+  onCancel: () => void
+}) {
+  if (!open) {
+    return (
+      <p style={{ fontSize: 13, marginTop: 22 }}>
+        <button
+          type="button"
+          onClick={onOpen}
+          style={{ background: 'none', border: 'none', padding: 0, color: '#64748B', fontSize: 13, textDecoration: 'underline', cursor: 'pointer', font: 'inherit' }}
+        >
+          Wrong email address?
+        </button>
+      </p>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 22, padding: '16px', borderRadius: 10, border: '1px solid #E2E8F0', background: '#F8FAFC', textAlign: 'left' }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: NAVY, marginBottom: 6 }}>
+        Use a different email address
+      </div>
+      <p style={{ fontSize: 12.5, color: '#64748B', lineHeight: 1.55, margin: '0 0 12px' }}>
+        This becomes your sign-in ID. We&apos;ll send a fresh confirmation link to the new
+        address.
+      </p>
+      <input
+        type="email"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        placeholder="you@example.com"
+        autoComplete="email"
+        autoCapitalize="none"
+        style={{ width: '100%', padding: '11px 13px', minHeight: 44, border: '1.5px solid #E2E8F0', borderRadius: 9, fontSize: 15, outline: 'none', boxSizing: 'border-box', marginBottom: 10 }}
+      />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          style={{ flex: 1, padding: '10px', minHeight: 44, borderRadius: 9, border: 'none', background: '#F1F5F9', color: '#475569', fontSize: 13, fontWeight: 600, cursor: 'pointer' }}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={onSubmit}
+          disabled={saving || !value.trim()}
+          style={{ flex: 2, padding: '10px', minHeight: 44, borderRadius: 9, border: 'none', background: saving || !value.trim() ? '#94A3B8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', fontSize: 13, fontWeight: 600, cursor: saving || !value.trim() ? 'not-allowed' : 'pointer' }}
+        >
+          {saving ? 'Updating…' : 'Update and resend'}
+        </button>
+      </div>
+      {note ? (
+        <p style={{ fontSize: 12.5, color: NAVY, marginTop: 12, lineHeight: 1.5 }}>{note}</p>
+      ) : null}
+    </div>
+  )
+}
+
 function VerifyInner() {
   const params = useSearchParams()
   const token = params.get('token')
@@ -81,6 +147,11 @@ function VerifyInner() {
   const [message, setMessage] = useState('')
   const [resending, setResending] = useState(false)
   const [note, setNote] = useState('')
+
+  const [changeOpen, setChangeOpen] = useState(false)
+  const [newEmail, setNewEmail] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [changeNote, setChangeNote] = useState('')
 
   useEffect(() => {
     if (!token) return
@@ -128,6 +199,30 @@ function VerifyInner() {
     }
   }
 
+  async function changeEmail() {
+    setSaving(true)
+    setChangeNote('')
+    try {
+      const res = await fetch('/api/auth/verify-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'change-email', email: newEmail.trim() }),
+      })
+      const json = await res.json()
+      setChangeNote(json.success ? json.message : json.error || 'Could not update the address.')
+      if (json.success) {
+        setNewEmail('')
+        setStatus('pending')
+        setNote('')
+        setTimeout(() => setChangeOpen(false), 2500)
+      }
+    } catch {
+      setChangeNote('Network error. Please try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   // ── Verifying ──────────────────────────────────────────────
   if (status === 'checking') {
     return (
@@ -161,7 +256,7 @@ function VerifyInner() {
     )
   }
 
-  // ── Just registered — waiting room ─────────────────────────
+  // ── Waiting room ───────────────────────────────────────────
   if (status === 'pending') {
     return (
       <Shell>
@@ -170,8 +265,7 @@ function VerifyInner() {
           Check your inbox
         </h1>
         <p style={{ fontSize: 14, color: '#64748B', lineHeight: 1.65, margin: '0 0 12px' }}>
-          We&apos;ve sent you a confirmation link. Open it to finish setting up your
-          account.
+          We&apos;ve sent you a confirmation link. Open it to finish setting up your account.
         </p>
         <div style={{ background: '#F0FDF9', border: '1px solid #A6F4C5', borderRadius: 10, padding: '12px 16px', margin: '0 0 22px', fontSize: 13, color: NAVY, lineHeight: 1.6, textAlign: 'left' }}>
           Your email address is also your sign-in ID, so we confirm it before taking any
@@ -182,11 +276,21 @@ function VerifyInner() {
           Nothing arrived? Check your spam folder first — then request another link.
         </p>
         <ResendBlock resending={resending} note={note} onResend={resend} label="Send another link" />
+        <ChangeEmailBlock
+          open={changeOpen}
+          value={newEmail}
+          saving={saving}
+          note={changeNote}
+          onOpen={() => setChangeOpen(true)}
+          onChange={setNewEmail}
+          onSubmit={changeEmail}
+          onCancel={() => { setChangeOpen(false); setChangeNote('') }}
+        />
       </Shell>
     )
   }
 
-  // ── Expired, invalid, or arrived here directly ─────────────
+  // ── Expired, invalid, or arrived directly ──────────────────
   return (
     <Shell>
       <div style={{ fontSize: 44, marginBottom: 14 }}>✉️</div>
@@ -199,7 +303,17 @@ function VerifyInner() {
           : message || 'Confirmation links are valid for 48 hours. Request a new one below.'}
       </p>
       <ResendBlock resending={resending} note={note} onResend={resend} label="Send me a new link" />
-      <p style={{ fontSize: 13, color: '#94A3B8', marginTop: 26 }}>
+      <ChangeEmailBlock
+        open={changeOpen}
+        value={newEmail}
+        saving={saving}
+        note={changeNote}
+        onOpen={() => setChangeOpen(true)}
+        onChange={setNewEmail}
+        onSubmit={changeEmail}
+        onCancel={() => { setChangeOpen(false); setChangeNote('') }}
+      />
+      <p style={{ fontSize: 13, color: '#94A3B8', marginTop: 24 }}>
         <a href="/login" style={{ color: TEAL, fontWeight: 600, textDecoration: 'none' }}>
           Back to sign in
         </a>
