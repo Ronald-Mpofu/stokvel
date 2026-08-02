@@ -63,6 +63,8 @@ const API_PUBLIC = [
   '/api/auth/reset-password',
   '/api/payments/webhook',
   '/api/joining-fee/webhook',
+  '/api/cron', 
+
 ]
 
 // ── Helpers ───────────────────────────────────────────────────

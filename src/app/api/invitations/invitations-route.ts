@@ -7,7 +7,6 @@ import {
   hashPassword, verifyPasswordSafe,
 } from '@/lib/auth'
 import { sendEmail } from '@/lib/email/send'
-import { stampGroupReachedMinimum } from '@/lib/group-entitlement'
 
 export const dynamic = 'force-dynamic'
 
@@ -358,17 +357,6 @@ async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> 
         })
       })
 
-      // ── Entitlement: stamp reachedMinimumAt ──────────────────
-      // AFTER the transaction, never inside it. stampGroupReachedMinimum
-      // opens its own connection and counts GroupMember rows; called
-      // within tx it would read pre-commit state and miss the member
-      // that just joined — exactly the boundary case that decides
-      // whether a group crosses minMembers.
-      //
-      // Never throws, so a stamping failure cannot roll back a join
-      // that already succeeded.
-      await stampGroupReachedMinimum(inv.groupId)
-
       return NextResponse.json({
         success: true,
         message: `Welcome to ${inv.group.name}, ${existingUser.fullName}! You've joined this group.`,
@@ -441,13 +429,6 @@ async function handleAccept(body: any, req: NextRequest): Promise<NextResponse> 
 
       return { user }
     })
-
-    // ── Entitlement: stamp reachedMinimumAt ────────────────────
-    // AFTER the transaction — see the note on the existing-user path
-    // above. This is the invited-member path that rule 3b exempts from
-    // the annual fee, so the group's entitlement state has to be
-    // correct the moment they land.
-    await stampGroupReachedMinimum(inv.groupId)
 
     // Send welcome email (non-blocking)
     if (inv.email) {

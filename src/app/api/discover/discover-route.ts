@@ -9,7 +9,6 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
 import { getSessionFromRequest, unauthorized, requireGroupManager } from '@/lib/auth'
-import { stampGroupReachedMinimum } from '@/lib/group-entitlement'
 
 export const dynamic = 'force-dynamic'
 
@@ -196,14 +195,6 @@ export async function POST(req: NextRequest) {
           `UPDATE "GroupMember"
            SET status = 'ACTIVE'::"MemberStatus", "approvedById" = $2, "approvedAt" = NOW(), "joinedAt" = NOW(), "updatedAt" = NOW()
            WHERE id = $1`, [requestId, session.id])
-
-        // ── Entitlement: stamp reachedMinimumAt ────────────────
-        // A PENDING row does NOT count toward group size — only the
-        // flip to ACTIVE above makes this person a member, so this is
-        // the correct moment to re-check the threshold.
-        // Never throws; a stamping failure cannot undo the approval.
-        await stampGroupReachedMinimum(reqRow.groupId)
-
         return NextResponse.json({ success: true, message: `${reqRow.fullName} has been admitted to the group.` })
       }
 
