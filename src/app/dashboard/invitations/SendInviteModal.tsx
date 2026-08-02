@@ -1,47 +1,121 @@
 'use client'
+
+// src/components/SendInviteModal.tsx
+// (keep this file wherever it currently lives — path unchanged)
+//
+// Version 2.0 — phase 3.
+//
+// ── WHAT CHANGED ─────────────────────────────────────────────
+// 1. invitedById is NO LONGER SENT. The API now takes the inviter from
+//    the session; a body value is honoured only for super roles. Sending
+//    it from the client was how any manager could attribute an
+//    invitation to someone else.
+//
+//    The `currentUserId` prop is kept and marked optional so existing
+//    call sites compile unchanged, but it is no longer used.
+//
+// 2. The two new API refusals are handled with useful copy instead of a
+//    bare error string:
+//      GROUP_NOT_ACTIVE — invitations wait until the group is activated
+//      GROUP_FULL       — at the maxMembers limit
+//
+// 3. Pre-flight guard: when the parent supplies `status` on a group, a
+//    non-ACTIVE selection is called out before submitting and the send
+//    button is disabled. Purely a convenience — the server enforces the
+//    rule either way. Parents that do not pass `status` behave exactly
+//    as before.
+
 import { useState } from 'react'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 
+type GroupOption = {
+  id: string
+  name: string
+  currency?: string
+  /** Optional. When supplied, a non-ACTIVE group is flagged before submit. */
+  status?: string
+  memberCount?: number
+  maxMembers?: number
+}
+
 interface Props {
-  groups: { id: string; name: string; currency?: string }[]
+  groups: GroupOption[]
   preselectedGroupId?: string    // locks the group dropdown when opened from Groups module
-  currentUserId: string
+  /** @deprecated No longer sent — the API takes the inviter from the session. */
+  currentUserId?: string
   onClose: () => void
   onSuccess: (message: string) => void
 }
 
-export default function SendInviteModal({ groups, preselectedGroupId, currentUserId, onClose, onSuccess }: Props) {
-  const [form, setForm] = useState({
-    groupId:         preselectedGroupId || '',
-    email:           '',
-    phone:           '',
-    fullName:        '',
-    role:            'MEMBER',
-    channel:         'BOTH',
-    personalMessage: '',
-  })
-  const [saving, setSaving]   = useState(false)
-  const [error, setError]     = useState('')
-  const [result, setResult]   = useState<any>(null)
+const EMPTY_FORM = {
+  groupId:         '',
+  email:           '',
+  phone:           '',
+  fullName:        '',
+  role:            'MEMBER',
+  channel:         'BOTH',
+  personalMessage: '',
+}
+
+// Module-level so it is not redefined on every render.
+function BlockedNotice({ text }: { text: string }) {
+  return (
+    <div style={{ background:'#FFFBEB', border:'1px solid #FDE68A', borderRadius:'8px', padding:'10px 14px', color:'#92400E', fontSize:'12px', marginBottom:'14px', lineHeight:'1.55' }}>
+      ⚠️ {text}
+    </div>
+  )
+}
+
+export default function SendInviteModal({ groups, preselectedGroupId, onClose, onSuccess }: Props) {
+  const [form, setForm] = useState({ ...EMPTY_FORM, groupId: preselectedGroupId || '' })
+  const [saving, setSaving] = useState(false)
+  const [error, setError]   = useState('')
+  const [result, setResult] = useState<any>(null)
 
   const set = (k: string) => (v: string) => setForm(p => ({ ...p, [k]: v }))
   const selectedGroup = groups.find(g => g.id === form.groupId)
 
+  // Only meaningful when the parent supplies status/capacity. Undefined
+  // means "unknown", and unknown never blocks — the server decides.
+  const groupInactive = !!selectedGroup?.status && selectedGroup.status !== 'ACTIVE'
+  const groupFull =
+    typeof selectedGroup?.memberCount === 'number' &&
+    typeof selectedGroup?.maxMembers === 'number' &&
+    selectedGroup.memberCount >= selectedGroup.maxMembers
+
+  const preflightBlock = groupInactive
+    ? selectedGroup?.status === 'DRAFT'
+      ? `"${selectedGroup?.name}" has not been activated yet. Activate it first — activation includes the group subscription — then you can invite members.`
+      : `"${selectedGroup?.name}" is ${String(selectedGroup?.status).toLowerCase()}, so it cannot send invitations.`
+    : groupFull
+    ? `"${selectedGroup?.name}" is at its limit of ${selectedGroup?.maxMembers} members. Raise the capacity in group settings first.`
+    : ''
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     if (!form.email && !form.phone) return setError('At least one of email or phone is required.')
+    if (preflightBlock) return setError(preflightBlock)
+
     setSaving(true); setError('')
     try {
+      // invitedById deliberately omitted — the API reads the session.
       const res  = await fetch('/api/invitations', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ ...form, invitedById: currentUserId }),
+        body:    JSON.stringify(form),
       })
       const data = await res.json()
-      if (data.success) setResult(data)
-      else setError(data.error || 'Failed to send invitation')
+      if (data.success) {
+        setResult(data)
+      } else if (data.code === 'GROUP_NOT_ACTIVE') {
+        setError(data.error || 'This group must be activated before you can invite members.')
+      } else if (data.code === 'GROUP_FULL') {
+        setError(data.error || 'This group has reached its member limit.')
+      } else {
+        setError(data.error || 'Failed to send invitation')
+      }
     } catch { setError('Network error — please try again') }
     finally { setSaving(false) }
   }
@@ -80,7 +154,7 @@ export default function SendInviteModal({ groups, preselectedGroupId, currentUse
 
         <div style={{ display:'flex', gap:'10px' }}>
           <button
-            onClick={() => { setResult(null); setForm({ groupId: preselectedGroupId || '', email:'', phone:'', fullName:'', role:'MEMBER', channel:'BOTH', personalMessage:'' }); setError('') }}
+            onClick={() => { setResult(null); setForm({ ...EMPTY_FORM, groupId: preselectedGroupId || '' }); setError('') }}
             style={{ flex:1, padding:'11px', background:'#F1F5F9', border:'none', borderRadius:'10px', fontSize:'13px', cursor:'pointer', color:'#475569' }}>
             Send Another
           </button>
@@ -125,7 +199,11 @@ export default function SendInviteModal({ groups, preselectedGroupId, currentUse
               <select value={form.groupId} onChange={e => set('groupId')(e.target.value)} required
                 style={{ width:'100%', padding:'9px 12px', border:'1.5px solid #E2E8F0', borderRadius:'8px', fontSize:'13px', outline:'none', background:'white', boxSizing:'border-box' as any }}>
                 <option value="">Select a group...</option>
-                {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                {groups.map(g => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}{g.status && g.status !== 'ACTIVE' ? ` (${g.status.toLowerCase()})` : ''}
+                  </option>
+                ))}
               </select>
             )}
           </div>
@@ -201,10 +279,12 @@ export default function SendInviteModal({ groups, preselectedGroupId, currentUse
             />
           </div>
 
-          {/* Info note */}
-          <div style={{ background:'#EEF2FF', border:'1px solid #C7D2FE', borderRadius:'8px', padding:'10px 14px', marginBottom:'16px', fontSize:'12px', color:'#3730A3' }}>
-            💡 The invitee will receive a link valid for <strong>7 days</strong>. They can create their own account and join the group by clicking it — no admin action needed after sending.
+          {/* Info note — invited members are fee-exempt (rule 3b) */}
+          <div style={{ background:'#EEF2FF', border:'1px solid #C7D2FE', borderRadius:'8px', padding:'10px 14px', marginBottom:'16px', fontSize:'12px', color:'#3730A3', lineHeight:'1.55' }}>
+            💡 The invitee gets a link valid for <strong>7 days</strong> and can create their own account from it — no admin action needed after sending. Invited members pay <strong>no annual fee</strong> while they belong to an active group.
           </div>
+
+          {preflightBlock ? <BlockedNotice text={preflightBlock} /> : null}
 
           {error && (
             <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'8px', padding:'10px 14px', color:'#991B1B', fontSize:'12px', marginBottom:'14px' }}>
@@ -217,8 +297,8 @@ export default function SendInviteModal({ groups, preselectedGroupId, currentUse
               style={{ flex:1, padding:'11px', background:'#F1F5F9', border:'none', borderRadius:'8px', fontSize:'13px', cursor:'pointer', color:'#475569', fontWeight:'500' }}>
               Cancel
             </button>
-            <button type="submit" disabled={saving}
-              style={{ flex:2, padding:'11px', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:saving?'not-allowed':'pointer', background:saving?'#94A3B8':`linear-gradient(135deg,${NAVY},${TEAL})`, color:'white' }}>
+            <button type="submit" disabled={saving || !!preflightBlock}
+              style={{ flex:2, padding:'11px', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:(saving || !!preflightBlock)?'not-allowed':'pointer', background:(saving || !!preflightBlock)?'#94A3B8':`linear-gradient(135deg,${NAVY},${TEAL})`, color:'white' }}>
               {saving ? '⏳ Sending...' : '✉️ Send Invitation'}
             </button>
           </div>

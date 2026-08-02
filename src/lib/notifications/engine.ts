@@ -1,5 +1,46 @@
 // src/lib/notifications/engine.ts
-// Core notification engine — creates records, sends email/SMS
+// Core notification engine — creates records, sends email/SMS.
+//
+// Version 2.0 — dedupe, group scoping, membership types.
+//
+// ── BACKWARDS COMPATIBLE ─────────────────────────────────────
+// sendNotification() keeps its exact v1 signature and return shape.
+// Every new field on NotificationPayload is optional, so existing
+// callers compile and behave identically. Only two behaviours change,
+// both bug fixes described below.
+//
+// ── WHAT CHANGED ─────────────────────────────────────────────
+// 1. DEDUPE. v1 inserted unconditionally. A daily reminder cron plus
+//    Vercel's retry-on-failure means the same member gets the same
+//    "your membership expires" email twice. Supplying dedupeKey now
+//    claims a row via a unique index; a second attempt returns
+//    `deduped` and contacts nobody.
+//
+//    Callers that omit dedupeKey behave exactly as before.
+//
+// 2. NO MORE FALSE 'SENT'. v1's email and SMS senders returned quietly
+//    when their API key was absent, and the caller then marked the
+//    notification SENT. An unconfigured platform produced a database
+//    full of delivered messages nobody received — and a reminder sweep
+//    would report healthy numbers while sending nothing. They now
+//    throw NotConfiguredError, so the row is marked FAILED with a
+//    reason. Development still prints the message to the console.
+//
+// 3. groupId and templateId are persisted, so group-scoped notices can
+//    be listed per group and dedupe keys stay readable.
+//
+// ── SMS CONFIGURATION ────────────────────────────────────────
+// Standardised on AT_API_KEY / AT_USERNAME — used by this file and by
+// /api/invitations. src/lib/notifications/sms.ts reads a different set
+// (AFRICASTALKING_*) and is redundant; delete it once nothing imports
+// it.
+//
+// AT_USERNAME=sandbox selects the sandbox endpoint, which is Africa's
+// Talking' own convention.
+//
+// COVERAGE: Africa's Talking does not meaningfully cover Australia.
+// AU numbers will need a second provider; until then SMS to +61 fails
+// at the provider and is recorded as FAILED.
 
 import prisma from '@/lib/prisma/client'
 
@@ -18,6 +59,15 @@ export type NotificationType =
   | 'KYC_REJECTED'
   | 'ANNOUNCEMENT'
   | 'WELCOME'
+  // Added v2 — Community Membership and group subscription lifecycle.
+  | 'MEMBERSHIP_RENEWAL_AUTO'
+  | 'MEMBERSHIP_ENDING'
+  | 'MEMBERSHIP_ACTION_REQUIRED'
+  | 'MEMBERSHIP_GRACE_ENDING'
+  | 'GROUP_SUBSCRIPTION_PAST_DUE'
+  | 'GROUP_SUBSCRIPTION_CANCELLED'
+
+export type NotificationChannelName = 'EMAIL' | 'SMS' | 'IN_APP'
 
 export interface NotificationPayload {
   userId:   string
@@ -25,77 +75,169 @@ export interface NotificationPayload {
   subject:  string
   body:     string
   html?:    string
-  channels: ('EMAIL' | 'SMS' | 'IN_APP')[]
+  channels: NotificationChannelName[]
   metadata?: Record<string, any>
+
+  // ── Added v2, all optional ──────────────────────────────────
+  /**
+   * Send-exactly-once key. Combined with the channel and enforced by a
+   * unique index, so a re-run or a provider retry cannot double-send.
+   * Omit for one-off, user-triggered messages.
+   */
+  dedupeKey?: string
+  /** Group-scoped notices — powers per-group listing. */
+  groupId?: string | null
+  /** Overrides the stored template id. Defaults to `type`. */
+  templateId?: string
+  /** Skip the User lookup when the caller already has these. */
+  email?: string | null
+  phone?: string | null
+  fullName?: string | null
+  /** Per-channel body override. Falls back to `body`. */
+  smsBody?: string
+}
+
+export class NotConfiguredError extends Error {
+  constructor(channel: string, vars: string) {
+    super(`${channel} is not configured. Set ${vars}.`)
+    this.name = 'NotConfiguredError'
+  }
+}
+
+export type SendResult = {
+  sent: string[]
+  failed: string[]
+  /** True when at least one channel was suppressed as a duplicate. */
+  deduped?: boolean
+}
+
+// ── Row creation ──────────────────────────────────────────────
+// Raw SQL because dedupeKey and groupId are not in the Prisma model.
+// Returns null when the dedupeKey has already been claimed.
+async function createRow(
+  payload: NotificationPayload,
+  channel: NotificationChannelName,
+  body: string
+): Promise<string | null> {
+  const templateId = payload.templateId || payload.type
+  const dedupeKey = payload.dedupeKey ? `${payload.dedupeKey}:${channel}` : null
+
+  const rows = await prisma.$queryRawUnsafe<{ id: string }[]>(
+    `
+    INSERT INTO "Notification"
+      ("id", "userId", "groupId", "channel", "status", "subject", "body",
+       "templateId", "dedupeKey", "metadata", "createdAt")
+    VALUES
+      (gen_random_uuid()::text, $1, $2, $3::"NotificationChannel",
+       'PENDING'::"NotificationStatus", $4, $5, $6, $7, $8::jsonb, now())
+    ON CONFLICT ("dedupeKey") DO NOTHING
+    RETURNING "id"
+    `,
+    payload.userId,
+    payload.groupId ?? null,
+    channel,
+    payload.subject,
+    body,
+    templateId,
+    dedupeKey,
+    JSON.stringify(payload.metadata || {})
+  )
+
+  return rows?.[0]?.id ?? null
 }
 
 // ── Send a notification ───────────────────────────────────────
-export async function sendNotification(payload: NotificationPayload): Promise<{ sent: string[]; failed: string[] }> {
-  const user = await prisma.user.findUnique({
-    where:  { id: payload.userId },
-    select: { id: true, fullName: true, email: true, phone: true },
-  })
-  if (!user) return { sent: [], failed: ['user_not_found'] }
+export async function sendNotification(payload: NotificationPayload): Promise<SendResult> {
+  let recipient: { fullName: string | null; email: string | null; phone: string | null }
+
+  // Use supplied contact details when the caller already loaded them —
+  // a batch of 500 should not run 500 extra User queries.
+  if (payload.email !== undefined || payload.phone !== undefined) {
+    recipient = {
+      fullName: payload.fullName ?? null,
+      email: payload.email ?? null,
+      phone: payload.phone ?? null,
+    }
+  } else {
+    const user = await prisma.user.findUnique({
+      where:  { id: payload.userId },
+      select: { id: true, fullName: true, email: true, phone: true },
+    })
+    if (!user) return { sent: [], failed: ['user_not_found'] }
+    recipient = { fullName: user.fullName, email: user.email, phone: user.phone }
+  }
 
   const sent:   string[] = []
   const failed: string[] = []
+  let deduped = false
 
   for (const channel of payload.channels) {
-    // Create notification record
-    const notif = await prisma.notification.create({
-      data: {
-        userId:     payload.userId,
-        channel:    channel as any,
-        status:     'PENDING',
-        subject:    payload.subject,
-        body:       payload.body,
-        metadata:   payload.metadata || {},
-      },
-    })
+    // Skip channels with no destination rather than recording a failure
+    // — a member with no phone number has not failed at anything.
+    if (channel === 'EMAIL' && !recipient.email) continue
+    if (channel === 'SMS' && !recipient.phone) continue
+
+    const body = channel === 'SMS' ? (payload.smsBody || payload.body) : payload.body
+
+    let notifId: string | null
+    try {
+      notifId = await createRow(payload, channel, body)
+    } catch (e: any) {
+      console.error(`Notification row failed for ${payload.userId}:`, e?.message)
+      failed.push(channel)
+      continue
+    }
+
+    // Already claimed on an earlier run. Silence is correct.
+    if (!notifId) { deduped = true; continue }
 
     try {
-      if (channel === 'EMAIL' && user.email) {
+      if (channel === 'EMAIL') {
         await sendEmail({
-          to:      user.email,
+          to:      recipient.email as string,
           subject: payload.subject,
           html:    payload.html || textToHtml(payload.body, payload.subject),
           text:    payload.body,
         })
         await prisma.notification.update({
-          where: { id: notif.id },
+          where: { id: notifId },
           data:  { status: 'SENT', sentAt: new Date() },
         })
         sent.push('EMAIL')
       }
 
-      else if (channel === 'SMS' && user.phone) {
-        await sendSMS({ to: user.phone, message: payload.body })
+      else if (channel === 'SMS') {
+        await sendSMS({ to: recipient.phone as string, message: body })
         await prisma.notification.update({
-          where: { id: notif.id },
+          where: { id: notifId },
           data:  { status: 'SENT', sentAt: new Date() },
         })
         sent.push('SMS')
       }
 
       else if (channel === 'IN_APP') {
-        // IN_APP is just stored in the DB — already created above
+        // Nothing to transmit — the row IS the delivery.
         await prisma.notification.update({
-          where: { id: notif.id },
+          where: { id: notifId },
           data:  { status: 'DELIVERED', sentAt: new Date(), deliveredAt: new Date() },
         })
         sent.push('IN_APP')
       }
     } catch (e: any) {
-      console.error(`Notification ${channel} failed for user ${payload.userId}:`, e.message)
+      console.error(`Notification ${channel} failed for user ${payload.userId}:`, e?.message)
       await prisma.notification.update({
-        where: { id: notif.id },
-        data:  { status: 'FAILED', failedAt: new Date(), failReason: e.message },
+        where: { id: notifId },
+        data:  {
+          status: 'FAILED',
+          failedAt: new Date(),
+          failReason: String(e?.message || 'send failed').slice(0, 500),
+        },
       })
       failed.push(channel)
     }
   }
 
-  return { sent, failed }
+  return { sent, failed, deduped }
 }
 
 // ── Send to multiple users ────────────────────────────────────
@@ -109,8 +251,11 @@ async function sendEmail({ to, subject, html, text }: { to: string; subject: str
   const apiKey = process.env.RESEND_API_KEY
 
   if (!apiKey) {
-    console.log(`[DEV — no RESEND_API_KEY] Email not configured. Would send to ${to}: ${subject}`)
-    return
+    // v1 returned here and the caller marked the row SENT. Log for
+    // development, then THROW so the row is recorded as FAILED — an
+    // email nobody received must never read as delivered.
+    console.log(`[DEV — no RESEND_API_KEY] Would send to ${to}: ${subject}\n${text}`)
+    throw new NotConfiguredError('Email', 'RESEND_API_KEY')
   }
 
   const from = process.env.FROM_EMAIL || 'Windfall Community Deals <noreply@thecommunitydeals.com>'
@@ -130,16 +275,18 @@ async function sendEmail({ to, subject, html, text }: { to: string; subject: str
   }
 }
 
-// ── SMS sender ────────────────────────────────────────────────
+// ── SMS sender (Africa's Talking) ─────────────────────────────
 async function sendSMS({ to, message }: { to: string; message: string }) {
   const apiKey   = process.env.AT_API_KEY
   const username = process.env.AT_USERNAME
 
   if (!apiKey || !username) {
     console.log(`[DEV] SMS not configured. Would send to ${to}: ${message}`)
-    return
+    throw new NotConfiguredError('SMS', 'AT_API_KEY and AT_USERNAME')
   }
 
+  // Africa's Talking' own convention: the sandbox account is literally
+  // named "sandbox".
   const isSandbox = username === 'sandbox'
   const baseUrl   = isSandbox
     ? 'https://api.sandbox.africastalking.com'

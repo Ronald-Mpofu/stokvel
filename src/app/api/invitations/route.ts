@@ -20,7 +20,11 @@ function safeError(e: any, fallback: string): string {
 
 const sendSchema = z.object({
   groupId:         z.string().uuid(),
-  invitedById:     z.string().uuid(),
+  // Optional as of phase 3. v1 took the inviter straight from the body,
+  // so any manager could attribute an invitation to anyone. It now
+  // defaults to the session, and a supplied value is honoured only for
+  // SUPER_ROLES acting on someone's behalf.
+  invitedById:     z.string().uuid().optional(),
   email:           z.string().email().optional().or(z.literal('')),
   phone:           z.string().optional(),
   fullName:        z.string().optional(),
@@ -92,6 +96,25 @@ export async function GET(req: NextRequest) {
     // List invitations for a group
     if (!groupId) return NextResponse.json({ success: false, error: 'groupId required' }, { status: 400 })
 
+    // ── AUTHORISATION (added phase 3) ─────────────────────────
+    // This branch had NO guard. Middleware only enforces that the
+    // caller is authenticated, and formatInvitation returns `token` and
+    // a ready-made `inviteUrl` for every PENDING invitation. So any
+    // logged-in user could list a group's invitations, lift a pending
+    // token, and accept it — joining any group they liked, while the
+    // audit trail recorded the invited person's name.
+    //
+    // Group ids are not secret either: /api/groups and /api/discover
+    // both hand them out, so there was nothing to guess.
+    const listSession = await getSessionFromRequest(req)
+    if (!listSession) return unauthorized()
+    if (
+      !SUPER_ROLES.includes(listSession.role) &&
+      !(await canManageGroup(listSession.id, groupId))
+    ) {
+      return forbidden('Not authorised for this group')
+    }
+
     const invitations = await prisma.memberInvitation.findMany({
       where:   { groupId },
       include: { invitedBy: { select: { fullName: true } } },
@@ -160,14 +183,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'At least one of email or phone is required.' }, { status: 400 })
     }
 
-    // Check if already invited and pending
-    const existing = await prisma.memberInvitation.findFirst({
-      where: {
-        groupId: data.groupId,
-        email:   data.email || undefined,
-        status:  'PENDING',
-      },
-    })
+    // The inviter is the caller. A body value is honoured only for
+    // super roles sending on someone else's behalf.
+    const invitedById = isSuper && data.invitedById ? data.invitedById : session.id
+
+    // Check if already invited and pending.
+    //
+    // BUG FIX: v1 wrote `email: data.email || undefined`. Prisma DROPS
+    // an undefined filter, so a phone-only invitation matched ANY
+    // pending invitation in the group — meaning the second phone-only
+    // invite to a group was always rejected as a duplicate of the
+    // first, whoever it was for.
+    const duplicateWhere: any = { groupId: data.groupId, status: 'PENDING' }
+    if (data.email) {
+      duplicateWhere.email = data.email.toLowerCase()
+    } else {
+      duplicateWhere.phone = data.phone
+    }
+    const existing = await prisma.memberInvitation.findFirst({ where: duplicateWhere })
     if (existing) {
       return NextResponse.json({ success: false, error: `An active invitation already exists for ${data.email || data.phone}. Use Resend to send another reminder.` }, { status: 409 })
     }
@@ -184,17 +217,55 @@ export async function POST(req: NextRequest) {
     // Get group details for the email/SMS content
     const group = await prisma.group.findUnique({
       where:   { id: data.groupId },
-      select:  { name: true, contributionAmount: true, currency: true, maxMembers: true },
+      select:  {
+        name: true, contributionAmount: true, currency: true, maxMembers: true,
+        // Added phase 3 — needed for the two gates below.
+        status: true, deletedAt: true,
+        _count: { select: { members: true } },
+      },
     })
     if (!group) return NextResponse.json({ success: false, error: 'Group not found' }, { status: 404 })
+    if (group.deletedAt) return NextResponse.json({ success: false, error: 'Group not found' }, { status: 404 })
 
-    const inviter = await prisma.user.findUnique({ where: { id: data.invitedById }, select: { fullName: true } })
+    // ── GATE 1: invitations wait until the group is ACTIVE ────
+    // Activation is a paid action. Inviting into a DRAFT group would
+    // land members in a group that confers no entitlement, and under
+    // rule 3b those members are fee-exempt precisely BECAUSE their
+    // group is active — so inviting early would leave them with
+    // neither a paid membership nor a qualifying group.
+    //
+    // Enforced here, not only by disabling the button: the UI guard is
+    // a convenience, this is the rule.
+    if (group.status !== 'ACTIVE') {
+      return NextResponse.json({
+        success: false,
+        code: 'GROUP_NOT_ACTIVE',
+        error: group.status === 'DRAFT'
+          ? 'Activate this group before inviting members. Activation includes the group subscription.'
+          : `A ${String(group.status).toLowerCase()} group cannot send invitations.`,
+      }, { status: 409 })
+    }
+
+    // ── GATE 2: capacity ──────────────────────────────────────
+    // maxMembers drives the subscription tier, so exceeding it would
+    // put the group on the wrong price. Pending invitations are NOT
+    // counted — an invitation is not a member, and counting them would
+    // let unaccepted invites block real ones indefinitely.
+    if (group._count.members >= group.maxMembers) {
+      return NextResponse.json({
+        success: false,
+        code: 'GROUP_FULL',
+        error: `This group is at its limit of ${group.maxMembers} members. Raise the capacity in group settings first.`,
+      }, { status: 409 })
+    }
+
+    const inviter = await prisma.user.findUnique({ where: { id: invitedById }, select: { fullName: true } })
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
 
     const invitation = await prisma.memberInvitation.create({
       data: {
         groupId:         data.groupId,
-        invitedById:     data.invitedById,
+        invitedById,
         email:           data.email?.toLowerCase() || null,
         phone:           data.phone || null,
         fullName:        data.fullName || null,
