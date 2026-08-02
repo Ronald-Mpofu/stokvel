@@ -308,7 +308,7 @@ export default function RegisterPage() {
               marginTop: 4,
             }}
           >
-            {loading ? '⏳ Creating account...' : 'Create account →'}
+            {loading ? '⏳ Creating account...' : 'Register →'}
           </button>
 
           <p style={{ textAlign: 'center', fontSize: 13, color: '#64748B', marginTop: 20 }}>

@@ -15,6 +15,7 @@ import {
   hashPassword, signAccessToken, signRefreshToken,
   setAuthCookies
 } from '@/lib/auth'
+import { sendVerificationEmail } from '@/lib/email-verification'
 
 const registerSchema = z.object({
   fullName: z.string().min(2, 'Full name is required').max(120),
@@ -121,6 +122,21 @@ export async function POST(req: NextRequest) {
         userAgent: req.headers.get('user-agent') || undefined,
         description: `User ${user.email} registered as ${role}${role === 'GROUP_ADMIN' ? ' (create-a-group signup)' : ''}`,
       },
+    })
+
+    // ── Verification email (phase 6a) ──────────────────────────
+    // Deliberately NOT awaited into the response path in a way that can
+    // fail registration: sendVerificationEmail never throws, and a mail
+    // provider outage must not lose an account that has already been
+    // created. The member can request a fresh link at any time.
+    //
+    // Verification does NOT gate payment. The member goes straight to
+    // the fee page; confirming the address is only required before
+    // transacting.
+    await sendVerificationEmail(user.id, {
+      email: user.email,
+      fullName: user.fullName,
+      ipAddress: req.ip || req.headers.get('x-forwarded-for') || null,
     })
 
     const response = NextResponse.json({

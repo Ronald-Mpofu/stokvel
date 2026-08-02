@@ -66,6 +66,8 @@ export type NotificationType =
   | 'MEMBERSHIP_GRACE_ENDING'
   | 'GROUP_SUBSCRIPTION_PAST_DUE'
   | 'GROUP_SUBSCRIPTION_CANCELLED'
+  // Added phase 6a.
+  | 'EMAIL_VERIFICATION'
 
 export type NotificationChannelName = 'EMAIL' | 'SMS' | 'IN_APP'
 

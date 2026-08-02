@@ -40,6 +40,7 @@ const PUBLIC_ROUTES = [
   // unauthenticated user hits /forgot-password → bounced to /login.
   '/forgot-password',
   '/reset-password',
+  '/verify-email',
 ]
 
 const ADMIN_ROUTES  = ['/dashboard']
@@ -64,6 +65,7 @@ const API_PUBLIC = [
   '/api/payments/webhook',
   '/api/joining-fee/webhook',
   '/api/cron', 
+  '/api/auth/verify-email',
 
 ]
 
