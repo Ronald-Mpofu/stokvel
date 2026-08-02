@@ -179,13 +179,32 @@ export async function POST(req: NextRequest) {
     }
 
     const userRows: any[] = await prisma.$queryRawUnsafe(
-      `SELECT "email" FROM "User" WHERE "id" = $1 AND "deletedAt" IS NULL`,
+      `SELECT "email", "emailVerifiedAt" FROM "User" WHERE "id" = $1 AND "deletedAt" IS NULL`,
       userId
     );
     if (!userRows.length) {
       return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
     }
     const userEmail: string = userRows[0].email;
+
+    // ── Email must be verified BEFORE any payment ─────────────
+    // The email address is the login ID. If it is wrong, the member
+    // pays and can then never sign in — a refund, a support case and an
+    // orphaned Stripe subscription. Confirming the address first costs
+    // a few minutes; getting it wrong costs all three.
+    //
+    // Enforced server-side, not only by page flow: this route creates
+    // invoices and Stripe Checkout sessions, so the UI redirect is a
+    // convenience and this is the actual rule.
+    if (!userRows[0].emailVerifiedAt) {
+      return NextResponse.json({
+        success: false,
+        code: 'EMAIL_NOT_VERIFIED',
+        error: 'Please confirm your email address before paying. Your email is also your ' +
+               'sign-in ID, so it needs to be correct before any payment is taken.',
+        data: { verifyAt: '/verify-email' },
+      }, { status: 409 });
+    }
 
     // ── Do they need to pay at all? ───────────────────────────
     // Resolved live rather than read from User.joiningFeePaid, which is

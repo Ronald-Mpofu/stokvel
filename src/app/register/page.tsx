@@ -155,8 +155,10 @@ export default function RegisterPage() {
         setLoading(false);
         return;
       }
-      // Cookies are already set by the API — go straight to the fee gate
-      router.push('/dashboard/join-fee');
+      // Cookies are already set by the API. Verification comes BEFORE
+      // payment: the email address is the sign-in ID, so a typo would
+      // leave a paying member unable to reach their own account.
+      router.push('/verify-email?pending=1');
     } catch {
       setError('Network error. Please try again.');
       setLoading(false);
