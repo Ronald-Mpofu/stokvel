@@ -54,9 +54,19 @@ const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER
 // Module level, like every other helper here — defined inside render it
 // would remount on each keystroke and lose focus in the reference field.
 //
-// Numbers are monospaced and individually copyable: these get typed
-// into a banking app, and a transposed digit sends real money to a
-// stranger with no way to recall it.
+// ── LAYOUT ───────────────────────────────────────────────────
+// Label ABOVE value, not beside it. A side-by-side row forces long
+// account names and 20-digit numbers to wrap or truncate on a phone,
+// which is exactly where most members will be standing when they open
+// their banking app.
+//
+// Values are monospaced and letter-spaced. Digits typed wrong send real
+// money to a stranger, and 0/O and 1/l are far harder to distinguish in
+// a proportional face.
+//
+// Amount and Reference are visually separated from the account details:
+// they are the two fields a member is most likely to skip, and the
+// reference is what links their transfer back to their account.
 type Destination = {
   id: string;
   method: string;
@@ -73,15 +83,39 @@ type Destination = {
   instructions?: string | null;
 };
 
-function CopyRow(props: { label: string; value: string; mono?: boolean }) {
+function CopyField(props: { label: string; value: string; mono?: boolean; emphasis?: boolean }) {
   const [copied, setCopied] = useState(false);
   if (!props.value) return null;
+
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid #e2e8f0' }}>
-      <div style={{ width: 120, flexShrink: 0, fontSize: 12, color: '#64748b' }}>{props.label}</div>
-      <div style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: NAVY, wordBreak: 'break-all',
-        fontFamily: props.mono ? 'ui-monospace, monospace' : 'inherit' }}>
-        {props.value}
+    <div
+      style={{
+        border: `1px solid ${props.emphasis ? '#A6F4C5' : '#e2e8f0'}`,
+        background: props.emphasis ? '#F0FDF9' : '#fff',
+        borderRadius: 9,
+        padding: '10px 12px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 10.5, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 3 }}>
+          {props.label}
+        </div>
+        <div
+          style={{
+            fontSize: props.mono ? 16 : 14,
+            fontWeight: props.mono ? 700 : 600,
+            color: NAVY,
+            lineHeight: 1.35,
+            wordBreak: 'break-word',
+            fontFamily: props.mono ? 'ui-monospace, SFMono-Regular, Menlo, monospace' : 'inherit',
+            letterSpacing: props.mono ? 0.6 : 0,
+          }}
+        >
+          {props.value}
+        </div>
       </div>
       <button
         type="button"
@@ -90,11 +124,30 @@ function CopyRow(props: { label: string; value: string; mono?: boolean }) {
           setCopied(true);
           setTimeout(() => setCopied(false), 1600);
         }}
-        style={{ flexShrink: 0, padding: '5px 10px', minHeight: 32, borderRadius: 6, border: '1px solid #e2e8f0',
-          background: copied ? '#D1FADF' : '#fff', color: copied ? TEAL : '#64748b', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+        aria-label={`Copy ${props.label}`}
+        style={{
+          flexShrink: 0,
+          width: 44,
+          height: 44,
+          borderRadius: 8,
+          border: '1px solid #e2e8f0',
+          background: copied ? '#D1FADF' : '#f8fafc',
+          color: copied ? TEAL : '#64748b',
+          fontSize: 15,
+          cursor: 'pointer',
+          lineHeight: 1,
+        }}
       >
-        {copied ? '✓ Copied' : 'Copy'}
+        {copied ? '✓' : '⧉'}
       </button>
+    </div>
+  );
+}
+
+function SectionLabel(props: { children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 11, fontWeight: 700, color: '#64748b', textTransform: 'uppercase', letterSpacing: 0.6, margin: '16px 0 8px' }}>
+      {props.children}
     </div>
   );
 }
@@ -102,45 +155,53 @@ function CopyRow(props: { label: string; value: string; mono?: boolean }) {
 function PaymentDetails(props: { destination: Destination; reference: string; amount: string }) {
   const d = props.destination;
   const isBank = d.method === 'BANK_TRANSFER';
+
   return (
-    <div style={{ border: '1px solid #A6F4C5', background: '#F6FEF9', borderRadius: 10, padding: '16px 18px', marginTop: 16 }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: TEAL, marginBottom: 4 }}>
-        {isBank ? '🏦 Transfer to this account' : '📱 Send to this number'}
-      </div>
-      <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.55, marginBottom: 10 }}>
-        {d.displayName}
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 9, marginBottom: 4 }}>
+        <span style={{ fontSize: 20 }}>{isBank ? '🏦' : '📱'}</span>
+        <div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: NAVY, lineHeight: 1.3 }}>
+            {isBank ? 'Transfer to this account' : 'Send to this number'}
+          </div>
+          <div style={{ fontSize: 12.5, color: '#64748b' }}>{d.displayName}</div>
+        </div>
       </div>
 
-      <div>
-        {isBank ? (
-          <div>
-            <CopyRow label="Bank" value={d.bankName || ''} />
-            <CopyRow label="Account name" value={d.accountName || ''} />
-            <CopyRow label="Account number" value={d.accountNumber || ''} mono />
-            <CopyRow label="Branch" value={d.branchName || ''} />
-            <CopyRow label="Branch code" value={d.branchCode || ''} mono />
-            <CopyRow label="SWIFT" value={d.swiftCode || ''} mono />
-          </div>
-        ) : (
-          <div>
-            <CopyRow label="Send to" value={d.walletNumber || ''} mono />
-            <CopyRow label="Registered name" value={d.walletName || ''} />
-          </div>
-        )}
-        <CopyRow label="Amount" value={props.amount} mono />
-        <CopyRow label="Reference" value={props.reference} mono />
+      {/* Send exactly this, quoting exactly this. Placed first because
+          they are the two fields members most often get wrong. */}
+      <SectionLabel>Send</SectionLabel>
+      <div style={{ display: 'grid', gap: 8 }}>
+        <CopyField label="Amount" value={props.amount} mono emphasis />
+        <CopyField label="Payment reference" value={props.reference} mono emphasis />
       </div>
 
-      {/* The reference is what links their money to their account. A
-          transfer arriving without it has to be matched by hand, and
-          sometimes cannot be matched at all. */}
-      <div style={{ marginTop: 12, padding: '10px 12px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, fontSize: 12.5, color: '#92400e', lineHeight: 1.55 }}>
-        Use <strong>{props.reference}</strong> as the payment reference or narration. Without
+      <div style={{ marginTop: 10, padding: '11px 13px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 9, fontSize: 12.5, color: '#92400e', lineHeight: 1.6 }}>
+        Put <strong>{props.reference}</strong> in the reference or narration field. Without
         it we may not be able to match your payment to your account.
       </div>
 
+      <SectionLabel>{isBank ? 'Account details' : 'Wallet details'}</SectionLabel>
+      <div style={{ display: 'grid', gap: 8 }}>
+        {isBank ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <CopyField label="Account number" value={d.accountNumber || ''} mono emphasis />
+            <CopyField label="Account name" value={d.accountName || ''} />
+            <CopyField label="Bank" value={d.bankName || ''} />
+            <CopyField label="Branch" value={d.branchName || ''} />
+            <CopyField label="Branch code" value={d.branchCode || ''} mono />
+            <CopyField label="SWIFT / BIC" value={d.swiftCode || ''} mono />
+          </div>
+        ) : (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <CopyField label="Send to" value={d.walletNumber || ''} mono emphasis />
+            <CopyField label="Registered name" value={d.walletName || ''} />
+          </div>
+        )}
+      </div>
+
       {d.instructions ? (
-        <div style={{ marginTop: 10, fontSize: 12.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+        <div style={{ marginTop: 12, padding: '11px 13px', background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: 9, fontSize: 12.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
           {d.instructions}
         </div>
       ) : null}
@@ -392,6 +453,22 @@ export default function JoinFeePage() {
     }
   }, [userId, countryCode, provider, phone, needsPhone, showToast, startPolling]);
 
+  // Clean exit once the member has done their part. Without it they
+  // reach for the browser Back button, land on a half-finished payment
+  // screen, and reasonably assume something went wrong.
+  //
+  // location.replace rather than push: Back must not return to a
+  // logged-out payment page.
+  const handleLogout = useCallback(async () => {
+    try {
+      await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Cookies are cleared server-side; if the call fails the member
+      // still leaves the page and the session expires on its own.
+    }
+    window.location.replace('/login');
+  }, []);
+
   const handleDeclarePaid = useCallback(async () => {
     if (!attemptId) return;
     if (memberRef.trim().length < 2) {
@@ -603,10 +680,31 @@ export default function JoinFeePage() {
                   />
 
                   {declared ? (
-                    <div style={{ marginTop: 14, background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 8, padding: '14px 16px', fontSize: 13, color: NAVY, lineHeight: 1.6 }}>
-                      ✅ Thanks — we have your payment details. We&apos;ll confirm your
-                      membership once the money clears, usually within one to two working
-                      days. You can close this page; nothing else is needed from you.
+                    <div style={{ marginTop: 16, background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 10, padding: '18px 18px 16px', textAlign: 'center' }}>
+                      <div style={{ fontSize: 34, lineHeight: 1, marginBottom: 8 }}>✅</div>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: NAVY, marginBottom: 6 }}>
+                        That&apos;s everything from you
+                      </div>
+                      <div style={{ fontSize: 13.5, color: '#475569', lineHeight: 1.65, marginBottom: 16 }}>
+                        We have your payment details and will confirm your membership once
+                        the money reaches us — usually within one to two working days.
+                        We&apos;ll email you as soon as it&apos;s done.
+                      </div>
+                      {/* An explicit way out. Without one the member reaches
+                          for Back, lands on a half-finished payment screen,
+                          and assumes something failed. */}
+                      <button
+                        type="button"
+                        onClick={handleLogout}
+                        style={{ width: '100%', padding: 13, minHeight: 48, borderRadius: 9, border: 'none',
+                          background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: '#fff',
+                          fontSize: 15, fontWeight: 600, cursor: 'pointer' }}
+                      >
+                        Sign out
+                      </button>
+                      <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 10, lineHeight: 1.55 }}>
+                        You can close this page safely — nothing further is needed.
+                      </div>
                     </div>
                   ) : (
                     <div style={{ marginTop: 14, border: '1px solid #e2e8f0', borderRadius: 8, padding: '14px 16px', background: '#f8fafc' }}>
