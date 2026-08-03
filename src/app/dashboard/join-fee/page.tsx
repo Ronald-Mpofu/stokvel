@@ -270,6 +270,16 @@ export default function JoinFeePage() {
   const [memberPaidAt, setMemberPaidAt] = useState('');
   const [declaring, setDeclaring] = useState(false);
   const [declared, setDeclared] = useState(false);
+  // A manual payment already submitted and awaiting an admin. Detected
+  // on load so a returning member is never shown the payment form
+  // again — that is how duplicate transfers happen.
+  const [awaiting, setAwaiting] = useState<{
+    invoiceNo: string;
+    amount: string;
+    provider: string;
+    memberReference: string | null;
+    submittedAt: string | null;
+  } | null>(null);
   const [paid, setPaid] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [pollTimedOut, setPollTimedOut] = useState(false);
@@ -360,6 +370,37 @@ export default function JoinFeePage() {
         if (me.data.joiningFeePaid === true) setPaid(true);
         if (cfg.success) setConfig(cfg.data);
         else showToast('error', 'Could not load joining fee options');
+
+        // ── Already submitted a manual payment? ──────────────
+        // One extra request, and only when they are not already paid.
+        // Worth it: without this the member sees the payment form again
+        // and the natural next action is to transfer a second time.
+        if (me.data.joiningFeePaid !== true) {
+          try {
+            const st = await fetch(`/api/joining-fee?userId=${me.data.id}`);
+            const stJson = await st.json();
+            const d = stJson?.data;
+            if (
+              !cancelled && d &&
+              d.status === 'PENDING' &&
+              d.provider && d.provider !== 'CARD' &&
+              !d.verifiedAt &&
+              ['INITIATED', 'PENDING'].includes(String(d.attemptStatus))
+            ) {
+              setAwaiting({
+                invoiceNo: d.invoiceNo || '',
+                amount: d.currency && d.amount != null
+                  ? `${d.currency} ${Number(d.amount).toFixed(2)}`
+                  : '',
+                provider: d.provider,
+                memberReference: d.memberReference || null,
+                submittedAt: d.memberPaidAt || d.attemptCreatedAt || null,
+              });
+            }
+          } catch {
+            // Non-fatal — the POST guard refuses a duplicate anyway.
+          }
+        }
 
         // ── Returning from Stripe ────────────────────────────
         // Read the query string directly rather than useSearchParams,
@@ -552,6 +593,63 @@ export default function JoinFeePage() {
           >
             Continue →
           </button>
+        </div>
+      ) : awaiting ? (
+        <div style={{ background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 12, padding: '26px 22px', textAlign: 'center' }}>
+          <div style={{ fontSize: 42, lineHeight: 1 }}>🕓</div>
+          <h2 style={{ color: NAVY, margin: '10px 0 8px', fontSize: 19 }}>
+            Your payment is being checked
+          </h2>
+          <p style={{ color: '#475569', fontSize: 14, lineHeight: 1.65, margin: '0 0 18px' }}>
+            We have your payment details and are matching them against our account.
+            Your membership activates as soon as it clears — usually within one to two
+            working days — and we&apos;ll email you a receipt then.
+          </p>
+
+          {/* The strongest possible signal not to pay again. This screen
+              exists because middleware still routes unpaid tokens here,
+              and the obvious next action would otherwise be a second
+              transfer for the same year. */}
+          <div style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 9, padding: '12px 14px', fontSize: 13, color: '#92400e', lineHeight: 1.6, marginBottom: 18, textAlign: 'left' }}>
+            <strong>Please don&apos;t pay again.</strong> A second transfer would be for the
+            same membership year, and we&apos;d have to refund it manually.
+          </div>
+
+          <div style={{ textAlign: 'left', background: '#fff', border: '1px solid #e2e8f0', borderRadius: 9, padding: '12px 14px', marginBottom: 18 }}>
+            {awaiting.invoiceNo ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '5px 0', fontSize: 13 }}>
+                <span style={{ color: '#64748b' }}>Reference</span>
+                <span style={{ color: NAVY, fontWeight: 600, fontFamily: 'ui-monospace, monospace' }}>{awaiting.invoiceNo}</span>
+              </div>
+            ) : null}
+            {awaiting.amount ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '5px 0', fontSize: 13 }}>
+                <span style={{ color: '#64748b' }}>Amount</span>
+                <span style={{ color: NAVY, fontWeight: 600, fontFamily: 'ui-monospace, monospace' }}>{awaiting.amount}</span>
+              </div>
+            ) : null}
+            {awaiting.memberReference ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '5px 0', fontSize: 13 }}>
+                <span style={{ color: '#64748b' }}>Your reference</span>
+                <span style={{ color: NAVY, fontWeight: 600, fontFamily: 'ui-monospace, monospace' }}>{awaiting.memberReference}</span>
+              </div>
+            ) : null}
+            {awaiting.submittedAt ? (
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, padding: '5px 0', fontSize: 13 }}>
+                <span style={{ color: '#64748b' }}>Submitted</span>
+                <span style={{ color: NAVY, fontWeight: 600 }}>
+                  {new Date(awaiting.submittedAt).toLocaleDateString('en-AU', { day: 'numeric', month: 'long', year: 'numeric' })}
+                </span>
+              </div>
+            ) : null}
+          </div>
+
+          <button type="button" onClick={handleLogout} style={primaryBtn}>
+            Sign out
+          </button>
+          <div style={{ fontSize: 12, color: '#94a3b8', marginTop: 10, lineHeight: 1.55 }}>
+            Nothing further is needed from you.
+          </div>
         </div>
       ) : confirming ? (
         <div style={{ ...cardStyle, textAlign: 'center' }}>

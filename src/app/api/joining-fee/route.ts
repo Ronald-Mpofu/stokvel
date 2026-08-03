@@ -101,7 +101,9 @@ export async function GET(req: NextRequest) {
       // Invoice + latest attempt in one round trip each — indexed lookups
       const invoices: any[] = await prisma.$queryRawUnsafe(
         `SELECT i."id", i."invoiceNo", i."currency", i."amount", i."status", i."paidAt",
-                a."id" AS "attemptId", a."provider", a."status" AS "attemptStatus", a."failureReason"
+                a."id" AS "attemptId", a."provider", a."status" AS "attemptStatus", a."failureReason",
+                a."memberReference", a."memberPaidAt", a."createdAt" AS "attemptCreatedAt",
+                a."verifiedAt"
          FROM "JoiningFeeInvoice" i
          LEFT JOIN LATERAL (
            SELECT * FROM "PaymentAttempt" pa
@@ -259,6 +261,45 @@ export async function POST(req: NextRequest) {
           'You can still take a Community Membership if you want to see groups advertising ' +
           'for new members — it is charged annually and is not refundable.',
         data: { mayOptIn: true },
+      }, { status: 409 });
+    }
+
+    // ── Already awaiting verification? ────────────────────────
+    // A member whose bank transfer is sitting unverified must not be
+    // walked through payment again. Middleware still sends them here
+    // (their token says unpaid, and it stays that way until an admin
+    // confirms), so without this check the obvious next action is to
+    // pay a second time — for the same year, with no automatic refund.
+    const pendingAttempt: any[] = await prisma.$queryRawUnsafe(
+      `SELECT pa."id", pa."provider", pa."status", pa."memberReference", pa."memberPaidAt",
+              pa."createdAt", inv."invoiceNo", inv."amount", inv."currency"
+       FROM "PaymentAttempt" pa
+       LEFT JOIN "JoiningFeeInvoice" inv ON inv."id" = pa."invoiceId"
+       WHERE pa."userId" = $1
+         AND pa."provider" <> 'CARD'
+         AND pa."verifiedAt" IS NULL
+         AND pa."status" IN ('INITIATED', 'PENDING')
+       ORDER BY pa."createdAt" DESC
+       LIMIT 1`,
+      userId
+    );
+    if (pendingAttempt.length) {
+      const p = pendingAttempt[0];
+      return NextResponse.json({
+        success: false,
+        code: 'PAYMENT_AWAITING_VERIFICATION',
+        error:
+          'You already have a payment awaiting confirmation. Please don\u2019t pay again — ' +
+          'we\u2019ll activate your membership as soon as it clears.',
+        data: {
+          attemptId: p.id,
+          provider: p.provider,
+          invoiceNo: p.invoiceNo,
+          amount: p.amount != null ? Number(p.amount) : null,
+          currency: p.currency,
+          memberReference: p.memberReference,
+          submittedAt: p.memberPaidAt || p.createdAt,
+        },
       }, { status: 409 });
     }
 
