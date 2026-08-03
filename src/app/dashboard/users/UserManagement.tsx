@@ -235,9 +235,228 @@ function EmailModal({ user, onClose, onSent }: { user: User; onClose: () => void
   )
 }
 
+// ── Subscription tab ──────────────────────────────────────────
+// Module level, like every other helper here. Defined inside UserDetail
+// it would remount on each keystroke and lose focus in the reference
+// field below.
+//
+// VERIFYING A PAYMENT CREATES MONEY. It activates a membership and
+// writes an immutable ledger row — the manual equivalent of a Stripe
+// webhook. The API restricts it to SYSTEM_ADMIN and NATIONAL_ADMIN;
+// canReconcile mirrors that so the form is simply absent for anyone
+// else, rather than shown and then rejected.
+//
+// There is deliberately no "un-verify". Transaction is append-only, so
+// a mistake is corrected with a reversing entry, not by editing history.
+function SubscriptionTab({ user, onUpdate }: { user: User; onUpdate: (msg: string) => void }) {
+  const [data, setData]       = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy]       = useState(false)
+  const [openId, setOpenId]   = useState<string>('')
+  const [ref, setRef]         = useState('')
+  const [received, setReceived] = useState('')
+  const [note, setNote]       = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const res  = await fetch(`/api/users/${user.id}/subscription`)
+      const json = await res.json()
+      if (json.success) setData(json.data)
+      else onUpdate(json.error || 'Could not load subscription')
+    } catch { onUpdate('Could not load subscription') }
+    finally { setLoading(false) }
+  }, [user.id, onUpdate])
+
+  useEffect(() => { load() }, [load])
+
+  async function verify(attemptId: string) {
+    if (!ref.trim()) return onUpdate('Enter the reference from the bank statement')
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/users/${user.id}/subscription`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'VERIFY_PAYMENT',
+          attemptId,
+          verifiedReference: ref.trim(),
+          receivedAmount: received.trim() ? Number(received) : undefined,
+          note: note.trim() || undefined,
+        }),
+      })
+      const json = await res.json()
+      onUpdate(json.message || json.error || 'Done')
+      if (json.success) {
+        setOpenId(''); setRef(''); setReceived(''); setNote('')
+        setLoading(true); await load()
+      }
+    } catch { onUpdate('Verification failed') }
+    finally { setBusy(false) }
+  }
+
+  async function sendReceipt() {
+    setBusy(true)
+    try {
+      const res = await fetch(`/api/users/${user.id}/subscription`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'SEND_RECEIPT' }),
+      })
+      const json = await res.json()
+      onUpdate(json.message || json.error || 'Done')
+      if (json.success) { setLoading(true); await load() }
+    } catch { onUpdate('Could not send receipt') }
+    finally { setBusy(false) }
+  }
+
+  if (loading) {
+    return <div style={{ padding:'20px', fontSize:'13px', color:'#64748B' }}>Loading subscription…</div>
+  }
+
+  const m = data?.membership
+  const hasPaidInvoice = (data?.invoices || []).some((i: any) => i.status === 'PAID')
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'18px' }}>
+
+      {/* Current membership */}
+      <div style={{ border:'1px solid #E2E8F0', borderRadius:'12px', overflow:'hidden' }}>
+        <div style={{ padding:'10px 14px', background:'#F8FAFC', borderBottom:'1px solid #E2E8F0',
+          fontSize:'11px', fontWeight:'700', color:'#64748B', textTransform:'uppercase' }}>
+          Membership
+        </div>
+        <div style={{ padding:'14px' }}>
+          {!m ? (
+            <div style={{ fontSize:'13px', color:'#64748B' }}>
+              No Community Membership on this account.
+              {user.subscriptionStatus === 'EXEMPT'
+                ? ' This member is exempt — no fee is due.'
+                : ' No fee has been paid.'}
+            </div>
+          ) : (
+            <div style={{ display:'grid', gridTemplateColumns:'180px 1fr', gap:'8px', fontSize:'13px' }}>
+              <div style={{ color:'#64748B' }}>Status</div>
+              <div style={{ color:NAVY, fontWeight:600 }}>
+                {m.cancelAtPeriodEnd ? 'Active — will not renew' : m.status}
+              </div>
+              <div style={{ color:'#64748B' }}>Amount paid</div>
+              <div style={{ color:NAVY }}>
+                {data?.invoices?.[0] ? `${data.invoices[0].currency} ${data.invoices[0].amount.toFixed(2)}` : '—'}
+              </div>
+              <div style={{ color:'#64748B' }}>Started</div>
+              <div style={{ color:NAVY }}>{new Date(m.startedAt).toLocaleDateString('en-AU', { day:'numeric', month:'long', year:'numeric' })}</div>
+              <div style={{ color:'#64748B' }}>Next payment due</div>
+              <div style={{ color:NAVY, fontWeight:600 }}>{new Date(m.expiresAt).toLocaleDateString('en-AU', { day:'numeric', month:'long', year:'numeric' })}</div>
+              <div style={{ color:'#64748B' }}>Automatic renewal</div>
+              <div style={{ color:NAVY }}>{m.autoRenew ? 'On (card)' : 'Off — manual renewal'}</div>
+            </div>
+          )}
+          {hasPaidInvoice ? (
+            <button onClick={sendReceipt} disabled={busy}
+              style={{ marginTop:'14px', padding:'8px 14px', borderRadius:'8px', border:`1px solid ${TEAL}`,
+                background:'white', color:TEAL, fontSize:'12px', fontWeight:'600', cursor:busy?'not-allowed':'pointer' }}>
+              {busy ? 'Working…' : '📧 Email receipt'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {/* Payments */}
+      <div style={{ border:'1px solid #E2E8F0', borderRadius:'12px', overflow:'hidden' }}>
+        <div style={{ padding:'10px 14px', background:'#F8FAFC', borderBottom:'1px solid #E2E8F0',
+          fontSize:'11px', fontWeight:'700', color:'#64748B', textTransform:'uppercase' }}>
+          Payments
+        </div>
+        <div style={{ padding:'6px 0' }}>
+          {!data?.attempts?.length ? (
+            <div style={{ padding:'14px', fontSize:'13px', color:'#64748B' }}>No payment attempts recorded.</div>
+          ) : data.attempts.map((a: any) => (
+            <div key={a.id} style={{ padding:'12px 14px', borderBottom:'1px solid #F1F5F9' }}>
+              <div style={{ display:'flex', flexWrap:'wrap', alignItems:'center', gap:'8px' }}>
+                <span style={{ fontSize:'13px', fontWeight:'600', color:NAVY }}>
+                  {a.currency} {a.amount?.toFixed(2)}
+                </span>
+                <Badge text={a.provider} colors={['#F1F5F9','#475569']} />
+                <Badge
+                  text={a.verifiedAt ? 'VERIFIED' : a.status}
+                  colors={a.verifiedAt ? ['#D1FADF','#0F6E56']
+                    : a.awaitingVerification ? ['#DBEAFE','#1E40AF'] : ['#FEE4E2','#B42318']}
+                />
+                <span style={{ fontSize:'11px', color:'#94A3B8', marginLeft:'auto' }}>
+                  {new Date(a.createdAt).toLocaleDateString('en-AU', { day:'numeric', month:'short', year:'numeric' })}
+                </span>
+              </div>
+
+              <div style={{ fontSize:'11px', color:'#64748B', marginTop:'5px', lineHeight:1.6 }}>
+                {a.invoiceNo ? <>Invoice <strong>{a.invoiceNo}</strong>. </> : null}
+                {a.memberReference ? <>Member&apos;s reference: <strong>{a.memberReference}</strong>. </> : null}
+                {a.verifiedAt ? (
+                  <>Verified by {a.verifiedByName || 'admin'} on{' '}
+                    {new Date(a.verifiedAt).toLocaleDateString('en-AU', { day:'numeric', month:'short', year:'numeric' })}
+                    {a.verifiedReference ? <> against <strong>{a.verifiedReference}</strong></> : null}
+                    {a.receivedAmount != null && a.receivedAmount !== a.amount
+                      ? <> — received {a.currency} {a.receivedAmount.toFixed(2)}</>
+                      : null}.
+                  </>
+                ) : null}
+                {a.failureReason ? <span style={{ color:RED }}>{a.failureReason}</span> : null}
+              </div>
+
+              {a.awaitingVerification && data.canReconcile ? (
+                openId === a.id ? (
+                  <div style={{ marginTop:'10px', padding:'12px', background:'#F8FAFC', border:'1px solid #E2E8F0', borderRadius:'8px' }}>
+                    <div style={{ fontSize:'11px', color:'#64748B', marginBottom:'8px', lineHeight:1.55 }}>
+                      Only confirm once you can see this payment on the bank or wallet
+                      statement. This activates the membership and writes a permanent
+                      ledger entry — it cannot be undone, only reversed.
+                    </div>
+                    <input value={ref} onChange={e => setRef(e.target.value)}
+                      placeholder="Reference on the statement"
+                      style={{ width:'100%', padding:'9px 11px', border:'1.5px solid #E2E8F0', borderRadius:'7px',
+                        fontSize:'13px', outline:'none', boxSizing:'border-box', marginBottom:'8px' }} />
+                    <input value={received} onChange={e => setReceived(e.target.value)}
+                      placeholder={`Amount received (leave blank if exactly ${a.amount?.toFixed(2)})`}
+                      inputMode="decimal"
+                      style={{ width:'100%', padding:'9px 11px', border:'1.5px solid #E2E8F0', borderRadius:'7px',
+                        fontSize:'13px', outline:'none', boxSizing:'border-box', marginBottom:'8px' }} />
+                    <input value={note} onChange={e => setNote(e.target.value)}
+                      placeholder="Note (optional)"
+                      style={{ width:'100%', padding:'9px 11px', border:'1.5px solid #E2E8F0', borderRadius:'7px',
+                        fontSize:'13px', outline:'none', boxSizing:'border-box', marginBottom:'10px' }} />
+                    <div style={{ display:'flex', gap:'8px' }}>
+                      <button onClick={() => { setOpenId(''); setRef(''); setReceived(''); setNote('') }} disabled={busy}
+                        style={{ flex:1, padding:'9px', borderRadius:'7px', border:'none', background:'#F1F5F9',
+                          color:'#475569', fontSize:'12px', fontWeight:'600', cursor:'pointer' }}>
+                        Cancel
+                      </button>
+                      <button onClick={() => verify(a.id)} disabled={busy || !ref.trim()}
+                        style={{ flex:2, padding:'9px', borderRadius:'7px', border:'none',
+                          background: busy || !ref.trim() ? '#94A3B8' : `linear-gradient(135deg,${NAVY},${TEAL})`,
+                          color:'white', fontSize:'12px', fontWeight:'600',
+                          cursor: busy || !ref.trim() ? 'not-allowed' : 'pointer' }}>
+                        {busy ? 'Verifying…' : 'Confirm payment received'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <button onClick={() => setOpenId(a.id)}
+                    style={{ marginTop:'9px', padding:'7px 13px', borderRadius:'7px', border:`1px solid ${TEAL}`,
+                      background:'white', color:TEAL, fontSize:'12px', fontWeight:'600', cursor:'pointer' }}>
+                    ✓ Mark as received
+                  </button>
+                )
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── User Detail Panel ─────────────────────────────────────────
 function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: () => void; onUpdate: (msg: string) => void; onEmail: () => void }) {
-  const [tab, setTab]       = useState<'overview'|'actions'|'security'>('overview')
+  const [tab, setTab]       = useState<'overview'|'subscription'|'actions'|'security'>('overview')
   const [saving, setSaving] = useState(false)
   const [form, setForm]     = useState({ role: user.role, status: user.status, kycStatus: user.kycStatus, tier: user.tier })
   const [showDeleteModal, setShowDeleteModal] = useState(false)
@@ -301,9 +520,10 @@ function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: (
   }
 
   const TABS = [
-    { id:'overview', label:'👤 Overview'  },
-    { id:'actions',  label:'⚙️ Manage'    },
-    { id:'security', label:'🔒 Security'  },
+    { id:'overview',     label:'👤 Overview'     },
+    { id:'subscription', label:'💳 Subscription' },
+    { id:'actions',      label:'⚙️ Manage'       },
+    { id:'security',     label:'🔒 Security'     },
   ]
 
   return (
@@ -368,6 +588,10 @@ function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: (
       <div style={{ background:'#F8FAFC', padding:'20px', minHeight:'280px' }}>
 
         {/* OVERVIEW */}
+        {tab === 'subscription' && (
+          <SubscriptionTab user={user} onUpdate={onUpdate} />
+        )}
+
         {tab === 'overview' && (
           <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'16px' }}>
             {/* Personal info */}
