@@ -28,7 +28,7 @@
 
 import { randomBytes, createHash } from 'crypto'
 import prisma from '@/lib/prisma/client'
-import { sendNotification } from '@/lib/notifications/engine'
+import { sendNotification, textToHtmlWithButton } from '@/lib/notifications/engine'
 
 /** Hours a verification link stays valid. */
 export const TOKEN_TTL_HOURS = 48
@@ -105,18 +105,34 @@ export async function sendVerificationEmail(
     const link = `${APP_URL}/verify-email?token=${raw}`
     const name = String(fullName || 'there').split(' ')[0]
 
+    // The plain-text body still carries the URL, because it doubles as
+    // the text/plain part and as the fallback for any client that
+    // refuses HTML.
+    const body =
+      `Hi ${name},\n\n` +
+      `Welcome to Windfall Community Deals. Please confirm this is your email address — ` +
+      `it will also be the address you sign in with.\n\n` +
+      `${link}\n\n` +
+      `The link is valid for ${TOKEN_TTL_HOURS} hours.\n\n` +
+      `If you didn't create an account with us, you can ignore this message.`
+
     const res = await sendNotification({
       userId,
       type: 'EMAIL_VERIFICATION',
       subject: 'Confirm your email address',
-      body:
+      body,
+      // Explicit HTML with a real button. Without this the engine falls
+      // back to textToHtml, which now linkifies but still gives a bare
+      // URL rather than something obviously clickable.
+      html: textToHtmlWithButton(
         `Hi ${name},\n\n` +
-        `Welcome to Windfall Community Deals. Please confirm this is your email address ` +
-        `by opening the link below:\n\n${link}\n\n` +
-        `The link is valid for ${TOKEN_TTL_HOURS} hours.\n\n` +
-        `You can carry on setting up your account in the meantime — confirming your email ` +
-        `is only needed before you start contributing.\n\n` +
-        `If you didn't create an account with us, you can ignore this message.`,
+        `Welcome to Windfall Community Deals. Please confirm this is your email address — ` +
+        `it will also be the address you sign in with.\n\n` +
+        `The link is valid for ${TOKEN_TTL_HOURS} hours. If you didn't create an account ` +
+        `with us, you can ignore this message.`,
+        'Confirm your email address',
+        { label: 'Confirm my email', url: link }
+      ),
       channels: ['EMAIL'],
       email,
       fullName,

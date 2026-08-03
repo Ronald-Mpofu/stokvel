@@ -304,10 +304,47 @@ async function sendSMS({ to, message }: { to: string; message: string }) {
 }
 
 // ── Email HTML wrapper ────────────────────────────────────────
+
+/**
+ * Escape HTML before interpolation.
+ *
+ * Bodies carry user-supplied text — group names, member names, the
+ * personal message on an invitation. v1 interpolated them raw, so a
+ * group called `<script>` or an admin's announcement containing markup
+ * went straight into the message. Escaping first closes that.
+ */
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+/**
+ * Turn bare URLs into anchors.
+ *
+ * Templates write links as plain text so the SMS and plain-text bodies
+ * read properly. Without this they arrived in the HTML email as
+ * unclickable text — the member had to select and copy the URL by hand.
+ *
+ * Runs AFTER escaping, and only matches the escaped forms, so it cannot
+ * be used to inject an attribute.
+ */
+function linkify(escaped: string): string {
+  return escaped.replace(
+    /(https?:\/\/[^\s<>"']+)/g,
+    '<a href="$1" style="color:#0F6E56;text-decoration:underline;word-break:break-all">$1</a>'
+  )
+}
+
 export function textToHtml(body: string, title: string): string {
   const TEAL = '#0F6E56'; const NAVY = '#0D2137'
   const lines = body.split('\n').map(l =>
-    l.trim() ? `<p style="margin:0 0 10px;font-size:14px;color:#374151;line-height:1.6">${l}</p>` : '<br>'
+    l.trim()
+      ? `<p style="margin:0 0 10px;font-size:14px;color:#374151;line-height:1.6">${linkify(escapeHtml(l))}</p>`
+      : '<br>'
   ).join('')
 
   return `<!DOCTYPE html>
@@ -316,9 +353,66 @@ export function textToHtml(body: string, title: string): string {
   <div style="max-width:560px;margin:40px auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)">
     <div style="background:linear-gradient(135deg,${NAVY},${TEAL});padding:28px 36px;text-align:center">
       <div style="font-size:24px;margin-bottom:6px">🔄</div>
-      <h1 style="color:white;font-size:18px;font-weight:700;margin:0">${title}</h1>
+      <h1 style="color:white;font-size:18px;font-weight:700;margin:0">${escapeHtml(title)}</h1>
     </div>
     <div style="padding:28px 36px">${lines}</div>
+    <div style="background:#F8FAFC;padding:16px 36px;border-top:1px solid #E2E8F0;text-align:center">
+      <p style="font-size:11px;color:#94A3B8;margin:0">Windfall Community Deals · You're receiving this because you're a member.</p>
+    </div>
+  </div>
+</body></html>`
+}
+
+/**
+ * Branded wrapper with a primary action button.
+ *
+ * Table-based rather than flex: Outlook renders through Word's HTML
+ * engine, which does not support flexbox. Every style is inline, since
+ * most clients strip <style> blocks.
+ *
+ * The raw URL is repeated below the button — some clients and most
+ * corporate gateways strip or rewrite buttons, and a member who cannot
+ * click still needs to be able to copy.
+ */
+export function textToHtmlWithButton(
+  body: string,
+  title: string,
+  action: { label: string; url: string }
+): string {
+  const TEAL = '#0F6E56'; const NAVY = '#0D2137'
+  const lines = body.split('\n').map(l =>
+    l.trim()
+      ? `<p style="margin:0 0 10px;font-size:14px;color:#374151;line-height:1.6">${linkify(escapeHtml(l))}</p>`
+      : '<br>'
+  ).join('')
+
+  const safeUrl = escapeHtml(action.url)
+
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#F8FAFC;font-family:system-ui,sans-serif">
+  <div style="max-width:560px;margin:40px auto;background:white;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,0.08)">
+    <div style="background:linear-gradient(135deg,${NAVY},${TEAL});padding:28px 36px;text-align:center">
+      <div style="font-size:24px;margin-bottom:6px">🔄</div>
+      <h1 style="color:white;font-size:18px;font-weight:700;margin:0">${escapeHtml(title)}</h1>
+    </div>
+    <div style="padding:28px 36px">
+      ${lines}
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px auto 8px">
+        <tr>
+          <td align="center" style="border-radius:10px;background:${TEAL}">
+            <a href="${safeUrl}"
+               style="display:inline-block;padding:14px 32px;font-size:15px;font-weight:600;color:#ffffff;text-decoration:none;border-radius:10px">
+              ${escapeHtml(action.label)}
+            </a>
+          </td>
+        </tr>
+      </table>
+      <p style="margin:16px 0 0;font-size:12px;color:#94A3B8;line-height:1.6;text-align:center">
+        Button not working? Copy this link into your browser:<br>
+        <a href="${safeUrl}" style="color:${TEAL};word-break:break-all">${safeUrl}</a>
+      </p>
+    </div>
     <div style="background:#F8FAFC;padding:16px 36px;border-top:1px solid #E2E8F0;text-align:center">
       <p style="font-size:11px;color:#94A3B8;margin:0">Windfall Community Deals · You're receiving this because you're a member.</p>
     </div>
