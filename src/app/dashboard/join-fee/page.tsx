@@ -348,26 +348,53 @@ export default function JoinFeePage() {
     }, POLL_INTERVAL_MS);
   }, [checkOnce, onConfirmed, stopPolling]);
 
-  // Exactly two parallel requests on load: session + fee config
+  // Two parallel requests on load: session refresh + fee config.
+  //
+  // REFRESH rather than /api/auth/me, for two reasons:
+  //
+  //   1. It re-reads joiningFeePaid from the DATABASE and rotates the
+  //      token. Manual bank payments are verified admin-side while the
+  //      member is offline, so their token still says unpaid when they
+  //      next sign in. Refreshing here means a verified member passes
+  //      straight through instead of being shown a payment page.
+  //
+  //   2. /api/auth/me does not return joiningFeePaid at all — it is a
+  //      raw-SQL column outside the Prisma select. Reading it from
+  //      there yields undefined, which reads as "unpaid".
+  //
+  // Falls back to /api/auth/me if refresh fails, so a session without a
+  // usable refresh cookie still resolves rather than bouncing to login.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [meRes, configRes] = await Promise.all([
-          fetch('/api/auth/me'),
+        const [refRes, configRes] = await Promise.all([
+          fetch('/api/auth/refresh', { method: 'POST' }),
           fetch('/api/joining-fee?type=config'),
         ]);
-        const [me, cfg] = await Promise.all([meRes.json(), configRes.json()]);
+        const [ref, cfg] = await Promise.all([
+          refRes.json().catch(() => ({ success: false })),
+          configRes.json(),
+        ]);
         if (cancelled) return;
 
-        if (!me.success || !me.data?.id) {
-          router.replace('/login?redirect=/dashboard/join-fee');
-          return;
+        let sess: any = ref?.success ? ref.data?.user : null;
+
+        if (!sess?.id) {
+          const meRes = await fetch('/api/auth/me');
+          const me = await meRes.json().catch(() => ({ success: false }));
+          if (cancelled) return;
+          if (!me.success || !me.data?.id) {
+            router.replace('/login?redirect=/dashboard/join-fee');
+            return;
+          }
+          sess = me.data;
         }
-        setUserId(me.data.id);
-        setRole(me.data.role || '');
-        roleRef.current = me.data.role || '';
-        if (me.data.joiningFeePaid === true) setPaid(true);
+
+        setUserId(sess.id);
+        setRole(sess.role || '');
+        roleRef.current = sess.role || '';
+        if (sess.joiningFeePaid === true) setPaid(true);
         if (cfg.success) setConfig(cfg.data);
         else showToast('error', 'Could not load joining fee options');
 
@@ -375,9 +402,9 @@ export default function JoinFeePage() {
         // One extra request, and only when they are not already paid.
         // Worth it: without this the member sees the payment form again
         // and the natural next action is to transfer a second time.
-        if (me.data.joiningFeePaid !== true) {
+        if (sess.joiningFeePaid !== true) {
           try {
-            const st = await fetch(`/api/joining-fee?userId=${me.data.id}`);
+            const st = await fetch(`/api/joining-fee?userId=${sess.id}`);
             const stJson = await st.json();
             const d = stJson?.data;
             if (
@@ -401,6 +428,8 @@ export default function JoinFeePage() {
             // Non-fatal — the POST guard refuses a duplicate anyway.
           }
         }
+
+        const me = { success: true, data: sess } as any;
 
         // ── Returning from Stripe ────────────────────────────
         // Read the query string directly rather than useSearchParams,
