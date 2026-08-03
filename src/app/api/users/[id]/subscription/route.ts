@@ -256,6 +256,36 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
       actorUserId: session.id,
     })
 
+    // ── Legacy joining-fee columns ────────────────────────────
+    // MUST be written here as well as CommunityMembership. Middleware
+    // gates on the JWT's joiningFeePaid claim, which is minted from
+    // User.joiningFeePaid — not from CommunityMembership. Without this
+    // the member is verified, has an active membership, and is STILL
+    // bounced to the payment page on every sign-in.
+    //
+    // settleAttempt in the Stripe webhook writes both for exactly this
+    // reason; the manual rail has to match it or the two payment paths
+    // produce different login behaviour. Both writes come out together
+    // at phase 5, when the resolver replaces the claim.
+    const expiresAt = membership.ok && membership.membership
+      ? new Date(membership.membership.expiresAt)
+      : (() => { const d = new Date(); d.setMonth(d.getMonth() + 12); return d })()
+
+    await prisma.$executeRawUnsafe(
+      `UPDATE "User"
+       SET "joiningFeePaid" = true,
+           "joiningFeePaidAt" = now(),
+           "joiningFeeInvoiceId" = COALESCE($2, "joiningFeeInvoiceId"),
+           "joiningFeeExpiresAt" = $3::timestamptz,
+           "updatedAt" = now()
+       WHERE "id" = $1`,
+      userId, attempt.invoiceId ?? null, expiresAt.toISOString()
+    ).catch((e: any) => {
+      // Loud, because this is the difference between a member who can
+      // sign in and one who cannot.
+      console.error('VERIFY_PAYMENT: legacy fee columns not written', userId, e?.message)
+    })
+
     await prisma.auditLog.create({
       data: {
         userId: session.id,
