@@ -128,17 +128,30 @@ function isStaticAsset(pathname: string): boolean {
 // ── Admin roles — can access dashboard ───────────────────────
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR']
 
-// ── Joining fee gate ──────────────────────────────────────────
-// Staff roles never pay. Community roles (MEMBER, GROUP_ADMIN,
-// TREASURER, INVESTMENT_MANAGER) must pay before using the platform.
-const FEE_EXEMPT_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'AUDITOR']
+// ── Joining fee gate — REMOVED at phase 5 ─────────────────────
+// This gate redirected any user whose JWT carried joiningFeePaid=false
+// to the fee page, and 402'd their API calls. Two reasons it had to go:
+//
+//   1. IT BROKE RULE 3b. An invited member never pays a joining fee, so
+//      joiningFeePaid stays false for them permanently. They were
+//      redirected to the payment page on EVERY page load, forever, with
+//      no way through. The people the invitation flow exists to serve
+//      were the people it locked out.
+//
+//   2. IT READ A STALE CLAIM. joiningFeePaid is minted at login and
+//      lives 15 minutes. A manual bank payment is verified admin-side
+//      while the member is offline, so their token said unpaid long
+//      after they had paid.
+//
+// Entitlement is now resolved per request against live database state
+// by src/lib/entitlement, which covers staff exemption, group
+// membership (rule 3b), Community Membership and group subscription in
+// one place. Middleware keeps doing what the Edge runtime is good at:
+// authentication and role routing.
+//
+// FEE_PAGE is retained — it is still a real page, reachable by every
+// authenticated user, and registration still routes new members there.
 const FEE_PAGE = '/dashboard/join-fee'
-
-// APIs an unpaid user must still reach — including the ones they need
-// in order to pay. /api/payments/ MUST be exempt: an unpaid user calling
-// checkout to clear their fee would otherwise be blocked by the very
-// gate they are trying to clear. These routes enforce their own auth.
-const FEE_GATE_EXEMPT_PATHS = ['/api/auth/', '/api/joining-fee', '/api/payments/']
 
 // ── Middleware ────────────────────────────────────────────────
 export async function middleware(req: NextRequest) {
@@ -163,7 +176,6 @@ export async function middleware(req: NextRequest) {
   const claims = token ? await verifyEdgeAccessToken(token) : null
 
   const role = claims?.role ?? null
-  const feePaid = claims?.joiningFeePaid
 
   // ── API route protection ──────────────────────────────────
   if (isApiRoute(pathname)) {
@@ -185,20 +197,10 @@ export async function middleware(req: NextRequest) {
       )
     }
 
-    // Joining fee gate for APIs — unpaid users may only reach auth
-    // and joining-fee endpoints. Prevents bypassing the page gate by
-    // calling APIs directly.
-    if (
-      feePaid === false &&
-      !FEE_EXEMPT_ROLES.includes(role) &&
-      !FEE_GATE_EXEMPT_PATHS.some(p => pathname.startsWith(p))
-    ) {
-      return NextResponse.json(
-        { success: false, error: 'Joining fee payment required before using the platform.' },
-        { status: 402 }
-      )
-    }
-
+    // Entitlement is NOT checked here. It needs live database state,
+    // which the Edge runtime cannot reach. Mutating routes call
+    // requireEntitlement() from src/lib/entitlement instead, which
+    // returns 402 when the caller cannot transact.
     return NextResponse.next()
   }
 
@@ -216,13 +218,11 @@ export async function middleware(req: NextRequest) {
     return NextResponse.next()
   }
 
-  // ── Joining fee gate ──────────────────────────────────────
-  // Explicitly-unpaid community users go to the fee page first.
-  // feePaid === undefined (older token) passes — refresh/login
-  // will pick up the claim.
-  if (feePaid === false && !FEE_EXEMPT_ROLES.includes(role)) {
-    return NextResponse.redirect(new URL(FEE_PAGE, req.url))
-  }
+  // NO fee redirect here any more — see the note above FEE_PAGE.
+  // A member without an active membership now lands on their portal
+  // read-only, sees AccountStatusBanner explaining why, and follows a
+  // link to renew if one is due. Being unable to contribute is not a
+  // reason to hide someone's own savings from them.
 
   // ── Dashboard route — admin roles only ───────────────────
   if (isAdminRoute(pathname)) {

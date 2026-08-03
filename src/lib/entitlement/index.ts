@@ -93,8 +93,13 @@ const CURRENT_SUBSCRIPTION_STATUSES = ['active', 'trialing', 'past_due']
  */
 const GROUP_SUBSCRIPTION_GRACE_DAYS = 30
 
-/** Phase 5 flips this. While false, nothing is enforced. */
-export const ENTITLEMENT_ENFORCED = false
+/**
+ * PHASE 5 — enforcement is LIVE.
+ *
+ * Set back to false to disable everything below in one deploy. That is
+ * the rollback: no code changes, no migration.
+ */
+export const ENTITLEMENT_ENFORCED = true
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -109,6 +114,7 @@ export type EntitlementReason =
   | 'GROUP_SUBSCRIPTION_LAPSED'
   | 'USER_NOT_FOUND'
   | 'USER_BLACKLISTED'
+  | 'RESOLVER_ERROR'
 
 export type Entitlement = {
   userId: string
@@ -268,15 +274,20 @@ async function resolve(userId: string): Promise<Entitlement> {
     )
     row = rows?.[0]
   } catch (e: any) {
-    // Fail OPEN in shadow mode. A resolver fault must never be the
-    // reason someone cannot use the platform while nothing is being
-    // enforced anyway. Revisit this posture at phase 5.
-    console.error('resolveEntitlement query error:', e?.message)
+    // ── FAIL CLOSED ───────────────────────────────────────────
+    // In shadow mode this failed OPEN, which was right: nothing was
+    // enforced, so a resolver fault should not have been the reason
+    // someone could not use the platform.
+    //
+    // Under enforcement the calculus inverts. canTransact gates
+    // contributions, loans and payouts, and a database blip must not
+    // become a licence to move money without an entitlement check.
+    // Read access is unaffected — canAccessPortal stays true, so the
+    // member still sees every record of their own money.
+    console.error('resolveEntitlement query error (failing closed):', e?.message)
     return {
-      ...denied(userId, 'USER_NOT_FOUND'),
+      ...denied(userId, 'RESOLVER_ERROR'),
       canAccessPortal: true,
-      canTransact: true,
-      isEntitled: true,
     }
   }
 
@@ -351,7 +362,10 @@ export async function logShadowMiss(
   path: string | null
 ): Promise<void> {
   if (ent.isEntitled) return
-  if (ENTITLEMENT_ENFORCED) return
+  // Deliberately NOT skipped under enforcement. In shadow mode this was
+  // evidence for the truth table; now it is the record of who is
+  // actually being restricted — the first thing anyone will want when a
+  // member says they cannot contribute.
 
   try {
     await prisma.$executeRawUnsafe(
@@ -420,16 +434,64 @@ export async function getEntitlementFromRequest(
 }
 
 /**
- * Phase 5 API guard. Currently a NO-OP by design — it resolves, logs,
- * and returns null so every caller proceeds. Adding this to routes NOW
- * means phase 5 is a one-line change (ENTITLEMENT_ENFORCED = true)
- * rather than an edit to every route file.
+ * Guard for MUTATING API routes. Returns a response to send, or null to
+ * proceed:
+ *
+ *   const blocked = await requireEntitlement(req)
+ *   if (blocked) return blocked
+ *
+ * Read routes should NOT use this. The read-only floor is deliberate —
+ * a member who has lapsed keeps full sight of their contributions,
+ * stakes, loan balances and statements. Only the ability to move money
+ * is withheld.
+ *
+ * 402 Payment Required rather than 403: the caller is authenticated and
+ * permitted in principle, and the resolution is a payment. The reasons
+ * array is returned so the UI can say WHICH condition failed instead of
+ * showing a generic refusal.
  */
 export async function requireEntitlement(
   req: NextRequest
-): Promise<{ blocked: false; entitlement: Entitlement | null }> {
+): Promise<NextResponse | null> {
   const entitlement = await getEntitlementFromRequest(req)
-  // Phase 5: when ENTITLEMENT_ENFORCED and !entitlement?.canTransact,
-  // return a 402 with reasons and the renewal path.
-  return { blocked: false, entitlement }
+
+  if (!ENTITLEMENT_ENFORCED) return null
+
+  if (!entitlement) {
+    return NextResponse.json(
+      { success: false, error: 'Unauthorised. Please log in.' },
+      { status: 401 }
+    )
+  }
+
+  if (entitlement.reasons.includes('USER_BLACKLISTED')) {
+    return NextResponse.json(
+      { success: false, code: 'ACCOUNT_SUSPENDED', error: 'This account has been suspended.' },
+      { status: 403 }
+    )
+  }
+
+  if (!entitlement.canTransact) {
+    // Group billing is the one case where the member did nothing wrong,
+    // so it gets its own message and no payment prompt — there is
+    // nothing for them to pay.
+    const groupLapsed = entitlement.subscriptionLapsedGroupIds.length > 0
+
+    return NextResponse.json(
+      {
+        success: false,
+        code: groupLapsed ? 'GROUP_SUBSCRIPTION_LAPSED' : 'MEMBERSHIP_REQUIRED',
+        error: groupLapsed
+          ? 'Your group\u2019s subscription needs attention. Your records are safe — new ' +
+            'activity resumes once the group administrator resolves it.'
+          : 'An active membership is required for this. Your records stay available in ' +
+            'the meantime.',
+        reasons: entitlement.reasons,
+        data: { renewAt: groupLapsed ? null : '/dashboard/join-fee' },
+      },
+      { status: 402 }
+    )
+  }
+
+  return null
 }
