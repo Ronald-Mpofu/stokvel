@@ -21,11 +21,12 @@ interface MenuItem {
 }
 
 const MENU_ITEMS: MenuItem[] = [
-  { label: 'Overview',            icon: '⚙️', href: '/dashboard/settings' },
-  { label: 'Membership Charges',  icon: '💳', href: '/dashboard/settings/charges' },
-  { label: 'Joining Fees',        icon: '🎟️', href: null },
-  { label: 'Countries & Brands',  icon: '🌍', href: null },
-  { label: 'Notifications',       icon: '🔔', href: null },
+  { label: 'Overview',             icon: '⚙️', href: '/dashboard/settings' },
+  { label: 'Membership Charges',   icon: '💳', href: '/dashboard/settings/charges' },
+  { label: 'Payment Destinations', icon: '🏦', href: '/dashboard/settings/payment-destinations' },
+  { label: 'Joining Fees',         icon: '🎟️', href: null },
+  { label: 'Countries & Brands',   icon: '🌍', href: null },
+  { label: 'Notifications',        icon: '🔔', href: null },
 ];
 
 function useIsMobile() {

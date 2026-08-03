@@ -24,6 +24,12 @@ const SECTIONS: SettingsSection[] = [
     icon: '💳',
   },
   {
+    title: 'Payment Destinations',
+    description: 'Company bank accounts and mobile wallets that members pay into, per country.',
+    href: '/dashboard/settings/payment-destinations',
+    icon: '🏦',
+  },
+  {
     title: 'Joining Fees',
     description: 'Member annual joining fee and payment methods per country.',
     href: null,
