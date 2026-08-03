@@ -15,6 +15,15 @@ type User = {
   createdAt: string; lastLoginAt: string | null
   emailVerifiedAt: string | null; groupCount: number
   isBlacklisted: boolean; blacklistReason: string | null
+  // Derived server-side in /api/users — never stored. See the note
+  // there on precedence.
+  subscriptionStatus: string
+  subscriptionDetail: string | null
+  subscriptionExpiresAt: string | null
+  subscriptionCurrency: string | null
+  subscriptionAmount: number | null
+  paymentReference: string | null
+  lastAttemptAt: string | null
 }
 
 // ── Constants ─────────────────────────────────────────────────
@@ -22,6 +31,36 @@ const ROLES = ['SYSTEM_ADMIN','NATIONAL_ADMIN','GROUP_ADMIN','TREASURER','INVEST
 const STATUSES = ['ACTIVE','SUSPENDED','DEFAULTED','EXITED','BLACKLISTED']
 const KYC_STATUSES = ['PENDING','UNDER_REVIEW','VERIFIED','REJECTED']
 const TIERS = ['BRONZE','SILVER','GOLD','PLATINUM']
+
+// ── Subscription status ───────────────────────────────────────
+// Derived in /api/users, never stored — a stored status is a second
+// source of truth that drifts the first time a webhook is missed.
+//
+// EXEMPT is the one that stops an admin chasing money nobody owes:
+// staff, and invited members in an active group (rule 3b), pay nothing.
+// Without it they would sit as UNPAID forever.
+const SUBSCRIPTION_STATUSES = ['PAID','ENDING','SUBMITTED','FAILED','EXPIRED','UNPAID','EXEMPT']
+
+const SUB_COLORS: Record<string, [string,string]> = {
+  PAID:      ['#D1FADF','#0F6E56'],
+  ENDING:    ['#FEF0C7','#B54708'],
+  SUBMITTED: ['#DBEAFE','#1E40AF'],
+  FAILED:    ['#FEE4E2','#B42318'],
+  EXPIRED:   ['#FEE4E2','#B42318'],
+  UNPAID:    ['#F1F5F9','#475569'],
+  EXEMPT:    ['#EDE9FE','#5B21B6'],
+}
+
+/** Plain-language label — SUBMITTED reads better as "Awaiting check". */
+const SUB_LABELS: Record<string, string> = {
+  PAID:      'Paid',
+  ENDING:    'Ending',
+  SUBMITTED: 'Awaiting check',
+  FAILED:    'Failed',
+  EXPIRED:   'Expired',
+  UNPAID:    'Unpaid',
+  EXEMPT:    'Exempt',
+}
 
 const ROLE_COLORS: Record<string, [string,string]> = {
   SYSTEM_ADMIN:       ['#EDE9FE','#5B21B6'],
@@ -687,7 +726,7 @@ export default function UserManagement() {
           <table style={{ width:'100%', borderCollapse:'collapse' }}>
             <thead>
               <tr style={{ background:'#F8FAFC' }}>
-                {['Member','Role','Status','KYC','Tier','Score','Groups','Actions'].map(h => (
+                {['Member','Role','Subscription','Status','KYC','Tier','Score','Groups','Actions'].map(h => (
                   <th key={h} style={{ padding:'11px 14px', textAlign:'left', fontSize:'10px', fontWeight:'600',
                     color:'#64748B', borderBottom:'1px solid #E2E8F0', textTransform:'uppercase', whiteSpace:'nowrap' as any }}>{h}</th>
                 ))}
@@ -709,6 +748,22 @@ export default function UserManagement() {
                     </div>
                   </td>
                   <td style={{ padding:'12px 14px' }}><Badge text={u.role} colors={ROLE_COLORS[u.role] || ['#F1F5F9','#475569']} /></td>
+                  <td style={{ padding:'12px 14px' }}>
+                    <Badge
+                      text={SUB_LABELS[u.subscriptionStatus] || u.subscriptionStatus || '—'}
+                      colors={SUB_COLORS[u.subscriptionStatus] || ['#F1F5F9','#475569']}
+                    />
+                    {/* Second line carries the thing the admin needs next:
+                        why they are exempt, when a paid member renews, or
+                        which rail an unverified payment came in on. */}
+                    {u.subscriptionDetail || u.subscriptionExpiresAt ? (
+                      <div style={{ fontSize:'10px', color:'#94A3B8', marginTop:'3px', whiteSpace:'nowrap' as any }}>
+                        {u.subscriptionDetail
+                          ? u.subscriptionDetail
+                          : new Date(u.subscriptionExpiresAt as string).toLocaleDateString('en-AU', { day:'numeric', month:'short', year:'numeric' })}
+                      </div>
+                    ) : null}
+                  </td>
                   <td style={{ padding:'12px 14px' }}><Badge text={u.status} colors={STATUS_COLORS[u.status] || ['#F1F5F9','#475569']} /></td>
                   <td style={{ padding:'12px 14px' }}><Badge text={u.kycStatus} colors={KYC_COLORS[u.kycStatus] || ['#F1F5F9','#475569']} /></td>
                   <td style={{ padding:'12px 14px' }}><Badge text={u.tier} colors={TIER_COLORS[u.tier] || ['#F1F5F9','#475569']} /></td>

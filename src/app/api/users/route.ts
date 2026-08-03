@@ -35,13 +35,106 @@ export async function GET(req: NextRequest) {
       orderBy: { createdAt: 'desc' },
     })
 
+    // ── Subscription status ───────────────────────────────────
+    // ONE extra query for the whole page rather than a lookup per row.
+    // Derived, never stored: a stored status is a second source of truth
+    // that drifts the first time a webhook is missed.
+    //
+    // Precedence matters — the first match wins:
+    //   EXEMPT     staff, or an invited member in a qualifying group
+    //              (rule 3b). Never chase these people for money.
+    //   PAID       membership active and in date
+    //   ENDING     active but will not renew — the churn signal
+    //   SUBMITTED  a manual payment is awaiting verification
+    //   FAILED     an attempt errored; worth contacting
+    //   EXPIRED    lapsed
+    //   UNPAID     registered, never attempted payment
+    const subs = users.length
+      ? await prisma.$queryRawUnsafe<any[]>(
+          `
+          SELECT
+            u."id",
+            cm."status"            AS cm_status,
+            cm."expiresAt"         AS cm_expires_at,
+            cm."cancelAtPeriodEnd" AS cm_cancelling,
+            cm."currency"          AS cm_currency,
+            cm."amountPaid"        AS cm_amount,
+            pa."status"            AS attempt_status,
+            pa."provider"          AS attempt_provider,
+            pa."createdAt"         AS attempt_at,
+            pa."memberReference"   AS member_reference,
+            inv."invoiceNo"        AS invoice_no,
+            (u."role"::text IN ('SYSTEM_ADMIN','NATIONAL_ADMIN','AUDITOR')) AS is_staff,
+            EXISTS (
+              SELECT 1 FROM "GroupMember" gm
+              JOIN "Group" g ON g.id = gm."groupId"
+              WHERE gm."userId" = u."id"
+                AND gm."status" IN ('ACTIVE'::"MemberStatus",'SUSPENDED'::"MemberStatus",'DEFAULTED'::"MemberStatus")
+                AND g."status"  IN ('ACTIVE'::"GroupStatus",'PAUSED'::"GroupStatus",'COMPLETED'::"GroupStatus")
+                AND g."deletedAt" IS NULL
+            ) AS in_group
+          FROM "User" u
+          LEFT JOIN "CommunityMembership" cm ON cm."userId" = u."id"
+          LEFT JOIN LATERAL (
+            SELECT p."status", p."provider", p."createdAt", p."memberReference", p."invoiceId"
+            FROM "PaymentAttempt" p
+            WHERE p."userId" = u."id"
+            ORDER BY p."createdAt" DESC
+            LIMIT 1
+          ) pa ON true
+          LEFT JOIN "JoiningFeeInvoice" inv ON inv."id" = pa."invoiceId"
+          WHERE u."id" = ANY($1::text[])
+          `,
+          users.map(u => u.id)
+        )
+      : []
+
+    const subById = new Map<string, any>(subs.map(s => [s.id, s]))
+
+    function deriveStatus(s: any): { status: string; detail: string | null } {
+      if (!s) return { status: 'UNPAID', detail: null }
+
+      const now = Date.now()
+      const expires = s.cm_expires_at ? new Date(s.cm_expires_at).getTime() : null
+      const current = s.cm_status === 'ACTIVE' && expires !== null && expires > now
+
+      if (s.is_staff) return { status: 'EXEMPT', detail: 'Staff role' }
+      // Rule 3b — an invited member in an active group owes nothing.
+      // Without this they sit as UNPAID forever and get chased for a fee
+      // they are not charged.
+      if (!current && s.in_group) return { status: 'EXEMPT', detail: 'Group member' }
+
+      if (current && s.cm_cancelling) return { status: 'ENDING', detail: null }
+      if (current) return { status: 'PAID', detail: null }
+
+      if (s.attempt_status === 'PENDING' || s.attempt_status === 'INITIATED') {
+        return { status: 'SUBMITTED', detail: s.attempt_provider || null }
+      }
+      if (s.attempt_status === 'FAILED') {
+        return { status: 'FAILED', detail: s.attempt_provider || null }
+      }
+      if (s.cm_status) return { status: 'EXPIRED', detail: null }
+      return { status: 'UNPAID', detail: null }
+    }
+
     return NextResponse.json({
       success: true,
-      data: users.map(u => ({
-        ...u,
-        reputationScore: Number(u.reputationScore),
-        groupCount: u._count.groupMemberships,
-      })),
+      data: users.map(u => {
+        const s = subById.get(u.id)
+        const { status: subscriptionStatus, detail } = deriveStatus(s)
+        return {
+          ...u,
+          reputationScore: Number(u.reputationScore),
+          groupCount: u._count.groupMemberships,
+          subscriptionStatus,
+          subscriptionDetail: detail,
+          subscriptionExpiresAt: s?.cm_expires_at ?? null,
+          subscriptionCurrency: s?.cm_currency ?? null,
+          subscriptionAmount: s?.cm_amount != null ? Number(s.cm_amount) : null,
+          paymentReference: s?.member_reference ?? s?.invoice_no ?? null,
+          lastAttemptAt: s?.attempt_at ?? null,
+        }
+      }),
     })
   } catch (e: any) {
     console.error('GET /api/users error:', e)
