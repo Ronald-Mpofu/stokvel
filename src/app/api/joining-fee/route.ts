@@ -282,6 +282,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ success: false, error: 'Mobile number is required for this payment method' }, { status: 400 });
     }
 
+    // ── Where does the money go? ──────────────────────────────
+    // Manual rails need a real destination. Without one the member is
+    // told to transfer money and given no account to transfer it to —
+    // which is worse than refusing, because they may send it somewhere
+    // guessed or simply give up mid-payment.
+    let destination: any = null;
+    if (provider !== 'CARD') {
+      const destRows: any[] = await prisma.$queryRawUnsafe(
+        `SELECT "id","method","displayName","currency",
+                "bankName","accountName","accountNumber","branchName","branchCode","swiftCode",
+                "walletNumber","walletName","instructions"
+         FROM "RefPaymentDestination"
+         WHERE "countryCode" = $1 AND "method" = $2 AND "isActive" = true
+         ORDER BY (CASE WHEN "currency" = $3 THEN 0 ELSE 1 END), "sortOrder" ASC
+         LIMIT 1`,
+        countryCode, provider, fee.currency
+      );
+      destination = destRows[0] || null;
+
+      if (!destination) {
+        return NextResponse.json({
+          success: false,
+          code: 'NO_DESTINATION',
+          error: 'This payment method is not available right now. Please choose another, or try again shortly.',
+        }, { status: 409 });
+      }
+    }
+
     // ── Country back-fill (registration no longer asks for it) ─
     // The register form dropped the country field, so User.country is
     // null for anyone who signed up directly. This is where it becomes
@@ -325,9 +353,10 @@ export async function POST(req: NextRequest) {
     const attemptId = randomUUID();
     await prisma.$executeRawUnsafe(
       `INSERT INTO "PaymentAttempt"
-         ("id","invoiceId","userId","provider","amount","currency","status")
-       VALUES ($1,$2,$3,$4,$5,$6,'INITIATED')`,
-      attemptId, invoice.id, userId, provider, invoice.amount, invoice.currency
+         ("id","invoiceId","userId","provider","amount","currency","status","destinationId")
+       VALUES ($1,$2,$3,$4,$5,$6,'INITIATED',$7)`,
+      attemptId, invoice.id, userId, provider, invoice.amount, invoice.currency,
+      destination?.id ?? null
     );
 
     // Base URL for Stripe redirects — origin header is correct across
@@ -373,6 +402,9 @@ export async function POST(req: NextRequest) {
         amount: Number(invoice.amount),
         currency: invoice.currency,
         instructions: providerResult.instructions || null,
+        // Manual rails only — the bank account or wallet the member
+        // must actually send money to, plus the reference to quote.
+        destination: destination || null,
         // CARD only — frontend redirects here to pay.
         checkoutUrl: providerResult.checkoutUrl || null,
       },
@@ -380,6 +412,70 @@ export async function POST(req: NextRequest) {
   } catch (e: any) {
     console.error('POST /api/joining-fee error:', e?.message);
     return NextResponse.json({ success: false, error: 'Failed to initiate payment' }, { status: 500 });
+  }
+}
+
+// ------------------------------------------------------------------
+// PATCH — the member tells us they have sent the money
+// ------------------------------------------------------------------
+// This does NOT mark anything paid. It records THEIR reference and the
+// date they sent it, so an admin reconciling a bank statement has
+// something to match on besides the amount — which fails the moment two
+// members pay the same fee on the same day.
+//
+// The attempt stays PENDING until a SYSTEM_ADMIN or NATIONAL_ADMIN
+// confirms the money actually arrived.
+
+const ConfirmSchema = z.object({
+  attemptId: z.string().uuid(),
+  memberReference: z.string().min(2, 'Enter the reference from your bank or wallet').max(120),
+  memberPaidAt: z.string().optional(),
+  memberNote: z.string().max(500).optional(),
+});
+
+export async function PATCH(req: NextRequest) {
+  try {
+    const session = await getSessionFromRequest(req);
+    if (!session) return unauthorized();
+
+    const parsed = ConfirmSchema.safeParse(await req.json());
+    if (!parsed.success) {
+      return NextResponse.json(
+        { success: false, error: parsed.error.errors[0]?.message || 'Invalid request' },
+        { status: 400 }
+      );
+    }
+    const { attemptId, memberReference, memberPaidAt, memberNote } = parsed.data;
+
+    // Bound to the caller's own attempt — a member cannot annotate
+    // someone else's payment.
+    const updated = await prisma.$executeRawUnsafe(
+      `UPDATE "PaymentAttempt"
+       SET "memberReference" = $3,
+           "memberPaidAt"    = COALESCE($4::timestamptz, now()),
+           "memberNote"      = $5,
+           "status"          = CASE WHEN "status" = 'INITIATED' THEN 'PENDING' ELSE "status" END,
+           "updatedAt"       = now()
+       WHERE "id" = $1 AND "userId" = $2 AND "verifiedAt" IS NULL`,
+      attemptId, session.id, memberReference.trim(), memberPaidAt || null, memberNote || null
+    );
+
+    if (Number(updated) === 0) {
+      return NextResponse.json({
+        success: false,
+        error: 'That payment could not be updated. It may already have been confirmed.',
+      }, { status: 409 });
+    }
+
+    return NextResponse.json({
+      success: true,
+      message:
+        'Thank you. We\u2019ll check for your payment and confirm your membership once it ' +
+        'clears — usually within one to two working days.',
+    });
+  } catch (e: any) {
+    console.error('PATCH /api/joining-fee error:', e?.message);
+    return NextResponse.json({ success: false, error: 'Could not record your payment' }, { status: 500 });
   }
 }
 

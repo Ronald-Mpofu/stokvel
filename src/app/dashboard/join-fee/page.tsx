@@ -49,6 +49,105 @@ const MOBILE_MONEY = ['ECOCASH', 'MPESA', 'MTN_MOMO'];
 const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER', 'INVESTMENT_MANAGER', 'AUDITOR'];
 
 // Module-level (never inside render — prevents cursor-focus loss)
+// ── Payment destination ───────────────────────────────────────
+// The bank account or wallet the member actually sends money to.
+// Module level, like every other helper here — defined inside render it
+// would remount on each keystroke and lose focus in the reference field.
+//
+// Numbers are monospaced and individually copyable: these get typed
+// into a banking app, and a transposed digit sends real money to a
+// stranger with no way to recall it.
+type Destination = {
+  id: string;
+  method: string;
+  displayName: string;
+  currency: string;
+  bankName?: string | null;
+  accountName?: string | null;
+  accountNumber?: string | null;
+  branchName?: string | null;
+  branchCode?: string | null;
+  swiftCode?: string | null;
+  walletNumber?: string | null;
+  walletName?: string | null;
+  instructions?: string | null;
+};
+
+function CopyRow(props: { label: string; value: string; mono?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  if (!props.value) return null;
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '9px 0', borderBottom: '1px solid #e2e8f0' }}>
+      <div style={{ width: 120, flexShrink: 0, fontSize: 12, color: '#64748b' }}>{props.label}</div>
+      <div style={{ flex: 1, minWidth: 0, fontSize: 14, fontWeight: 600, color: NAVY, wordBreak: 'break-all',
+        fontFamily: props.mono ? 'ui-monospace, monospace' : 'inherit' }}>
+        {props.value}
+      </div>
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard?.writeText(props.value);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 1600);
+        }}
+        style={{ flexShrink: 0, padding: '5px 10px', minHeight: 32, borderRadius: 6, border: '1px solid #e2e8f0',
+          background: copied ? '#D1FADF' : '#fff', color: copied ? TEAL : '#64748b', fontSize: 11, fontWeight: 600, cursor: 'pointer' }}
+      >
+        {copied ? '✓ Copied' : 'Copy'}
+      </button>
+    </div>
+  );
+}
+
+function PaymentDetails(props: { destination: Destination; reference: string; amount: string }) {
+  const d = props.destination;
+  const isBank = d.method === 'BANK_TRANSFER';
+  return (
+    <div style={{ border: '1px solid #A6F4C5', background: '#F6FEF9', borderRadius: 10, padding: '16px 18px', marginTop: 16 }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: TEAL, marginBottom: 4 }}>
+        {isBank ? '🏦 Transfer to this account' : '📱 Send to this number'}
+      </div>
+      <div style={{ fontSize: 12.5, color: '#475569', lineHeight: 1.55, marginBottom: 10 }}>
+        {d.displayName}
+      </div>
+
+      <div>
+        {isBank ? (
+          <div>
+            <CopyRow label="Bank" value={d.bankName || ''} />
+            <CopyRow label="Account name" value={d.accountName || ''} />
+            <CopyRow label="Account number" value={d.accountNumber || ''} mono />
+            <CopyRow label="Branch" value={d.branchName || ''} />
+            <CopyRow label="Branch code" value={d.branchCode || ''} mono />
+            <CopyRow label="SWIFT" value={d.swiftCode || ''} mono />
+          </div>
+        ) : (
+          <div>
+            <CopyRow label="Send to" value={d.walletNumber || ''} mono />
+            <CopyRow label="Registered name" value={d.walletName || ''} />
+          </div>
+        )}
+        <CopyRow label="Amount" value={props.amount} mono />
+        <CopyRow label="Reference" value={props.reference} mono />
+      </div>
+
+      {/* The reference is what links their money to their account. A
+          transfer arriving without it has to be matched by hand, and
+          sometimes cannot be matched at all. */}
+      <div style={{ marginTop: 12, padding: '10px 12px', background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 8, fontSize: 12.5, color: '#92400e', lineHeight: 1.55 }}>
+        Use <strong>{props.reference}</strong> as the payment reference or narration. Without
+        it we may not be able to match your payment to your account.
+      </div>
+
+      {d.instructions ? (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: '#475569', lineHeight: 1.6, whiteSpace: 'pre-line' }}>
+          {d.instructions}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div style={{ marginBottom: 16 }}>
@@ -100,6 +199,16 @@ export default function JoinFeePage() {
   const [submitting, setSubmitting] = useState(false);
   const [redirecting, setRedirecting] = useState(false);
   const [instructions, setInstructions] = useState<string | null>(null);
+  // Manual rails: where to send the money, and the invoice reference
+  // that ties the transfer back to this member.
+  const [destination, setDestination] = useState<Destination | null>(null);
+  const [attemptId, setAttemptId] = useState('');
+  const [invoiceNo, setInvoiceNo] = useState('');
+  const [payAmount, setPayAmount] = useState('');
+  const [memberRef, setMemberRef] = useState('');
+  const [memberPaidAt, setMemberPaidAt] = useState('');
+  const [declaring, setDeclaring] = useState(false);
+  const [declared, setDeclared] = useState(false);
   const [paid, setPaid] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [pollTimedOut, setPollTimedOut] = useState(false);
@@ -267,6 +376,14 @@ export default function JoinFeePage() {
       // ── Mobile money / bank transfer: stay and poll ────────
       showToast('success', json.message || 'Payment started');
       setInstructions(json.data?.instructions || json.message || null);
+      setDestination(json.data?.destination || null);
+      setAttemptId(json.data?.attemptId || '');
+      setInvoiceNo(json.data?.invoiceNo || '');
+      setPayAmount(
+        json.data?.currency && json.data?.amount != null
+          ? `${json.data.currency} ${Number(json.data.amount).toFixed(2)}`
+          : ''
+      );
       startPolling(userId);
       setSubmitting(false);
     } catch {
@@ -274,6 +391,36 @@ export default function JoinFeePage() {
       setSubmitting(false);
     }
   }, [userId, countryCode, provider, phone, needsPhone, showToast, startPolling]);
+
+  const handleDeclarePaid = useCallback(async () => {
+    if (!attemptId) return;
+    if (memberRef.trim().length < 2) {
+      return showToast('error', 'Enter the reference shown on your bank or wallet');
+    }
+    setDeclaring(true);
+    try {
+      const res = await fetch('/api/joining-fee', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          attemptId,
+          memberReference: memberRef.trim(),
+          memberPaidAt: memberPaidAt || undefined,
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        setDeclared(true);
+        showToast('success', json.message || 'Thank you — we\u2019ll check for your payment.');
+      } else {
+        showToast('error', json.error || 'Could not record your payment');
+      }
+    } catch {
+      showToast('error', 'Network error — please try again');
+    } finally {
+      setDeclaring(false);
+    }
+  }, [attemptId, memberRef, memberPaidAt, showToast]);
 
   const handleManualCheck = useCallback(async () => {
     const ok = await checkOnce(userId);
@@ -447,7 +594,60 @@ export default function JoinFeePage() {
                 {payButtonLabel()}
               </button>
 
-              {instructions ? (
+              {destination ? (
+                <div>
+                  <PaymentDetails
+                    destination={destination}
+                    reference={invoiceNo}
+                    amount={payAmount}
+                  />
+
+                  {declared ? (
+                    <div style={{ marginTop: 14, background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 8, padding: '14px 16px', fontSize: 13, color: NAVY, lineHeight: 1.6 }}>
+                      ✅ Thanks — we have your payment details. We&apos;ll confirm your
+                      membership once the money clears, usually within one to two working
+                      days. You can close this page; nothing else is needed from you.
+                    </div>
+                  ) : (
+                    <div style={{ marginTop: 14, border: '1px solid #e2e8f0', borderRadius: 8, padding: '14px 16px', background: '#f8fafc' }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: NAVY, marginBottom: 4 }}>
+                        Already sent the money?
+                      </div>
+                      {/* Their reference is what an admin matches against
+                          the statement. Amount alone is not enough — two
+                          members paying the same fee the same day are
+                          indistinguishable without it. */}
+                      <div style={{ fontSize: 12.5, color: '#64748b', lineHeight: 1.55, marginBottom: 10 }}>
+                        Tell us the reference your bank or wallet gave you. It helps us find
+                        your payment and activate your membership faster.
+                      </div>
+                      <input
+                        value={memberRef}
+                        onChange={(e) => setMemberRef(e.target.value)}
+                        placeholder="Your transfer or confirmation reference"
+                        style={{ width: '100%', padding: '11px 13px', minHeight: 44, border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: 15, outline: 'none', boxSizing: 'border-box', marginBottom: 8 }}
+                      />
+                      <input
+                        type="date"
+                        value={memberPaidAt}
+                        onChange={(e) => setMemberPaidAt(e.target.value)}
+                        style={{ width: '100%', padding: '11px 13px', minHeight: 44, border: '1.5px solid #e2e8f0', borderRadius: 8, fontSize: 15, outline: 'none', boxSizing: 'border-box', marginBottom: 10 }}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleDeclarePaid}
+                        disabled={declaring || memberRef.trim().length < 2}
+                        style={{ width: '100%', padding: 12, minHeight: 44, borderRadius: 8, border: 'none',
+                          background: declaring || memberRef.trim().length < 2 ? '#94a3b8' : `linear-gradient(135deg, ${NAVY}, ${TEAL})`,
+                          color: '#fff', fontSize: 14, fontWeight: 600,
+                          cursor: declaring || memberRef.trim().length < 2 ? 'not-allowed' : 'pointer' }}
+                      >
+                        {declaring ? 'Sending…' : 'I\u2019ve sent the payment'}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ) : instructions ? (
                 <div style={{ marginTop: 16, background: '#fffbeb', border: '1px solid #f59e0b', borderRadius: 8, padding: '12px 16px', fontSize: 13, color: NAVY }}>
                   {instructions}
                   <div style={{ marginTop: 6, color: '#92400e' }}>Waiting for payment confirmation…</div>
