@@ -53,6 +53,7 @@
 // migration 1b, and the subscription check is a correlated EXISTS.
 
 import { cache } from 'react'
+import { NextResponse } from 'next/server'
 import type { NextRequest } from 'next/server'
 import prisma from '@/lib/prisma/client'
 import { getClaims, getClaimsFromRequest } from '@/lib/auth'
