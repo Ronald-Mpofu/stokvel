@@ -153,6 +153,19 @@ const ADMIN_ROLES = ['SYSTEM_ADMIN', 'NATIONAL_ADMIN', 'GROUP_ADMIN', 'TREASURER
 // authenticated user, and registration still routes new members there.
 const FEE_PAGE = '/dashboard/join-fee'
 
+// ── Dashboard pages every authenticated user may reach ────────
+// /dashboard is otherwise admin-only, which was correct until these
+// two pages existed. Both are about the CALLER'S OWN account:
+//
+//   /dashboard/join-fee    paying, and seeing whether a fee is due
+//   /dashboard/membership  managing Community Membership, including the
+//                          rule 3f opt-in tickbox
+//
+// A MEMBER bounced to /portal could never reach either. The opt-in in
+// particular was unreachable by exactly the people it exists for —
+// invited members, who are all MEMBERs by definition.
+const SELF_SERVICE_PAGES = [FEE_PAGE, '/dashboard/membership']
+
 // ── Middleware ────────────────────────────────────────────────
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
@@ -211,10 +224,11 @@ export async function middleware(req: NextRequest) {
     return NextResponse.redirect(loginUrl)
   }
 
-  // ── Joining fee page — reachable by EVERY authenticated user ──
+  // ── Self-service pages — reachable by EVERY authenticated user ──
   // Must come BEFORE the admin check: MEMBERs would otherwise be
-  // bounced to /portal and could never reach the payment page.
-  if (pathname === FEE_PAGE || pathname.startsWith(FEE_PAGE + '/')) {
+  // bounced to /portal and could never reach the payment page or their
+  // own membership settings.
+  if (matchesPrefix(pathname, SELF_SERVICE_PAGES)) {
     return NextResponse.next()
   }
 
