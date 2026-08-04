@@ -273,6 +273,14 @@ export default function JoinFeePage() {
   // A manual payment already submitted and awaiting an admin. Detected
   // on load so a returning member is never shown the payment form
   // again — that is how duplicate transfers happen.
+  // Rule 3b — a member of an active group owes no joining fee, ever.
+  // Their joiningFeePaid claim is false and always will be, so it says
+  // nothing about whether a fee is due. Only entitlement does.
+  const [exempt, setExempt] = useState<{ viaGroup: boolean; viaStaff: boolean } | null>(null);
+  // Rule 3f — exempt, but deliberately choosing to pay anyway. The flag
+  // must be sent on the POST too: the API refuses an exempt member's
+  // payment without it, which is what stops an accidental charge.
+  const [optingIn, setOptingIn] = useState(false);
   const [awaiting, setAwaiting] = useState<{
     invoiceNo: string;
     amount: string;
@@ -407,6 +415,40 @@ export default function JoinFeePage() {
             const st = await fetch(`/api/joining-fee?userId=${sess.id}`);
             const stJson = await st.json();
             const d = stJson?.data;
+            const el = stJson?.eligibility;
+
+            // ── No fee due? Stop here. ───────────────────────
+            // The API resolves live entitlement: staff, and members of
+            // an active group under rule 3b, are exempt. Showing them a
+            // country picker and payment methods invites a payment
+            // nobody asked for and nobody owes.
+            //
+            // UNLESS they arrived with ?optIn=1 — rule 3f, an exempt
+            // member deliberately choosing to add Community Membership
+            // for the group adverts. Without this exception the opt-in
+            // link from the Membership page would bounce straight back
+            // to "no fee is due".
+            const wantsOptIn = new URLSearchParams(window.location.search).get('optIn') === '1';
+            if (!cancelled && el && el.feeRequired === false) {
+              if (el.membershipCurrent) {
+                setPaid(true);
+                return;
+              }
+              if (!wantsOptIn) {
+                setExempt({
+                  viaGroup: !!el.exemptViaGroup,
+                  viaStaff: !!el.exemptViaStaff,
+                });
+                return;
+              }
+              // Staff are never charged, and there is no opt-in for them.
+              if (el.exemptViaStaff) {
+                setExempt({ viaGroup: false, viaStaff: true });
+                return;
+              }
+              setOptingIn(true);
+            }
+
             if (
               !cancelled && d &&
               d.status === 'PENDING' &&
@@ -484,7 +526,7 @@ export default function JoinFeePage() {
       const res = await fetch('/api/joining-fee', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, countryCode, provider, phone: needsPhone ? phone.trim() : undefined }),
+        body: JSON.stringify({ userId, countryCode, provider, phone: needsPhone ? phone.trim() : undefined, optIn: optingIn || undefined }),
       });
       const json = await res.json();
 
@@ -622,6 +664,39 @@ export default function JoinFeePage() {
           >
             Continue →
           </button>
+        </div>
+      ) : exempt ? (
+        <div style={{ background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 12, padding: '26px 22px', textAlign: 'center' }}>
+          <div style={{ fontSize: 42, lineHeight: 1 }}>✅</div>
+          <h2 style={{ color: NAVY, margin: '10px 0 8px', fontSize: 19 }}>
+            No fee is due
+          </h2>
+          <p style={{ color: '#475569', fontSize: 14, lineHeight: 1.65, margin: '0 0 20px' }}>
+            {exempt.viaStaff
+              ? 'Staff accounts are not charged a membership fee.'
+              : 'You have full access through your group membership, so there\u2019s nothing to pay. Members invited into an active group don\u2019t pay the annual fee.'}
+          </p>
+          <a
+            href="/portal"
+            style={{ display: 'inline-block', width: '100%', boxSizing: 'border-box', padding: 13, minHeight: 48,
+              borderRadius: 9, background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: '#fff',
+              fontSize: 15, fontWeight: 600, textDecoration: 'none' }}
+          >
+            Go to my portal →
+          </a>
+          {/* Rule 3f — they may still choose to take a Community
+              Membership for the group adverts. Offered, never pushed:
+              it is genuinely optional and the fee is not refundable. */}
+          {exempt.viaGroup ? (
+            <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid #d1fae5', fontSize: 12.5, color: '#64748b', lineHeight: 1.6 }}>
+              You can still take an optional Community Membership if you want to browse
+              other groups advertising for new members. It&apos;s charged annually and
+              isn&apos;t refundable — manage it from{' '}
+              <a href="/dashboard/membership" style={{ color: TEAL, fontWeight: 600, textDecoration: 'none' }}>
+                Membership
+              </a>.
+            </div>
+          ) : null}
         </div>
       ) : awaiting ? (
         <div style={{ background: '#F6FEF9', border: '1px solid #A6F4C5', borderRadius: 12, padding: '26px 22px', textAlign: 'center' }}>

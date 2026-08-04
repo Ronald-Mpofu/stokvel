@@ -30,6 +30,7 @@ import { useSearchParams } from 'next/navigation'
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 const PAY_URL = '/dashboard/join-fee'
+const PORTAL_URL = '/portal'
 
 type Status = 'checking' | 'ok' | 'already' | 'failed' | 'pending' | 'missing'
 
@@ -148,6 +149,37 @@ function VerifyInner() {
   const [resending, setResending] = useState(false)
   const [note, setNote] = useState('')
 
+  // null = not yet known. Drives both the button label and its target.
+  const [feeDue, setFeeDue] = useState<boolean | null>(null)
+  const nextUrl = feeDue === false ? PORTAL_URL : PAY_URL
+
+  // Resolved only after verification succeeds — before that the answer
+  // is irrelevant and the request would be wasted.
+  useEffect(() => {
+    if (status !== 'ok' && status !== 'already') return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const res = await fetch('/api/auth/me')
+        const json = await res.json()
+        if (cancelled) return
+        const ent = json?.entitlement
+        if (ent) {
+          // Entitled without a Community Membership means a qualifying
+          // group or a staff role — either way, no fee is due.
+          const covered =
+            ent.isEntitled &&
+            (ent.qualifyingGroupIds?.length > 0 || ent.reasons?.includes('STAFF_ROLE'))
+          setFeeDue(!covered)
+        }
+      } catch {
+        // Leave null — the button falls back to the payment page, and
+        // that page now shows "no fee is due" for exempt members.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [status])
+
   const [changeOpen, setChangeOpen] = useState(false)
   const [newEmail, setNewEmail] = useState('')
   const [saving, setSaving] = useState(false)
@@ -233,7 +265,10 @@ function VerifyInner() {
     )
   }
 
-  // ── Verified — continue to payment ─────────────────────────
+  // ── Verified — where next? ─────────────────────────────────
+  // NOT unconditionally to payment. An invited member (rule 3b) owes no
+  // joining fee, and sending them to a country picker and payment
+  // methods invites a payment nobody asked for. Entitlement decides.
   if (status === 'ok' || status === 'already') {
     return (
       <Shell>
@@ -247,10 +282,10 @@ function VerifyInner() {
             : 'Thank you. This is the address you\u2019ll sign in with.'}
         </p>
         <a
-          href={PAY_URL}
+          href={nextUrl}
           style={{ display: 'inline-block', padding: '13px 26px', borderRadius: 10, background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, color: 'white', fontSize: 15, fontWeight: 600, textDecoration: 'none' }}
         >
-          Continue to payment →
+          {feeDue === false ? 'Continue →' : 'Continue to payment →'}
         </a>
       </Shell>
     )

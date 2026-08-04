@@ -257,6 +257,10 @@ export default function CommunityMembershipPanel() {
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [confirming, setConfirming] = useState(false)
+  // Rule 3f — an exempt member must tick this before they can proceed
+  // to pay. Explicit consent, because the fee is non-refundable and
+  // they owe nothing without it.
+  const [optIn, setOptIn] = useState(false)
   const [toast, setToast] = useState<ToastState>(null)
 
   const showToast = useCallback((kind: 'success' | 'error', text: string) => {
@@ -368,28 +372,70 @@ export default function CommunityMembershipPanel() {
                 annually.
               </div>
               {data?.entitlement && data.entitlement.qualifyingGroupCount > 0 ? (
-                <NoticeBox tone="info">
-                  You already have full access through your group membership, so
-                  this is optional — it only adds the group adverts.
-                </NoticeBox>
-              ) : null}
-              <div style={{ marginTop: 16 }}>
-                <a
-                  href="/dashboard/join-fee"
-                  style={{
-                    display: 'inline-block',
-                    padding: '9px 16px',
-                    borderRadius: 8,
-                    background: TEAL,
-                    color: '#FFFFFF',
-                    fontSize: 14,
-                    fontWeight: 600,
-                    textDecoration: 'none',
-                  }}
-                >
-                  Join the community
-                </a>
-              </div>
+                <div>
+                  {/* Rule 3f — an invited member owes nothing, and may
+                      still choose to add this. Offered plainly, with the
+                      non-refundable term stated BEFORE they commit
+                      rather than after. */}
+                  <NoticeBox tone="info">
+                    Your group membership already gives you full access, so this is
+                    entirely optional. It adds one thing: seeing other groups that are
+                    looking for members, and being able to apply to them.
+                  </NoticeBox>
+                  <div style={{ marginTop: 14, padding: '12px 14px', border: `1px solid ${BORDER}`, borderRadius: 8, background: '#F9FAFB' }}>
+                    <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={optIn}
+                        onChange={e => setOptIn(e.target.checked)}
+                        style={{ marginTop: 3, width: 18, height: 18, flexShrink: 0, cursor: 'pointer' }}
+                      />
+                      <span style={{ fontSize: 13, color: NAVY, lineHeight: 1.6 }}>
+                        Add Community Membership to my account. I understand it is
+                        charged annually and that the fee is <strong>not refundable</strong>.
+                      </span>
+                    </label>
+                  </div>
+                  <div style={{ marginTop: 14 }}>
+                    <a
+                      href="/dashboard/join-fee?optIn=1"
+                      onClick={e => { if (!optIn) e.preventDefault() }}
+                      aria-disabled={!optIn}
+                      style={{
+                        display: 'inline-block',
+                        padding: '10px 18px',
+                        borderRadius: 8,
+                        background: optIn ? TEAL : '#E4E7EC',
+                        color: optIn ? '#FFFFFF' : MUTED,
+                        fontSize: 14,
+                        fontWeight: 600,
+                        textDecoration: 'none',
+                        cursor: optIn ? 'pointer' : 'not-allowed',
+                      }}
+                    >
+                      Continue to payment
+                    </a>
+                  </div>
+                </div>
+              ) : (
+                <div style={{ marginTop: 16 }}>
+                  <a
+                    href="/dashboard/join-fee"
+                    style={{
+                      display: 'inline-block',
+                      padding: '9px 16px',
+                      borderRadius: 8,
+                      background: TEAL,
+                      color: '#FFFFFF',
+                      fontSize: 14,
+                      fontWeight: 600,
+                      textDecoration: 'none',
+                    }}
+                  >
+                    Join the community
+                  </a>
+                </div>
+              )}
             </div>
           ) : (
             <div>

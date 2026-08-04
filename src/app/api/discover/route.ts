@@ -10,6 +10,7 @@ import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
 import { getSessionFromRequest, unauthorized, requireGroupManager } from '@/lib/auth'
 import { stampGroupReachedMinimum } from '@/lib/group-entitlement'
+import { resolveEntitlement } from '@/lib/entitlement'
 
 export const dynamic = 'force-dynamic'
 
@@ -82,7 +83,31 @@ export async function GET(req: NextRequest) {
       })
     }
 
-    // ── Pool member: browse Public groups ─────────────────────
+    // ── Community Member: browse Public groups ────────────────
+    // THIS IS THE PAID SERVICE. Seeing groups that are advertising for
+    // members is what the annual fee buys, so it is gated on
+    // canSeeAdverts — an active Community Membership, or a staff role.
+    //
+    // An invited member does NOT get it. They pay nothing (rule 3b) and
+    // in exchange this surface is closed to them, unless they choose to
+    // take a Community Membership as well (rule 3f).
+    //
+    // Returns 200 with an empty list rather than 403: the caller is
+    // legitimate, there is simply nothing here for them yet, and the UI
+    // needs to explain that rather than show an error.
+    const ent = await resolveEntitlement(session.id)
+    if (!ent.canSeeAdverts) {
+      return NextResponse.json({
+        success: true,
+        data: [],
+        gated: true,
+        code: 'MEMBERSHIP_REQUIRED',
+        message:
+          'Browsing groups that are looking for members is part of Community Membership. ' +
+          'You can add it from your Membership page at any time.',
+      })
+    }
+
     const rows = await sql(
       `SELECT
          g.id, g.name, g.description, g.country, g.currency,
@@ -137,6 +162,22 @@ export async function POST(req: NextRequest) {
     if (body.action === 'REQUEST') {
       const { groupId } = body
       if (!groupId) return NextResponse.json({ success: false, error: 'groupId required' }, { status: 400 })
+
+      // Same gate as browsing. Applying to a public group is part of
+      // the Community Membership service, and without this check a
+      // member who cannot see the list could still join by posting a
+      // groupId they obtained elsewhere.
+      const ent = await resolveEntitlement(session.id)
+      if (!ent.canSeeAdverts) {
+        return NextResponse.json({
+          success: false,
+          code: 'MEMBERSHIP_REQUIRED',
+          error:
+            'Applying to join a public group is part of Community Membership. ' +
+            'You can add it from your Membership page.',
+          data: { manageAt: '/dashboard/membership' },
+        }, { status: 402 })
+      }
 
       const g = await sql(
         `SELECT g.id, g.name, g."maxMembers", g.status,
