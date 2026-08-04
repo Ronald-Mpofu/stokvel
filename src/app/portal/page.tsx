@@ -4,6 +4,7 @@ import NotificationBell from '../dashboard/notifications/NotificationBell'
 // Same component the dashboard uses. One implementation, so the opt-in
 // and cancellation behaviour cannot drift between the two surfaces.
 import CommunityMembershipPanel from '../dashboard/membership/CommunityMembershipPanel'
+import AccountStatusBanner from '@/components/AccountStatusBanner'
 import LogoutButton from '../../components/LogoutButton'
 import PortalGroupView from './PortalGroupView'
 
@@ -1216,6 +1217,11 @@ export default function MemberPortal() {
 
       {/* Page content */}
       <div style={{ maxWidth: '1100px', margin: '0 auto', padding: isMobile ? '14px 12px' : '24px' }}>
+        {/* Below the sticky header, inside the centred content column.
+            Mounted here rather than in the portal layout, where it
+            rendered ABOVE the app bar. Returns null when there is
+            nothing to say. */}
+        <AccountStatusBanner />
         {loading ? (
           <div style={{ textAlign: 'center', padding: '80px', color: '#94A3B8' }}>
             <div style={{ fontSize: '40px', marginBottom: '16px' }}>⏳</div>

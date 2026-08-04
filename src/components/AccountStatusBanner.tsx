@@ -30,6 +30,18 @@ const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 const AMBER = '#B54708'
 
+// 640px, matching every other breakpoint on the platform.
+function useIsMobile(breakpoint = 640): boolean {
+  const [isMobile, setIsMobile] = useState(false)
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < breakpoint)
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [breakpoint])
+  return isMobile
+}
+
 type Entitlement = {
   isEntitled: boolean
   canTransact: boolean
@@ -62,6 +74,7 @@ function Banner({
   actionHref?: string
 }) {
   const [open, setOpen] = useState(false)
+  const isMobile = useIsMobile()
 
   const palette =
     tone === 'warn'
@@ -71,58 +84,90 @@ function Banner({
   return (
     <div
       style={{
-        padding: '10px 14px',
+        padding: isMobile ? '12px 14px' : '10px 14px',
         marginBottom: 16,
         borderRadius: 10,
         border: `1px solid ${palette.border}`,
         background: palette.bg,
       }}
     >
-      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
-        <span style={{ fontSize: 16, lineHeight: 1 }}>{icon}</span>
-        <span style={{ flex: 1, minWidth: 160, fontSize: 13.5, fontWeight: 600, color: NAVY }}>
-          {title}
-        </span>
-        <button
-          type="button"
-          onClick={() => setOpen(o => !o)}
-          aria-expanded={open}
-          style={{
-            background: 'none',
-            border: 'none',
-            padding: '4px 6px',
-            font: 'inherit',
-            fontSize: 12.5,
-            fontWeight: 600,
-            color: palette.fg,
-            textDecoration: 'underline',
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-          }}
-        >
-          {open ? 'Hide' : 'Why?'}
-        </button>
-        {actionLabel && actionHref ? (
-          <a
-            href={actionHref}
+      {/* On a phone the icon, title, toggle and action cannot share one
+          row without the title wrapping mid-phrase around them. So they
+          stack into centred rows instead. */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: isMobile ? 'column' : 'row',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: isMobile ? 8 : 10,
+          textAlign: isMobile ? 'center' : 'left',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, flex: isMobile ? undefined : 1, minWidth: 0 }}>
+          <span style={{ fontSize: 16, lineHeight: 1, flexShrink: 0 }}>{icon}</span>
+          <span style={{ fontSize: 13.5, fontWeight: 600, color: NAVY, lineHeight: 1.4 }}>
+            {title}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 10, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            aria-expanded={open}
             style={{
-              padding: '7px 14px',
-              borderRadius: 8,
-              background: TEAL,
-              color: '#FFFFFF',
-              fontSize: 13,
+              background: 'none',
+              border: 'none',
+              padding: '6px 8px',
+              minHeight: 36,
+              font: 'inherit',
+              fontSize: 12.5,
               fontWeight: 600,
-              textDecoration: 'none',
+              color: palette.fg,
+              textDecoration: 'underline',
+              cursor: 'pointer',
               whiteSpace: 'nowrap',
             }}
           >
-            {actionLabel}
-          </a>
-        ) : null}
+            {open ? 'Hide' : 'Why?'}
+          </button>
+          {actionLabel && actionHref ? (
+            <a
+              href={actionHref}
+              style={{
+                padding: '9px 18px',
+                minHeight: 40,
+                display: 'inline-flex',
+                alignItems: 'center',
+                borderRadius: 8,
+                background: TEAL,
+                color: '#FFFFFF',
+                fontSize: 13,
+                fontWeight: 600,
+                textDecoration: 'none',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {actionLabel}
+            </a>
+          ) : null}
+        </div>
       </div>
 
       {open ? (
-        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${palette.border}`, fontSize: 12.5, color: '#475569', lineHeight: 1.6 }}>
+        <div
+          style={{
+            marginTop: 10,
+            paddingTop: 10,
+            borderTop: `1px solid ${palette.border}`,
+            fontSize: 12.5,
+            color: '#475569',
+            lineHeight: 1.6,
+            textAlign: isMobile ? 'center' : 'left',
+          }}
+        >
           {detail}
         </div>
       ) : null}

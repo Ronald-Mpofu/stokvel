@@ -1,32 +1,23 @@
 // src/app/portal/layout.tsx
 // Wrapper for every /portal/* page.
 //
-// Phase 5. Same reasoning as the dashboard layout: middleware no longer
-// redirects members without an active membership, so they land here and
-// need to be told why some actions are unavailable.
+// ── DELIBERATELY EMPTY OF CHROME ─────────────────────────────
+// v1 mounted AccountStatusBanner here. That put it ABOVE the portal's
+// own sticky header — a warning floating over the app bar, before the
+// member had seen the app at all. See Portal_Panel_Headers screenshot.
 //
-// AccountStatusBanner returns null when there is nothing to say, so for
-// an entitled member this renders no extra chrome at all.
+// The banner now renders inside src/app/portal/page.tsx, at the top of
+// the content container and BELOW the header, which is where a page
+// notice belongs.
 //
-// The banner's first case is the important one for portal members: a
-// group whose subscription has lapsed. Those members did nothing wrong,
-// cannot fix it themselves, and receive no email about it — the lapse
-// notice goes to the group admin only. This banner is the ONLY way they
-// learn what happened.
-
-import AccountStatusBanner from '@/components/AccountStatusBanner'
+// This layout is kept because /portal/membership and any future portal
+// route still need a segment wrapper, and because deleting it would
+// change routing behaviour for no benefit.
 
 export default function PortalLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  return (
-    <div>
-      <div style={{ padding: '12px 16px 0' }}>
-        <AccountStatusBanner />
-      </div>
-      {children}
-    </div>
-  )
+  return <>{children}</>
 }
