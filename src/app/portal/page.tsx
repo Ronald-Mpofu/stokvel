@@ -1,6 +1,9 @@
 'use client'
 import { useState, useEffect, useCallback } from 'react'
 import NotificationBell from '../dashboard/notifications/NotificationBell'
+// Same component the dashboard uses. One implementation, so the opt-in
+// and cancellation behaviour cannot drift between the two surfaces.
+import CommunityMembershipPanel from '../dashboard/membership/CommunityMembershipPanel'
 import LogoutButton from '../../components/LogoutButton'
 import PortalGroupView from './PortalGroupView'
 
@@ -922,6 +925,18 @@ function ProfileTab({ user }: any) {
           </div>
         </div>
       </div>
+
+      {/* ── Community Membership ────────────────────────────────
+          Rule 3f lives here: an invited member ticks the opt-in box on
+          their PROFILE and is taken to pay. It was previously only on
+          /dashboard/membership, which middleware closes to MEMBERs —
+          so it was invisible to every invited member, who are all
+          MEMBERs by definition.
+
+          The panel renders its own card and returns the right state for
+          each case: not enrolled, exempt-with-opt-in, active, or
+          ending. Nothing to branch on here. */}
+      <CommunityMembershipPanel />
 
       {/* Details */}
       <SectionCard title="👤 Personal Information">

@@ -90,7 +90,6 @@ export async function GET(req: NextRequest) {
       : []
 
     const subById = new Map<string, any>(subs.map(s => [s.id, s]))
-
     function deriveStatus(s: any): { status: string; detail: string | null } {
       if (!s) return { status: 'UNPAID', detail: null }
 
@@ -117,25 +116,44 @@ export async function GET(req: NextRequest) {
       return { status: 'UNPAID', detail: null }
     }
 
-    return NextResponse.json({
-      success: true,
-      data: users.map(u => {
-        const s = subById.get(u.id)
-        const { status: subscriptionStatus, detail } = deriveStatus(s)
-        return {
-          ...u,
-          reputationScore: Number(u.reputationScore),
-          groupCount: u._count.groupMemberships,
-          subscriptionStatus,
-          subscriptionDetail: detail,
-          subscriptionExpiresAt: s?.cm_expires_at ?? null,
-          subscriptionCurrency: s?.cm_currency ?? null,
-          subscriptionAmount: s?.cm_amount != null ? Number(s.cm_amount) : null,
-          paymentReference: s?.member_reference ?? s?.invoice_no ?? null,
-          lastAttemptAt: s?.attempt_at ?? null,
-        }
-      }),
+    // ── Subscription filter ───────────────────────────────────
+    // Applied AFTER derivation, because the status is computed rather
+    // than stored — there is no column to put in a WHERE clause.
+    //
+    // POOL is the "who is a Community Member" view: currently paid,
+    // including those who have chosen not to renew. Someone whose
+    // membership ends next month is still a member today, and is
+    // exactly who you would want to see.
+    //
+    // Note this filters the fetched page, not the query. Fine while
+    // /api/users returns every user; when pagination lands, this moves
+    // into the SQL as a lateral-derived column.
+    const subscriptionFilter = searchParams.get('subscription')
+
+    const rows = users.map(u => {
+      const s = subById.get(u.id)
+      const { status: subscriptionStatus, detail } = deriveStatus(s)
+      return {
+        ...u,
+        reputationScore: Number(u.reputationScore),
+        groupCount: u._count.groupMemberships,
+        subscriptionStatus,
+        subscriptionDetail: detail,
+        subscriptionExpiresAt: s?.cm_expires_at ?? null,
+        subscriptionCurrency: s?.cm_currency ?? null,
+        subscriptionAmount: s?.cm_amount != null ? Number(s.cm_amount) : null,
+        paymentReference: s?.member_reference ?? s?.invoice_no ?? null,
+        lastAttemptAt: s?.attempt_at ?? null,
+      }
     })
+
+    const filtered = !subscriptionFilter || subscriptionFilter === 'ALL'
+      ? rows
+      : subscriptionFilter === 'POOL'
+        ? rows.filter(r => r.subscriptionStatus === 'PAID' || r.subscriptionStatus === 'ENDING')
+        : rows.filter(r => r.subscriptionStatus === subscriptionFilter)
+
+    return NextResponse.json({ success: true, data: filtered })
   } catch (e: any) {
     console.error('GET /api/users error:', e)
     return NextResponse.json({ success: false, error: e.message }, { status: 500 })

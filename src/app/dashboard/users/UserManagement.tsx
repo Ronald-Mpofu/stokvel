@@ -828,6 +828,10 @@ export default function UserManagement() {
   const [filterRole, setFilterRole]     = useState('ALL')
   const [filterStatus, setFilterStatus] = useState('ALL')
   const [filterKyc, setFilterKyc]       = useState('ALL')
+  // Subscription filter. POOL is the Community Member view — currently
+  // paid, including those who have chosen not to renew. Someone whose
+  // membership ends next month is still a member today.
+  const [filterSub, setFilterSub]       = useState('ALL')
 
   function showToast(msg: string, type: 'success'|'error' = 'success') {
     setToast({ msg, type })
@@ -840,6 +844,7 @@ export default function UserManagement() {
       if (filterRole   !== 'ALL') params.set('role', filterRole)
       if (filterStatus !== 'ALL') params.set('status', filterStatus)
       if (filterKyc    !== 'ALL') params.set('kycStatus', filterKyc)
+      if (filterSub    !== 'ALL') params.set('subscription', filterSub)
       if (search.trim()) params.set('search', search.trim())
 
       const res  = await fetch(`/api/users?${params}`)
@@ -848,7 +853,7 @@ export default function UserManagement() {
       else showToast('Failed to load users', 'error')
     } catch { showToast('Network error', 'error') }
     finally { setLoading(false) }
-  }, [filterRole, filterStatus, filterKyc, search])
+  }, [filterRole, filterStatus, filterKyc, filterSub, search])
 
   useEffect(() => { fetchUsers() }, [fetchUsers])
 
@@ -924,6 +929,16 @@ export default function UserManagement() {
           style={{ padding:'8px 12px', border:'1.5px solid #E2E8F0', borderRadius:'8px', fontSize:'13px', outline:'none', background:'white' }}>
           <option value="ALL">All KYC</option>
           {KYC_STATUSES.map(s => <option key={s} value={s}>{s.replace(/_/g,' ')}</option>)}
+        </select>
+        <select value={filterSub} onChange={e => setFilterSub(e.target.value)}
+          style={{ padding:'8px 12px', border:'1.5px solid #E2E8F0', borderRadius:'8px', fontSize:'13px', outline:'none',
+            background: filterSub === 'ALL' ? 'white' : '#F0FDF9',
+            borderColor: filterSub === 'ALL' ? '#E2E8F0' : '#A6F4C5' }}>
+          <option value="ALL">All subscriptions</option>
+          <option value="POOL">★ Community Members (paid + ending)</option>
+          {SUBSCRIPTION_STATUSES.map(s => (
+            <option key={s} value={s}>{SUB_LABELS[s] || s}</option>
+          ))}
         </select>
       </div>
 
