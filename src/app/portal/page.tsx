@@ -908,7 +908,7 @@ function ProfileTab({ user }: any) {
   const tier = TIER_META[user.tier]      || TIER_META.BRONZE
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '600px' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', maxWidth: '600px', width: '100%', margin: '0 auto' }}>
 
       {/* Avatar + name */}
       <div style={{ background: `linear-gradient(135deg, ${NAVY}, ${TEAL})`, borderRadius: '16px', padding: isMobile ? '20px' : '28px', display: 'flex', alignItems: 'center', gap: isMobile ? '14px' : '20px', flexWrap: 'wrap' }}>

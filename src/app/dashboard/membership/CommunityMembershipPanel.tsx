@@ -330,7 +330,10 @@ export default function CommunityMembershipPanel() {
   const remaining = daysUntil(membership?.expiresAt ?? null)
 
   return (
-    <div style={{ maxWidth: 720, padding: isMobile ? 16 : 0 }}>
+    // Centred, and no padding of its own — every surface it is embedded
+    // in (portal Profile tab, dashboard membership page) already pads.
+    // A second layer left the card visibly inset on a phone.
+    <div style={{ maxWidth: 720, width: '100%', margin: '0 auto' }}>
       <ToastBar toast={toast} />
 
       <div

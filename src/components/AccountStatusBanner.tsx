@@ -2,44 +2,33 @@
 
 // src/components/AccountStatusBanner.tsx
 //
-// Phase 4f.
+// Phase 4f, version 2 — short headline, explanation on demand.
 //
-// ── WHY THIS EXISTS ──────────────────────────────────────────
-// Group subscription lapse emails go to the GROUP ADMIN ONLY. That is
-// the right call — members cannot fix their group's billing, and a mass
-// email about someone else's card causes more alarm than it resolves.
+// ── WHY THE COPY IS SHORT ────────────────────────────────────
+// v1 led with a paragraph reassuring the member their records were
+// safe. Well-intentioned, but a banner is read in about two seconds and
+// a wall of text in it reads as a problem rather than a notice. Members
+// skipped it and still did not know what to do.
 //
-// But it leaves a gap: a member whose group has lapsed loses the
-// ability to transact through no fault of their own, and would
-// otherwise get no explanation at all. This banner IS that explanation.
-// Without it, the admin-only decision is silent failure.
+// So: one short line stating the state, one action, and a "Why?" toggle
+// carrying the reassurance for anyone who wants it. Same information,
+// available rather than imposed.
+//
+// ── WHY THIS EXISTS AT ALL ───────────────────────────────────
+// Group subscription lapse emails go to the GROUP ADMIN ONLY — members
+// cannot fix someone else's card, and a mass email would alarm more
+// than it resolves. But that leaves members losing the ability to
+// transact with no explanation. This banner is that explanation.
 //
 // Two components:
-//
-//   AccountStatusBanner   self-fetching, for the dashboard layout.
-//                         Reads entitlement from /api/auth/me and
-//                         explains any loss of access.
-//
-//   GroupPausedBanner     props-driven, for a group page where the
-//                         status is already known.
-//
-// ── TONE ─────────────────────────────────────────────────────
-// The rule throughout: say what still works before saying what does
-// not. A member who sees "your access is restricted" and nothing else
-// assumes their money is at risk. It is not — records stay readable in
-// every one of these states, and the banner says so first.
-//
-// ── PHASE 5 ──────────────────────────────────────────────────
-// Entitlement is currently advisory (`enforced: false`), so these are
-// warnings about what WILL happen. Copy is written to be correct either
-// way, so nothing needs rewording when enforcement is switched on.
+//   AccountStatusBanner   self-fetching, for dashboard/portal layouts
+//   GroupPausedBanner     props-driven, for a group page
 
 import { useState, useEffect } from 'react'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 const AMBER = '#B54708'
-const BORDER = '#E4E7EC'
 
 type Entitlement = {
   isEntitled: boolean
@@ -60,17 +49,20 @@ function Banner({
   tone,
   icon,
   title,
-  children,
+  detail,
   actionLabel,
   actionHref,
 }: {
   tone: Tone
   icon: string
   title: string
-  children: React.ReactNode
+  /** Shown only when the member asks. Keeps the banner to one line. */
+  detail: React.ReactNode
   actionLabel?: string
   actionHref?: string
 }) {
+  const [open, setOpen] = useState(false)
+
   const palette =
     tone === 'warn'
       ? { bg: '#FFFCF5', border: '#FEC84B', fg: AMBER }
@@ -79,42 +71,60 @@ function Banner({
   return (
     <div
       style={{
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        gap: 12,
-        padding: '12px 16px',
+        padding: '10px 14px',
         marginBottom: 16,
         borderRadius: 10,
         border: `1px solid ${palette.border}`,
         background: palette.bg,
       }}
     >
-      <div style={{ fontSize: 18, lineHeight: 1 }}>{icon}</div>
-      <div style={{ flex: 1, minWidth: 220 }}>
-        <div style={{ fontSize: 13, fontWeight: 700, color: NAVY, marginBottom: 2 }}>
+      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 16, lineHeight: 1 }}>{icon}</span>
+        <span style={{ flex: 1, minWidth: 160, fontSize: 13.5, fontWeight: 600, color: NAVY }}>
           {title}
-        </div>
-        <div style={{ fontSize: 12.5, color: palette.fg, lineHeight: 1.55 }}>
-          {children}
-        </div>
-      </div>
-      {actionLabel && actionHref ? (
-        <a
-          href={actionHref}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen(o => !o)}
+          aria-expanded={open}
           style={{
-            padding: '8px 14px',
-            borderRadius: 8,
-            background: TEAL,
-            color: '#FFFFFF',
-            fontSize: 13,
+            background: 'none',
+            border: 'none',
+            padding: '4px 6px',
+            font: 'inherit',
+            fontSize: 12.5,
             fontWeight: 600,
-            textDecoration: 'none',
+            color: palette.fg,
+            textDecoration: 'underline',
+            cursor: 'pointer',
             whiteSpace: 'nowrap',
           }}
         >
-          {actionLabel}
-        </a>
+          {open ? 'Hide' : 'Why?'}
+        </button>
+        {actionLabel && actionHref ? (
+          <a
+            href={actionHref}
+            style={{
+              padding: '7px 14px',
+              borderRadius: 8,
+              background: TEAL,
+              color: '#FFFFFF',
+              fontSize: 13,
+              fontWeight: 600,
+              textDecoration: 'none',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {actionLabel}
+          </a>
+        ) : null}
+      </div>
+
+      {open ? (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: `1px solid ${palette.border}`, fontSize: 12.5, color: '#475569', lineHeight: 1.6 }}>
+          {detail}
+        </div>
       ) : null}
     </div>
   )
@@ -138,22 +148,22 @@ export function GroupPausedBanner({
       tone="warn"
       icon="⏸️"
       title={`${groupName} is paused`}
-      actionLabel={isManager ? 'Reactivate group' : undefined}
+      actionLabel={isManager ? 'Reactivate' : undefined}
       actionHref={isManager ? '/dashboard/groups' : undefined}
-    >
-      {isManager ? (
-        <>
-          Nothing has been deleted — contributions, loans, stakes and history are all
-          intact. New activity is paused until the group subscription is renewed.
-        </>
-      ) : (
-        <>
-          Your records are safe and still viewable — contributions, stakes and balances
-          are unchanged. New activity is paused while the group administrator sorts out
-          the group subscription.
-        </>
-      )}
-    </Banner>
+      detail={
+        isManager ? (
+          <>
+            Nothing has been deleted — contributions, loans, stakes and history are all
+            intact. New activity is paused until the group subscription is renewed.
+          </>
+        ) : (
+          <>
+            Your records are safe and still viewable. New activity is paused while the
+            group administrator sorts out the group subscription.
+          </>
+        )
+      }
+    />
   )
 }
 
@@ -185,51 +195,64 @@ export default function AccountStatusBanner() {
   if (!loaded || !ent) return null
 
   // ── Group billing lapse ─────────────────────────────────────
-  // Highest priority: the member did nothing wrong, and this is the one
-  // case where the cause is entirely outside their control. Deliberately
-  // does NOT name the admin or suggest chasing them.
+  // Highest priority: the member did nothing wrong and cannot fix it.
+  // No payment prompt — there is nothing for them to pay.
   if (ent.subscriptionLapsedGroupIds.length > 0 && ent.qualifyingGroupIds.length === 0) {
-    const n = ent.subscriptionLapsedGroupIds.length
     return (
-      <Banner tone="warn" icon="⚠️" title="Your group's subscription needs attention">
-        Everything you&apos;ve contributed is safe and still visible — contributions,
-        stakes, loan balances and statements are all unchanged. {n === 1 ? 'A group you belong to has' : `${n} groups you belong to have`}{' '}
-        a billing issue, so new activity is paused until the group administrator resolves
-        it. There&apos;s nothing you need to do.
-      </Banner>
+      <Banner
+        tone="warn"
+        icon="⚠️"
+        title="Your group's subscription needs attention"
+        detail={
+          <>
+            Everything you&apos;ve contributed is safe and still visible. New activity is
+            paused until the group administrator resolves the group&apos;s billing —
+            there&apos;s nothing you need to do.
+          </>
+        }
+      />
     )
   }
 
-  // ── Membership lapsed, no group to fall back on ─────────────
+  // ── Not entitled ────────────────────────────────────────────
   if (!ent.isEntitled) {
-    const expired = ent.reasons.includes('COMMUNITY_MEMBERSHIP_EXPIRED')
     return (
       <Banner
         tone="warn"
         icon="🔒"
-        title={expired ? 'Your Community Membership has expired' : 'Your account is read-only'}
-        actionLabel="Renew"
+        title="Account inactive — payment outstanding"
+        actionLabel="Pay now"
         actionHref="/dashboard/join-fee"
-      >
-        You can still see everything about your own money — contributions, stakes, loan
-        balances and statements are all still here. What&apos;s paused is making new
-        contributions and seeing groups advertising for members.
-      </Banner>
+        detail={
+          <>
+            You can still see everything about your own money — contributions, stakes,
+            loan balances and statements are all still here. What&apos;s paused is making
+            new contributions and seeing groups looking for members.
+          </>
+        }
+      />
     )
   }
 
-  // ── Membership ending, but a group keeps them covered ───────
+  // ── Membership ending, group keeps them covered ─────────────
   if (
     ent.communityMembership?.status === 'ACTIVE' &&
     ent.qualifyingGroupIds.length > 0 &&
     !ent.canSeeAdverts
   ) {
     return (
-      <Banner tone="info" icon="ℹ️" title="Community Membership ending">
-        Your group membership keeps your full access, so nothing changes for your
-        contributions or schemes. You&apos;ll just stop seeing groups advertising for new
-        members.
-      </Banner>
+      <Banner
+        tone="info"
+        icon="ℹ️"
+        title="Community Membership ending"
+        detail={
+          <>
+            Your group membership keeps your full access, so nothing changes for your
+            contributions or schemes. You&apos;ll just stop seeing groups looking for new
+            members.
+          </>
+        }
+      />
     )
   }
 
