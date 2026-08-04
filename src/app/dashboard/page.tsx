@@ -5,7 +5,6 @@ import GroupsPage from './groups/page'
 import ContributionsPage from './contributions/page'
 import AssetsPage from './assets/AssetsPage'
 import SuppliersPage from './suppliers/page'
-import MembershipPoolPage from './membership/page'
 import NotificationsPage from './notifications/page'
 import LoansPage from './loans/LoansPage'
 import PropertyPage from './property/PropertyPage'
@@ -20,7 +19,6 @@ const NAVY = '#0D2137'
 const NAV_ITEMS = [
   { id: 'overview',      icon: '📊', label: 'Overview'        },
   { id: 'groups',        icon: '👥', label: 'Groups'          },
-  { id: 'membership',    icon: '🏦', label: 'Membership Pool' },
   { id: 'users',         icon: '🧑‍💼', label: 'User Management' },
   { id: 'notifications', icon: '🔔', label: 'Notifications'   },
   { id: 'portal',        icon: '👤', label: 'Member Portal'   },
@@ -31,7 +29,6 @@ const NAV_ITEMS = [
 const BOTTOM_NAV = [
   { id: 'overview',      icon: '📊', label: 'Home'     },
   { id: 'groups',        icon: '👥', label: 'Groups'   },
-  { id: 'membership',    icon: '🏦', label: 'Pool'     },
   { id: 'notifications', icon: '🔔', label: 'Alerts'   },
   { id: 'menu',          icon: '☰',  label: 'More'     },
 ]
@@ -245,7 +242,6 @@ export default function Dashboard() {
           {active === 'contributions' && <ContributionsPage />}
           {active === 'assets'        && <AssetsPage />}
           {active === 'suppliers'     && <SuppliersPage />}
-          {active === 'membership'    && <MembershipPoolPage />}
           {active === 'notifications' && <NotificationsPage />}
           {active === 'loans'         && <LoansPage />}
           {active === 'property'      && <PropertyPage />}
@@ -268,7 +264,7 @@ export default function Dashboard() {
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
            active !== 'users' && active !== 'groups' && active !== 'contributions' &&
-           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'assets' && active !== 'suppliers' &&
            active !== 'notifications' && active !== 'loans' && active !== 'property' &&
            active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
@@ -436,7 +432,6 @@ export default function Dashboard() {
           {active === 'contributions' && <ContributionsPage />}
           {active === 'assets'        && <AssetsPage />}
           {active === 'suppliers'     && <SuppliersPage />}
-          {active === 'membership'    && <MembershipPoolPage />}
           {active === 'notifications' && <NotificationsPage />}
           {active === 'loans'         && <LoansPage />}
           {active === 'property'      && <PropertyPage />}
@@ -460,7 +455,7 @@ export default function Dashboard() {
           )}
           {active !== 'overview' && active !== 'members' && active !== 'payouts' &&
            active !== 'users' && active !== 'groups' && active !== 'contributions' &&
-           active !== 'assets' && active !== 'suppliers' && active !== 'membership' &&
+           active !== 'assets' && active !== 'suppliers' &&
            active !== 'notifications' && active !== 'loans' && active !== 'property' &&
            active !== 'savings' && active !== 'portal' && (
             <ComingSoon page={NAV_ITEMS.find(n => n.id === active)?.label || ''} />
