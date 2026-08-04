@@ -25,10 +25,28 @@
 //   GroupPausedBanner     props-driven, for a group page
 
 import { useState, useEffect } from 'react'
+import { usePathname } from 'next/navigation'
 
 const TEAL = '#0F6E56'
 const NAVY = '#0D2137'
 const AMBER = '#B54708'
+
+/**
+ * Pages that already say everything this banner would.
+ *
+ * The fee page is the important one: a member arrives there by tapping
+ * "Pay now", and being told again that their account is inactive —
+ * above the payment form they are already looking at — reads as though
+ * the tap did not work.
+ *
+ * The membership pages carry the full status card, so the banner would
+ * be a second, shorter version of what is directly below it.
+ */
+const SUPPRESS_ON = [
+  '/dashboard/join-fee',
+  '/dashboard/membership',
+  '/portal/membership',
+]
 
 // 640px, matching every other breakpoint on the platform.
 function useIsMobile(breakpoint = 640): boolean {
@@ -215,10 +233,21 @@ export function GroupPausedBanner({
 // ── Account-wide banner (self-fetching) ──────────────────────
 
 export default function AccountStatusBanner() {
+  const pathname = usePathname()
   const [ent, setEnt] = useState<Entitlement | null>(null)
   const [loaded, setLoaded] = useState(false)
 
+  // Boundary-safe: matches the page and anything beneath it, but not a
+  // sibling like /dashboard/join-fee-history.
+  const suppressed = SUPPRESS_ON.some(
+    p => pathname === p || pathname?.startsWith(p + '/')
+  )
+
   useEffect(() => {
+    // Skip the request entirely when the banner cannot render — no
+    // point resolving entitlement for something that will return null.
+    if (suppressed) { setLoaded(true); return }
+
     let cancelled = false
     ;(async () => {
       try {
@@ -235,8 +264,9 @@ export default function AccountStatusBanner() {
       }
     })()
     return () => { cancelled = true }
-  }, [])
+  }, [suppressed])
 
+  if (suppressed) return null
   if (!loaded || !ent) return null
 
   // ── Group billing lapse ─────────────────────────────────────
