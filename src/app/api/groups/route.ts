@@ -104,10 +104,25 @@ export async function GET(req: NextRequest) {
         COALESCE(g."groupType", 'PRIVATE') as "groupType",
         COALESCE(g."publicAdvert", '')     as "publicAdvert",
         u."fullName" as "adminName", u.email as "adminEmail",
+        -- Officer display names resolved here rather than client-side.
+        -- The page used to look these up in the lazily-fetched member
+        -- roster, which meant the name was blank until the roster
+        -- landed, and stayed blank forever for any officer whose
+        -- membership was not ACTIVE (the roster's default filter) or
+        -- who had no GroupMember row at all. Resolving against "User"
+        -- makes the name independent of roster status, roster timing
+        -- and roster membership.
+        --
+        -- Both joins are nested loops on "User".id (primary key), so
+        -- this costs no extra round trip and no extra scan.
+        t."fullName" as "treasurerName",
+        s."fullName" as "secretaryName",
         (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id AND status <> 'EXITED') as "memberCount",
         (SELECT COUNT(*) FROM "Loan" WHERE "groupId" = g.id) as "loanCount"
       FROM "Group" g
       JOIN "User" u ON u.id = g."adminUserId"
+      LEFT JOIN "User" t ON t.id = g."treasurerId" AND t."deletedAt" IS NULL
+      LEFT JOIN "User" s ON s.id = g."secretaryId" AND s."deletedAt" IS NULL
       WHERE g."deletedAt" IS NULL
         AND (
           $2::boolean IS TRUE
@@ -157,6 +172,13 @@ export async function GET(req: NextRequest) {
       branding:              g.branding    || '',
       treasurerId:           g.treasurerId || '',
       secretaryId:           g.secretaryId  || '',
+      // Additive fields. Empty string (not null) so the page can use
+      // `treasurerName || fallback` without a null check, matching the
+      // convention already used by treasurerId/secretaryId above.
+      // Empty means either unassigned or assigned to a deleted user —
+      // both render as the em-dash placeholder.
+      treasurerName:         g.treasurerName || '',
+      secretaryName:         g.secretaryName || '',
       city:                  g.city         || '',
       zipCode:               g.zipCode      || '',
       groupType:             g.groupType    || 'PRIVATE',

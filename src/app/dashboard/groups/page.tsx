@@ -61,6 +61,97 @@ const EMPTY_FORM = {
 }
 
 // ── Helpers ───────────────────────────────────────────────────
+
+/**
+ * Display name for the Treasurer / Secretary slots.
+ *
+ * `serverName` is the authoritative source — /api/groups resolves it by
+ * joining "User" on the officer id, so it is correct regardless of the
+ * officer's membership status and regardless of whether the member
+ * roster has loaded. It is the ONLY source that works for an officer
+ * who is SUSPENDED, DEFAULTED or PENDING, because the roster request
+ * filters to ACTIVE by default.
+ *
+ * `roster` remains as a fallback for one narrow window: immediately
+ * after a save, when selectedGroup is patched locally from the edit
+ * form and the server response has not been re-read yet.
+ *
+ * Module-level by design — see the project rule on helpers defined
+ * inside render.
+ */
+function officerName(serverName?: string, officerId?: string, roster: any[] = []): string {
+  if (serverName) return serverName
+  if (!officerId) return '—'
+  const match = roster.find((m: any) => (m.userId || m.id) === officerId)
+  return match?.fullName || '—'
+}
+
+/**
+ * Option list for an officer <select>.
+ *
+ * The roster only contains ACTIVE members, so an officer who is
+ * SUSPENDED, DEFAULTED or PENDING has no matching <option>. A <select>
+ * whose value matches no option renders blank — the assignment looks
+ * lost even though it is intact in the database and will still be saved
+ * on submit. Splicing the current assignment in keeps what is stored
+ * and what is shown in agreement.
+ */
+function officerOptions(
+  roster: any[],
+  currentId?: string,
+  currentName?: string
+): { id: string; label: string }[] {
+  const options = roster.map((m: any) => ({
+    id:    String(m.userId || m.id),
+    label: String(m.fullName || '?'),
+  }))
+  if (currentId && !options.some(o => o.id === currentId)) {
+    options.unshift({
+      id:    currentId,
+      label: `${currentName || 'Assigned member'} (not in active roster)`,
+    })
+  }
+  return options
+}
+
+/**
+ * Treasurer / Secretary picker. Module-level so its component identity
+ * is stable across renders — see the project rule on helpers defined
+ * inside render.
+ */
+function OfficerSelect({
+  label, valueId, serverName, roster, onChange, inputStyle, labelStyle,
+}: {
+  label: string
+  valueId: string
+  serverName?: string
+  roster: any[]
+  onChange: (v: string) => void
+  inputStyle: React.CSSProperties
+  labelStyle: React.CSSProperties
+}) {
+  const options = officerOptions(roster, valueId, serverName)
+  const selected = options.find(o => o.id === valueId)
+  return (
+    <div>
+      <label style={labelStyle}>{label}</label>
+      <select
+        value={valueId || ''}
+        onChange={e => onChange(e.target.value)}
+        style={{ ...inputStyle, background:'white' }}
+      >
+        <option value="">— Select {label} —</option>
+        {options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+      </select>
+      {valueId && (
+        <div style={{ fontSize:'11px', color:'#166534', marginTop:'3px' }}>
+          ✓ {selected?.label || '—'}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function statusBadge(status: string) {
   const map: Record<string, [string,string]> = {
     ACTIVE:    ['#DCFCE7','#166534'],
@@ -564,6 +655,21 @@ export default function GroupsPage() {
           currency:            editLocation.currency || editForm.currency,
           groupType:           editForm.groupType || 'PRIVATE',
           publicAdvert:        editForm.publicAdvert || '',
+          // editForm carries only the officer IDs. Without these two the
+          // patch would leave the OLD treasurerName/secretaryName on
+          // selectedGroup, so reassigning an officer would show the
+          // previous person's name until the next full reload.
+          //
+          // Resolved from the roster where possible; where the officer
+          // is not in the roster (non-ACTIVE membership) we clear the
+          // name and let the helper fall back to the em-dash until
+          // fetchGroups supplies the authoritative value.
+          treasurerName: editForm.treasurerId
+            ? (groupMembers.find((m:any)=>(m.userId||m.id)===editForm.treasurerId)?.fullName || '')
+            : '',
+          secretaryName: editForm.secretaryId
+            ? (groupMembers.find((m:any)=>(m.userId||m.id)===editForm.secretaryId)?.fullName || '')
+            : '',
         }
         setSelectedGroup((prev: any) => ({ ...prev, ...saved }))
         // Also refresh groups list in background
@@ -1597,8 +1703,8 @@ export default function GroupsPage() {
                             <div>
                               {[
                                 ['Admin',        g.adminName],
-                                ['Treasurer',    groupMembers.find((m:any)=>(m.userId||m.id)===g.treasurerId)?.fullName || '—'],
-                                ['Secretary',    groupMembers.find((m:any)=>(m.userId||m.id)===g.secretaryId)?.fullName  || '—'],
+                                ['Treasurer',    officerName(g.treasurerName, g.treasurerId, groupMembers)],
+                                ['Secretary',    officerName(g.secretaryName, g.secretaryId, groupMembers)],
                                 ['Enrolled',     `${g.memberCount} members`],
                                 ['Max Members',  g.maxMembers],
                                 ['Vacancies',    Math.max(0, g.maxMembers - g.memberCount)],
@@ -2197,22 +2303,24 @@ export default function GroupsPage() {
                                   <label style={LABEL}>Group Admin</label>
                                   <div style={{...INPUT, background:'#F8FAFC', color:'#64748B'}}>{g.adminName || '—'}</div>
                                 </div>
-                                <div>
-                                  <label style={LABEL}>Treasurer</label>
-                                  <select value={ef.treasurerId||''} onChange={e=>setEf('treasurerId')(e.target.value)} style={{...INPUT, background:'white'}}>
-                                    <option value="">— Select Treasurer —</option>
-                                    {groupMembers.map((m: any) => <option key={m.userId||m.id} value={m.userId||m.id}>{m.fullName}</option>)}
-                                  </select>
-                                  {ef.treasurerId && <div style={{fontSize:'11px',color:'#166534',marginTop:'3px'}}>✓ {groupMembers.find((m:any)=>(m.userId||m.id)===ef.treasurerId)?.fullName}</div>}
-                                </div>
-                                <div>
-                                  <label style={LABEL}>Secretary</label>
-                                  <select value={ef.secretaryId||''} onChange={e=>setEf('secretaryId')(e.target.value)} style={{...INPUT, background:'white'}}>
-                                    <option value="">— Select Secretary —</option>
-                                    {groupMembers.map((m: any) => <option key={m.userId||m.id} value={m.userId||m.id}>{m.fullName}</option>)}
-                                  </select>
-                                  {ef.secretaryId && <div style={{fontSize:'11px',color:'#166534',marginTop:'3px'}}>✓ {groupMembers.find((m:any)=>(m.userId||m.id)===ef.secretaryId)?.fullName}</div>}
-                                </div>
+                                <OfficerSelect
+                                  label="Treasurer"
+                                  valueId={ef.treasurerId || ''}
+                                  serverName={g.treasurerName}
+                                  roster={groupMembers}
+                                  onChange={setEf('treasurerId')}
+                                  inputStyle={INPUT}
+                                  labelStyle={LABEL}
+                                />
+                                <OfficerSelect
+                                  label="Secretary"
+                                  valueId={ef.secretaryId || ''}
+                                  serverName={g.secretaryName}
+                                  roster={groupMembers}
+                                  onChange={setEf('secretaryId')}
+                                  inputStyle={INPUT}
+                                  labelStyle={LABEL}
+                                />
                                 <div>
                                   <label style={LABEL}>Max Members</label>
                                   <input type="number" min="2" max="500" value={ef.maxMembers} onChange={e=>setEf('maxMembers')(e.target.value)} style={INPUT}/>
