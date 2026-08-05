@@ -579,6 +579,9 @@ export default function GroupsPage() {
   const [location, setLocation]          = useState({ countryCode:'', provinceCode:'', city:'', currency:'' })
   const [groupMembers, setGroupMembers]  = useState<any[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
+  // Non-null when the roster request failed. Kept separate from an empty
+  // roster so the two can never render the same way again.
+  const [membersError, setMembersError]     = useState<string|null>(null)
   const [blockedRemoveIds, setBlockedRemoveIds] = useState<Set<string>>(new Set())
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null)
   const [editForm, setEditForm]          = useState<any>(null)
@@ -713,8 +716,21 @@ export default function GroupsPage() {
   }
 
   // ── Fetch members for selected group ────────────────────────
+  //
+  // A failed request must NEVER render as "No members yet". Before this,
+  // a 404 on /api/members produced an HTML error page, mRes.json() threw
+  // parsing it, and the catch below set an empty array — so a dead
+  // endpoint and an empty group looked identical on screen. The route
+  // file was named api-members-route.ts instead of route.ts and had
+  // never resolved in production; the UI reported "No members yet" for
+  // every group for as long as that was true.
+  //
+  // membersError is now set on any non-OK response, non-JSON body, or
+  // { success: false } payload, and the Members tab renders a retry
+  // panel with the status code instead of the friendly empty state.
   const fetchGroupMembers = useCallback(async (groupId: string) => {
     setMembersLoading(true)
+    setMembersError(null)
     try {
       // Roster + the set of members with a financial footprint (blocked from
       // removal) fetched in parallel — never sequential.
@@ -722,23 +738,51 @@ export default function GroupsPage() {
         fetch(`/api/members?groupId=${groupId}`),
         fetch(`/api/members/remove?groupId=${groupId}`),
       ])
-      const data = await mRes.json()
-      if (data.success) {
-        const members = data.data || []
-        // Normalise: ensure every member has a userId field
-        const normalised = members.map((m: any) => ({
-          ...m,
-          userId: m.userId || m.user?.id || m.id,
-          fullName: m.fullName || m.user?.fullName || m.name || '?',
-        }))
-        setGroupMembers(normalised)
-      } else setGroupMembers([])
+
+      // Check transport BEFORE parsing. A 404 or 500 returns HTML, and
+      // .json() on HTML throws a SyntaxError that says nothing useful.
+      if (!mRes.ok) {
+        setGroupMembers([])
+        setMembersError(
+          mRes.status === 404
+            ? 'Member service not found (404). The /api/members route is not deployed.'
+            : `Could not load members (HTTP ${mRes.status}).`
+        )
+      } else {
+        let data: any = null
+        try {
+          data = await mRes.json()
+        } catch {
+          setGroupMembers([])
+          setMembersError('Member service returned an unreadable response.')
+        }
+
+        if (data) {
+          if (data.success) {
+            const members = data.data || []
+            // Normalise: ensure every member has a userId field
+            const normalised = members.map((m: any) => ({
+              ...m,
+              userId: m.userId || m.user?.id || m.id,
+              fullName: m.fullName || m.user?.fullName || m.name || '?',
+            }))
+            setGroupMembers(normalised)
+          } else {
+            setGroupMembers([])
+            setMembersError(data.error || 'Could not load members.')
+          }
+        }
+      }
 
       try {
         const bData = await bRes.json()
         setBlockedRemoveIds(new Set<string>(bData?.success ? (bData.data?.blockedUserIds || []) : []))
       } catch { setBlockedRemoveIds(new Set<string>()) }
-    } catch { setGroupMembers([]); setBlockedRemoveIds(new Set<string>()) }
+    } catch (e: any) {
+      setGroupMembers([])
+      setBlockedRemoveIds(new Set<string>())
+      setMembersError('Network error while loading members.')
+    }
     finally { setMembersLoading(false) }
   }, [])
 
@@ -1808,7 +1852,7 @@ export default function GroupsPage() {
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
               <div>
                 <span style={{ fontSize:'14px', fontWeight:'700', color:NAVY }}>
-                  {membersLoading ? '...' : `${groupMembers.length} of ${g.maxMembers} members`}
+                  {membersLoading ? '...' : membersError ? 'Roster unavailable' : `${groupMembers.length} of ${g.maxMembers} members`}
                 </span>
                 {!membersLoading && groupMembers.length > 0 && (
                   <span style={{ marginLeft:'10px', fontSize:'12px', color:'#64748B' }}>
@@ -2036,8 +2080,23 @@ export default function GroupsPage() {
               </div>
             )}
 
-            {/* Empty state */}
-            {!membersLoading && groupMembers.length === 0 && (
+            {/* Load failure — deliberately distinct from the empty state.
+                Shows the reason and a retry rather than implying the
+                group has no members. */}
+            {!membersLoading && membersError && (
+              <div style={{ background:'#FEF2F2', borderRadius:'12px', border:'1.5px solid #FECACA', padding:'28px', textAlign:'center' }}>
+                <div style={{ fontSize:'32px', marginBottom:'10px' }}>⚠️</div>
+                <h4 style={{ fontSize:'14px', fontWeight:'600', color:'#991B1B', margin:'0 0 6px' }}>Could not load members</h4>
+                <p style={{ fontSize:'13px', color:'#B91C1C', margin:'0 0 4px' }}>{membersError}</p>
+                <p style={{ fontSize:'11px', color:'#DC2626', margin:'0 0 16px' }}>
+                  This group may still have members — the roster could not be read.
+                </p>
+                <button onClick={() => fetchGroupMembers(g.id)} style={{ padding:'9px 20px', background:'#B91C1C', color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>↻ Retry</button>
+              </div>
+            )}
+
+            {/* Empty state — only after a SUCCESSFUL load returning zero rows */}
+            {!membersLoading && !membersError && groupMembers.length === 0 && (
               <div style={{ background:'white', borderRadius:'12px', border:'1.5px dashed #E2E8F0', padding:'48px', textAlign:'center' }}>
                 <div style={{ fontSize:'40px', marginBottom:'12px' }}>👥</div>
                 <h4 style={{ fontSize:'14px', fontWeight:'600', color:NAVY, margin:'0 0 6px' }}>No members yet</h4>
