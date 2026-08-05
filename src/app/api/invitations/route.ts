@@ -576,16 +576,54 @@ async function handleResend(body: any): Promise<NextResponse> {
       data:  { status: 'PENDING', expiresAt: newExpiry, resendCount: { increment: 1 }, reminderSentAt: new Date() },
     })
 
+    // ── Resend on the SAME channels the invitation was sent on ──
+    // v2 only ever resent email. A phone-only invitation reported
+    // "Invitation resent" and sent nothing at all — the expiry was
+    // extended and both sides believed a reminder had gone out.
+    const results = { email: false, sms: false, errors: [] as string[] }
+
     if (inv.email && ['EMAIL','BOTH'].includes(inv.channel)) {
-      await sendInvitationEmail({
-        to: inv.email, inviteUrl, groupName: inv.group.name,
-        inviterName: inv.invitedBy.fullName, memberName: inv.fullName,
-        contribution: Number(inv.group.contributionAmount), currency: inv.group.currency,
-        personalMessage: inv.personalMessage, expiresAt: newExpiry, isReminder: true,
-      }).catch(e => console.warn('Resend email failed:', e.message))
+      try {
+        await sendInvitationEmail({
+          to: inv.email, inviteUrl, groupName: inv.group.name,
+          inviterName: inv.invitedBy.fullName, memberName: inv.fullName,
+          contribution: Number(inv.group.contributionAmount), currency: inv.group.currency,
+          personalMessage: inv.personalMessage, expiresAt: newExpiry, isReminder: true,
+        })
+        await prisma.memberInvitation.update({ where: { id: invitationId }, data: { emailSentAt: new Date() } })
+        results.email = true
+      } catch (e: any) {
+        console.error('Resend email error:', e?.message)
+        results.errors.push(`Email: ${e?.message || 'send failed'}`)
+      }
     }
 
-    return NextResponse.json({ success: true, message: `Invitation resent. New expiry: ${newExpiry.toLocaleDateString()}` })
+    if (inv.phone && ['SMS','BOTH'].includes(inv.channel)) {
+      try {
+        await sendInvitationSMS({
+          to: inv.phone, inviteUrl, groupName: inv.group.name,
+          inviterName: inv.invitedBy.fullName,
+          contribution: Number(inv.group.contributionAmount), currency: inv.group.currency,
+        })
+        await prisma.memberInvitation.update({ where: { id: invitationId }, data: { smsSentAt: new Date() } })
+        results.sms = true
+      } catch (e: any) {
+        console.error('Resend SMS error:', e?.message)
+        results.errors.push(`SMS: ${e?.message || 'send failed'}`)
+      }
+    }
+
+    // The message reports what was actually delivered, not what was attempted.
+    const sentVia = [results.email && 'email', results.sms && 'SMS'].filter(Boolean).join(' and ')
+    const message = sentVia
+      ? `Invitation resent via ${sentVia}. New expiry: ${newExpiry.toLocaleDateString()}`
+      : `Expiry extended to ${newExpiry.toLocaleDateString()}, but nothing was delivered.${results.errors.length ? ' ' + results.errors.join('; ') : ' Share the invitation link manually.'}`
+
+    return NextResponse.json({
+      success: true,
+      data: { emailSent: results.email, smsSent: results.sms, errors: results.errors, inviteUrl },
+      message,
+    })
   } catch (e: any) {
     return NextResponse.json({ success: false, error: safeError(e, 'Request failed') }, { status: 500 })
   }
@@ -711,13 +749,25 @@ async function sendInvitationSMS({ to, inviteUrl, groupName, inviterName, contri
   const username = process.env.AT_USERNAME
 
   if (!apiKey || !username) {
-    throw new Error('SMS not configured. Add AT_API_KEY and AT_USERNAME to .env.local')
+    throw new Error('SMS not configured — AT_API_KEY and AT_USERNAME are unset')
   }
+
+  // ── Endpoint MUST follow the username ──────────────────────
+  // Africa's Talking runs two completely separate environments with
+  // separate credentials and separate hosts. The host was hardcoded to
+  // sandbox, so production credentials were being posted to the sandbox
+  // API: the call returns 201, the invitation is marked smsSentAt, and
+  // no message is ever delivered to a real handset. A silent failure is
+  // the worst kind here, because the admin sees "SMS sent" in the UI.
+  const isSandbox = username === 'sandbox'
+  const endpoint  = isSandbox
+    ? 'https://api.sandbox.africastalking.com/version1/messaging'
+    : 'https://api.africastalking.com/version1/messaging'
 
   const currencySymbol = currency === 'USD' ? '$' : currency
   const message = `${inviterName} invited you to join ${groupName} on Windfall Community Deals. Contribute ${currencySymbol}${contribution}/mo. Accept here: ${inviteUrl}`
 
-  const response = await fetch('https://api.sandbox.africastalking.com/version1/messaging', {
+  const response = await fetch(endpoint, {
     method:  'POST',
     headers: {
       'apiKey':       apiKey,
