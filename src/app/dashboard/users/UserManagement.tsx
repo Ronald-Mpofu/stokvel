@@ -8,12 +8,26 @@ const RED   = '#DC2626'
 const AMBER = '#B45309'
 
 // ── Types ─────────────────────────────────────────────────────
+/** One live group membership, as returned by /api/users. */
+type UserGroup = {
+  id: string
+  name: string
+  /** The user's role WITHIN this group — often differs from User.role. */
+  role: string
+  /** Their membership status in this group (EXITED never appears). */
+  status: string
+  /** The group's own status, so a PAUSED group reads differently. */
+  groupStatus: string
+}
+
 type User = {
   id: string; fullName: string; email: string; phone: string
   role: string; status: string; kycStatus: string; tier: string
   reputationScore: number; country: string; city: string
   createdAt: string; lastLoginAt: string | null
   emailVerifiedAt: string | null; groupCount: number
+  /** Live memberships. groupCount is this array's length. */
+  groups: UserGroup[]
   isBlacklisted: boolean; blacklistReason: string | null
   // Derived server-side in /api/users — never stored. See the note
   // there on precedence.
@@ -101,6 +115,98 @@ function Badge({ text, colors, size = 11 }: { text: string; colors: [string,stri
       padding: '2px 8px', borderRadius: '999px', whiteSpace: 'nowrap' as any }}>
       {text.replace(/_/g,' ')}
     </span>
+  )
+}
+
+/**
+ * Short role marker shown inside a group chip. The user's role WITHIN a
+ * group is frequently not their platform role — a MEMBER on the platform
+ * can be the TREASURER of one group and an ordinary member of another —
+ * and that distinction is usually the thing being looked for.
+ */
+const GROUP_ROLE_ABBR: Record<string, string> = {
+  GROUP_ADMIN:        'Admin',
+  TREASURER:          'Treas',
+  INVESTMENT_MANAGER: 'Inv Mgr',
+  NATIONAL_ADMIN:     'Nat Admin',
+  SYSTEM_ADMIN:       'Sys Admin',
+  AUDITOR:            'Auditor',
+  MEMBER:             '',
+}
+
+/**
+ * Group chips for one user.
+ *
+ * Two are shown by default; the rest collapse behind a "+N" pill so a
+ * user in a dozen groups cannot blow the row height out. Clicking a chip
+ * filters the whole list to that group, which turns the column into a
+ * two-way lookup: find a person, then see everyone they sit with.
+ *
+ * Module-level so its component identity is stable across renders.
+ */
+function GroupChips({
+  groups, expanded, onToggle, onPick,
+}: {
+  groups: UserGroup[]
+  expanded: boolean
+  onToggle: () => void
+  onPick: (groupId: string) => void
+}) {
+  if (!groups || groups.length === 0) {
+    return <span style={{ fontSize:'12px', color:'#94A3B8' }}>—</span>
+  }
+
+  const VISIBLE = 2
+  const shown  = expanded ? groups : groups.slice(0, VISIBLE)
+  const hidden = groups.length - shown.length
+
+  return (
+    <div style={{ display:'flex', flexWrap:'wrap', gap:'4px', maxWidth:'260px' }}>
+      {shown.map(g => {
+        // A membership that is not ACTIVE, or a group that is not ACTIVE,
+        // is tinted amber rather than hidden — the admin needs to see it
+        // and see that something about it is off.
+        const healthy = g.status === 'ACTIVE' && g.groupStatus === 'ACTIVE'
+        const abbr = GROUP_ROLE_ABBR[g.role] ?? g.role
+        return (
+          <button
+            key={g.id}
+            onClick={() => onPick(g.id)}
+            title={`${g.name} · ${g.role.replace(/_/g,' ')} · membership ${g.status} · group ${g.groupStatus}\nClick to filter by this group`}
+            style={{
+              display:'inline-flex', alignItems:'center', gap:'4px',
+              background: healthy ? '#E1F5EE' : '#FEF3C7',
+              color:      healthy ? '#0F6E56' : '#92400E',
+              border:'none', borderRadius:'999px', padding:'2px 8px',
+              fontSize:'11px', fontWeight:'600', cursor:'pointer',
+              maxWidth:'150px', overflow:'hidden',
+              textOverflow:'ellipsis', whiteSpace:'nowrap' as any,
+            }}
+          >
+            {!healthy && <span style={{ fontSize:'9px' }}>⚠</span>}
+            <span style={{ overflow:'hidden', textOverflow:'ellipsis' }}>{g.name}</span>
+            {abbr && (
+              <span style={{ fontWeight:'500', opacity:0.75, fontSize:'10px' }}>· {abbr}</span>
+            )}
+          </button>
+        )
+      })}
+
+      {hidden > 0 && (
+        <button onClick={onToggle}
+          style={{ background:'#F1F5F9', color:'#475569', border:'none', borderRadius:'999px',
+            padding:'2px 8px', fontSize:'11px', fontWeight:'600', cursor:'pointer' }}>
+          +{hidden} more
+        </button>
+      )}
+      {expanded && groups.length > VISIBLE && (
+        <button onClick={onToggle}
+          style={{ background:'transparent', color:'#94A3B8', border:'none',
+            padding:'2px 4px', fontSize:'11px', cursor:'pointer' }}>
+          less
+        </button>
+      )}
+    </div>
   )
 }
 
@@ -625,7 +731,24 @@ function UserDetail({ user, onBack, onUpdate, onEmail }: { user: User; onBack: (
                 ['Rep Score',    <span key="rs" style={{ fontSize:'14px', fontWeight:'700', color:TEAL }}>{user.reputationScore}</span>],
                 ['Blacklisted',  user.isBlacklisted ? '⛔ Yes' : '✅ No'],
                 ['Blacklist Reason', user.blacklistReason || '—'],
-                ['Groups',       `${user.groupCount}`],
+                ['Groups', user.groups && user.groups.length > 0 ? (
+                  <div key="g" style={{ display:'flex', flexWrap:'wrap', gap:'4px' }}>
+                    {user.groups.map(g => (
+                      <span key={g.id}
+                        title={`${g.role.replace(/_/g,' ')} · membership ${g.status} · group ${g.groupStatus}`}
+                        style={{
+                          background: g.status === 'ACTIVE' && g.groupStatus === 'ACTIVE' ? '#E1F5EE' : '#FEF3C7',
+                          color:      g.status === 'ACTIVE' && g.groupStatus === 'ACTIVE' ? '#0F6E56' : '#92400E',
+                          borderRadius:'999px', padding:'2px 8px', fontSize:'11px', fontWeight:'600',
+                        }}>
+                        {g.name}
+                        {GROUP_ROLE_ABBR[g.role] ? (
+                          <span style={{ fontWeight:'500', opacity:0.75 }}> · {GROUP_ROLE_ABBR[g.role]}</span>
+                        ) : null}
+                      </span>
+                    ))}
+                  </div>
+                ) : '—'],
               ].map(([l,v]) => (
                 <div key={String(l)} style={{ display:'grid', gridTemplateColumns:'120px 1fr', gap:'8px', padding:'6px 0', borderBottom:'1px solid #F8FAFC', fontSize:'12px', alignItems:'center' }}>
                   <span style={{ color:'#64748B' }}>{l}</span>
@@ -832,6 +955,22 @@ export default function UserManagement() {
   // paid, including those who have chosen not to renew. Someone whose
   // membership ends next month is still a member today.
   const [filterSub, setFilterSub]       = useState('ALL')
+  // Reverse lookup — narrow the list to one group's members.
+  const [filterGroup, setFilterGroup]   = useState('ALL')
+  // Populated from meta.groups: the full live group list, so the
+  // dropdown does not collapse to the selected group.
+  const [groupOptions, setGroupOptions] = useState<{id:string;name:string;status:string}[]>([])
+  // Rows whose group chips are expanded past the first two.
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set())
+
+  function toggleRow(userId: string) {
+    setExpandedRows(prev => {
+      const next = new Set(prev)
+      if (next.has(userId)) next.delete(userId)
+      else next.add(userId)
+      return next
+    })
+  }
 
   function showToast(msg: string, type: 'success'|'error' = 'success') {
     setToast({ msg, type })
@@ -845,15 +984,21 @@ export default function UserManagement() {
       if (filterStatus !== 'ALL') params.set('status', filterStatus)
       if (filterKyc    !== 'ALL') params.set('kycStatus', filterKyc)
       if (filterSub    !== 'ALL') params.set('subscription', filterSub)
+      if (filterGroup  !== 'ALL') params.set('groupId', filterGroup)
       if (search.trim()) params.set('search', search.trim())
 
       const res  = await fetch(`/api/users?${params}`)
       const data = await res.json()
-      if (data.success) setUsers(data.data)
+      if (data.success) {
+        setUsers(data.data)
+        // meta.groups is the full live list and is independent of the
+        // current filters, so it is safe to overwrite every fetch.
+        if (data.meta?.groups) setGroupOptions(data.meta.groups)
+      }
       else showToast('Failed to load users', 'error')
     } catch { showToast('Network error', 'error') }
     finally { setLoading(false) }
-  }, [filterRole, filterStatus, filterKyc, filterSub, search])
+  }, [filterRole, filterStatus, filterKyc, filterSub, filterGroup, search])
 
   useEffect(() => { fetchUsers() }, [fetchUsers])
 
@@ -940,6 +1085,25 @@ export default function UserManagement() {
             <option key={s} value={s}>{SUB_LABELS[s] || s}</option>
           ))}
         </select>
+        <select value={filterGroup} onChange={e => setFilterGroup(e.target.value)}
+          style={{ padding:'8px 12px', border:'1.5px solid #E2E8F0', borderRadius:'8px', fontSize:'13px', outline:'none',
+            maxWidth:'220px',
+            background: filterGroup === 'ALL' ? 'white' : '#F0FDF9',
+            borderColor: filterGroup === 'ALL' ? '#E2E8F0' : '#A6F4C5' }}>
+          <option value="ALL">All Groups</option>
+          {groupOptions.map(g => (
+            <option key={g.id} value={g.id}>
+              {g.name}{g.status !== 'ACTIVE' ? ` (${g.status})` : ''}
+            </option>
+          ))}
+        </select>
+        {filterGroup !== 'ALL' && (
+          <button onClick={() => setFilterGroup('ALL')}
+            style={{ padding:'8px 12px', background:'#F1F5F9', border:'1.5px solid #E2E8F0', borderRadius:'8px',
+              fontSize:'12px', cursor:'pointer', color:'#475569' }}>
+            ✕ Clear group
+          </button>
+        )}
       </div>
 
       {/* Loading */}
@@ -1007,7 +1171,14 @@ export default function UserManagement() {
                   <td style={{ padding:'12px 14px' }}><Badge text={u.kycStatus} colors={KYC_COLORS[u.kycStatus] || ['#F1F5F9','#475569']} /></td>
                   <td style={{ padding:'12px 14px' }}><Badge text={u.tier} colors={TIER_COLORS[u.tier] || ['#F1F5F9','#475569']} /></td>
                   <td style={{ padding:'12px 14px', fontSize:'13px', fontWeight:'700', color:TEAL }}>{u.reputationScore}</td>
-                  <td style={{ padding:'12px 14px', fontSize:'13px', color:'#374151' }}>{u.groupCount}</td>
+                  <td style={{ padding:'12px 14px' }}>
+                    <GroupChips
+                      groups={u.groups || []}
+                      expanded={expandedRows.has(u.id)}
+                      onToggle={() => toggleRow(u.id)}
+                      onPick={gid => setFilterGroup(gid)}
+                    />
+                  </td>
                   <td style={{ padding:'12px 14px' }}>
                     <div style={{ display:'flex', gap:'6px' }}>
                       <button onClick={() => setSelected(u)}

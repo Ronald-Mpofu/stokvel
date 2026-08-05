@@ -9,6 +9,8 @@ export async function GET(req: NextRequest) {
     const status    = searchParams.get('status')
     const kycStatus = searchParams.get('kycStatus')
     const search    = searchParams.get('search')
+    // Reverse lookup: narrow the list to members of one group.
+    const groupId   = searchParams.get('groupId')
 
     const where: any = {}
     if (role)      where.role      = role
@@ -21,19 +23,38 @@ export async function GET(req: NextRequest) {
         { phone:    { contains: search, mode: 'insensitive' } },
       ]
     }
+    // Relation filter — resolved in SQL, not by post-filtering the page.
+    // EXITED is excluded so a departed member does not keep showing up
+    // under a group they have left.
+    if (groupId) {
+      where.groupMemberships = {
+        some: { groupId, status: { not: 'EXITED' } },
+      }
+    }
 
-    const users = await prisma.user.findMany({
-      where,
-      select: {
-        id: true, fullName: true, email: true, phone: true,
-        role: true, status: true, kycStatus: true, tier: true,
-        reputationScore: true, country: true, city: true,
-        createdAt: true, lastLoginAt: true, emailVerifiedAt: true,
-        isBlacklisted: true, blacklistReason: true,
-        _count: { select: { groupMemberships: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-    })
+    // The group list that populates the filter dropdown. Runs in
+    // PARALLEL with the user query rather than after it, so it adds a
+    // query but no extra latency — the round trip to Tokyo is the cost
+    // that matters, and this one overlaps.
+    const [users, allGroups] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true, fullName: true, email: true, phone: true,
+          role: true, status: true, kycStatus: true, tier: true,
+          reputationScore: true, country: true, city: true,
+          createdAt: true, lastLoginAt: true, emailVerifiedAt: true,
+          isBlacklisted: true, blacklistReason: true,
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      prisma.$queryRawUnsafe<any[]>(
+        `SELECT id, name, status::text AS status
+         FROM "Group"
+         WHERE "deletedAt" IS NULL
+         ORDER BY name ASC`
+      ),
+    ])
 
     // ── Subscription status ───────────────────────────────────
     // ONE extra query for the whole page rather than a lookup per row.
@@ -72,7 +93,33 @@ export async function GET(req: NextRequest) {
                 AND gm."status" IN ('ACTIVE'::"MemberStatus",'SUSPENDED'::"MemberStatus",'DEFAULTED'::"MemberStatus")
                 AND g."status"  IN ('ACTIVE'::"GroupStatus",'PAUSED'::"GroupStatus",'COMPLETED'::"GroupStatus")
                 AND g."deletedAt" IS NULL
-            ) AS in_group
+            ) AS in_group,
+            -- Which groups this user belongs to, aggregated in the query
+            -- that was already running. Fetching memberships per user
+            -- would be one Tokyo round trip each — 50 users would cost
+            -- roughly eight seconds. This costs nothing extra.
+            --
+            -- EXITED is excluded, so this array is the set of live
+            -- memberships and groupCount is derived from its length.
+            -- The old groupCount came from _count on the relation, which
+            -- counted EXITED rows too — the number and the group names
+            -- would have disagreed on screen.
+            (
+              SELECT json_agg(
+                json_build_object(
+                  'id',          g.id,
+                  'name',        g.name,
+                  'role',        gm."role"::text,
+                  'status',      gm."status"::text,
+                  'groupStatus', g."status"::text
+                ) ORDER BY g.name
+              )
+              FROM "GroupMember" gm
+              JOIN "Group" g ON g.id = gm."groupId"
+              WHERE gm."userId" = u."id"
+                AND gm."status" <> 'EXITED'::"MemberStatus"
+                AND g."deletedAt" IS NULL
+            ) AS groups
           FROM "User" u
           LEFT JOIN "CommunityMembership" cm ON cm."userId" = u."id"
           LEFT JOIN LATERAL (
@@ -133,10 +180,14 @@ export async function GET(req: NextRequest) {
     const rows = users.map(u => {
       const s = subById.get(u.id)
       const { status: subscriptionStatus, detail } = deriveStatus(s)
+      const groups = (s?.groups ?? []) as any[]
       return {
         ...u,
         reputationScore: Number(u.reputationScore),
-        groupCount: u._count.groupMemberships,
+        groups,
+        // Derived from the array above so the count and the listed
+        // group names can never disagree.
+        groupCount: groups.length,
         subscriptionStatus,
         subscriptionDetail: detail,
         subscriptionExpiresAt: s?.cm_expires_at ?? null,
@@ -153,7 +204,19 @@ export async function GET(req: NextRequest) {
         ? rows.filter(r => r.subscriptionStatus === 'PAID' || r.subscriptionStatus === 'ENDING')
         : rows.filter(r => r.subscriptionStatus === subscriptionFilter)
 
-    return NextResponse.json({ success: true, data: filtered })
+    return NextResponse.json({
+      success: true,
+      data: filtered,
+      // Additive. Populates the group filter dropdown. Deliberately the
+      // FULL live group list, not the groups present in `data` — if it
+      // were derived from the results, selecting a group would collapse
+      // the dropdown to that one group and you could not switch away.
+      meta: {
+        groups: (allGroups || []).map(g => ({
+          id: g.id, name: g.name, status: g.status,
+        })),
+      },
+    })
   } catch (e: any) {
     console.error('GET /api/users error:', e)
     return NextResponse.json({ success: false, error: e.message }, { status: 500 })
