@@ -126,22 +126,31 @@ export async function generateInvoicesForPool(poolId: string, createdById?: stri
   for (const d of dues) {
     if (d.alreadyInvoiced) { result.skipped++; continue }
 
-    // A member never invoices themselves. In a rotating pool the member
-    // holding this cycle's position is the recipient, so they contribute
-    // to their own pot rather than paying it across — that obligation is
-    // netted off, not billed.
+    // THE RECIPIENT STILL CONTRIBUTES. Confirmed as this group's rule,
+    // and it is what makes the arithmetic hold: the pot is calculated as
+    // contribution x ALL members, so if the cycle's recipient were exempt
+    // the pot would be short by exactly one share.
+    //
+    // Their invoice is therefore raised like everyone else's, with
+    // themselves as payee. It is a self-obligation that nets to no cash
+    // movement — they retain their own share out of the pot rather than
+    // transferring it and receiving it back. It is billed rather than
+    // skipped so that every member's passbook shows a complete
+    // contribution history with no unexplained gaps.
     const payee = isRotating ? payeeByCycle.get(Number(d.periodNumber)) : null
-    if (isRotating && payee && payee.userId === d.userId) { result.skipped++; continue }
     if (isRotating && !payee) {
       result.errors.push(`No rotation position for cycle ${d.periodNumber}`)
       continue
     }
+    const isSelfContribution = isRotating && payee!.userId === d.userId
 
     try {
       const num = await nextInvoiceNumber(pool.groupId, prefix)
-      const description = isRotating
-        ? `${pool.name} — ${cadence} ${d.periodNumber} contribution to ${payee!.fullName}`
-        : `${pool.name} — ${cadence} ${d.periodNumber} contribution`
+      const description = !isRotating
+        ? `${pool.name} — ${cadence} ${d.periodNumber} contribution`
+        : isSelfContribution
+          ? `${pool.name} — ${cadence} ${d.periodNumber} contribution (your payout cycle — retained from your pot)`
+          : `${pool.name} — ${cadence} ${d.periodNumber} contribution to ${payee!.fullName}`
 
       const invoiceId = randomUUID()
 
