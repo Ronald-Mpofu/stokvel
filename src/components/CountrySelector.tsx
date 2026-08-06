@@ -239,6 +239,10 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
   const cityOptions     = cities.map(c => ({ value: c, label: c }))
 
   const country         = countries.find((c: any) => c.id === value.countryCode)
+  // Active currencies for the selected country, default first. The API
+  // already returns these; the old UI simply discarded everything after
+  // the default, which is why USD was unreachable for Zimbabwe.
+  const currencyOptions: any[] = (country?.currencies ?? []).filter((c: any) => c && c.id)
   const countryOptions  = countries.map((c: any) => ({
     value: c.id,
     label: `${c.flagEmoji} ${c.name}`,
@@ -254,6 +258,23 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
       provinceName:  '',
       city:          '',
       currency:      currency.code,
+      suggestedName: '',
+    })
+  }
+
+  // Currency is chosen, not merely displayed, wherever a country runs more
+  // than one in common circulation. Zimbabwe is the live case: USD and ZWG
+  // both circulate, and a savings group must be able to say which it uses.
+  // Everything else on the selection is preserved — changing currency must
+  // not clear a province or city the user has already chosen.
+  function handleCurrencyChange(code: string) {
+    onChange({
+      countryCode:   value.countryCode,
+      countryName:   country?.name || '',
+      provinceCode:  value.provinceCode,
+      provinceName:  provinces.find(p => p.code === value.provinceCode)?.name || '',
+      city:          value.city,
+      currency:      code,
       suggestedName: '',
     })
   }
@@ -311,7 +332,7 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
             icon="🌍"
           />
         </div>
-        {value.countryCode && !compact && (
+        {value.countryCode && !compact && currencyOptions.length <= 1 && (
           <div style={{ paddingBottom:'1px' }}>
             <label style={labelStyle}>Currency</label>
             <div style={{ display:'flex', alignItems:'center', gap:'8px', padding:'9px 14px',
@@ -325,6 +346,38 @@ export default function CountrySelector({ value, onChange, onNameSuggested, comp
           </div>
         )}
       </div>
+
+      {/* Currency picker — only where the country runs more than one */}
+      {value.countryCode && currencyOptions.length > 1 && (
+        <div>
+          <label style={labelStyle}>Group Currency *</label>
+          <div style={{ display:'flex', flexWrap:'wrap', gap:'8px' }}>
+            {currencyOptions.map((c: any) => {
+              const active = value.currency === c.id
+              return (
+                <button key={c.id} type="button" onClick={() => handleCurrencyChange(c.id)}
+                  style={{ display:'flex', alignItems:'center', gap:'8px', padding:'9px 14px',
+                    background: active ? '#F0FDF4' : 'white',
+                    border: `1.5px solid ${active ? '#BBF7D0' : '#E2E8F0'}`,
+                    borderRadius:'8px', cursor:'pointer', minHeight:'44px', textAlign:'left' }}>
+                  <span style={{ fontSize:'15px', fontWeight:'700', color: active ? TEAL : '#64748B', minWidth:'34px' }}>
+                    {c.symbol}
+                  </span>
+                  <div>
+                    <div style={{ fontSize:'13px', fontWeight:'700', color: active ? TEAL : NAVY }}>{c.id}</div>
+                    <div style={{ fontSize:'10px', color:'#94A3B8' }}>{c.name}</div>
+                  </div>
+                  {active && <span style={{ marginLeft:'4px', fontSize:'12px', color:TEAL }}>✓</span>}
+                </button>
+              )
+            })}
+          </div>
+          <p style={{ fontSize:'11px', color:'#94A3B8', margin:'7px 0 0' }}>
+            {country?.name} uses more than one currency. All of this group&apos;s financial
+            records will be held in the one you choose, and it cannot be mixed with another.
+          </p>
+        </div>
+      )}
 
       {/* Province */}
       {value.countryCode && provinceOptions.length > 0 && (

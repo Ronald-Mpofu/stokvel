@@ -167,8 +167,17 @@ const CURRENCY_META: Record<string, RefCurrency> = {
 
 // ── Secondary currencies in common circulation (non-default) ─────────────────────
 // Rand is legal tender / pegged 1:1 in LS, NA, SZ; widely used in ZW.
+//
+// ZIMBABWE: primary is USD, not ZWG. Zimbabwe runs a genuine dual-currency
+// economy, and USD is what savings groups actually price in — a 12-36 month
+// pool denominated in ZWG loses real value across its term. ZWG is listed
+// here so it stays SELECTABLE; it is no longer the default.
+//
+// Note the ordering contract: entries here are pushed after the primary and
+// before the automatic USD append, so ZW resolves to [USD, ZWG, ZAR].
+// Because USD is now ZW's primary, the automatic append is skipped for it.
 const EXTRA_CURRENCIES: Record<string, string[]> = {
-  LS: ['ZAR'], NA: ['ZAR'], SZ: ['ZAR'], ZW: ['ZAR'],
+  LS: ['ZAR'], NA: ['ZAR'], SZ: ['ZAR'], ZW: ['ZWG','ZAR'],
 };
 
 const USD = (): RefCurrency => ({ ...CURRENCY_META.USD, isDefault: false });
@@ -252,7 +261,7 @@ const COUNTRIES: RefCountry[] = (() => {
     ['TN','Tunisia',         '+216','🇹🇳','North Africa',        'TND',  [PM.bank(true),  PM.card()]],
     ['UG','Uganda',          '+256','🇺🇬','East Africa',         'UGX', [PM.mtn(true),   PM.bank(),  PM.ussd()]],
     ['ZM','Zambia',          '+260','🇿🇲','Southern Africa',     'ZMW', [PM.mtn(true),   PM.bank()]],
-    ['ZW','Zimbabwe',        '+263','🇿🇼','Southern Africa',     'ZWG', [PM.eco(true),   PM.bank(),  PM.card(), PM.ussd()]],
+    ['ZW','Zimbabwe',        '+263','🇿🇼','Southern Africa',     'USD', [PM.eco(true),   PM.bank(),  PM.card(), PM.ussd()]],
 
     // ── Americas ──────────────────────────────────────────────────────────────
     ['AG','Antigua and Barbuda','+1','🇦🇬','Caribbean',          'XCD',  DEF_PM()],
