@@ -382,6 +382,49 @@ export async function canManageGroup(userId: string, groupId: string): Promise<b
   return !!hit
 }
 
+/**
+ * Is this user the TREASURER of the given group?
+ *
+ * Distinct from canManageGroup, which also admits GROUP_ADMIN. Some
+ * ledger powers belong to the treasurer specifically — confirming a
+ * payment on a member's behalf after the confirmation window, and
+ * adjudicating a disputed payment. Those decide, on a member's behalf,
+ * whether money was received. A group admin creating schemes should not
+ * inherit that by default.
+ *
+ * SUPER_ROLES pass, as everywhere else in this file.
+ */
+export async function isGroupTreasurer(userId: string, groupId: string): Promise<boolean> {
+  const hit = await prisma.groupMember.findFirst({
+    where: {
+      groupId,
+      userId,
+      status: 'ACTIVE',
+      role: 'TREASURER' as any,
+    },
+    select: { id: true },
+  })
+  return !!hit
+}
+
+/**
+ * Route guard for treasurer-only ledger actions. Returns null when
+ * authorised, a ready 401/403 when not.
+ */
+export async function requireGroupTreasurer(
+  req: NextRequest,
+  groupId: string | null | undefined
+): Promise<NextResponse | null> {
+  const claims = await getSessionFromRequest(req)
+  if (!claims) return unauthorized()
+  if (SUPER_ROLES.includes(claims.role)) return null
+  if (!groupId) return forbidden('Group could not be resolved for this request')
+  if (!(await isGroupTreasurer(claims.id, groupId))) {
+    return forbidden('Only the group treasurer can do this')
+  }
+  return null
+}
+
 export type GuardOptions = {
   /**
    * Re-check live account status against the database, costing one

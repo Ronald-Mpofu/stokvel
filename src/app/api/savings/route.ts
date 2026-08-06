@@ -201,6 +201,29 @@ export async function POST(req: NextRequest) {
       const r = await sql(`SELECT "groupId" FROM "SavingsPool" WHERE id=$1`, [body.poolId])
       guardGroupId = r[0]?.groupId ?? null
     }
+    // ROTATION_PAID and PAYOUT_PAID carry neither groupId nor poolId —
+    // only the id of the payout row. Without resolving the group here,
+    // guardGroupId stayed null and requireGroupManager failed closed,
+    // so these two actions were unreachable for anyone except a
+    // SUPER_ROLE. A group's own treasurer got a 403 on their own pool.
+    if (!guardGroupId && body.rotationId) {
+      const r = await sql(
+        `SELECT sp."groupId" FROM "SavingsRotationPayout" srp
+           JOIN "SavingsPool" sp ON sp.id = srp."poolId"
+          WHERE srp.id = $1`,
+        [body.rotationId],
+      )
+      guardGroupId = r[0]?.groupId ?? null
+    }
+    if (!guardGroupId && body.payoutId) {
+      const r = await sql(
+        `SELECT sp."groupId" FROM "SavingsPoolPayout" spp
+           JOIN "SavingsPool" sp ON sp.id = spp."poolId"
+          WHERE spp.id = $1`,
+        [body.payoutId],
+      )
+      guardGroupId = r[0]?.groupId ?? null
+    }
     const guardErr = await requireGroupManager(req, guardGroupId)
     if (guardErr) return guardErr
 
@@ -513,7 +536,84 @@ async function handleRotationPaid(body: any): Promise<NextResponse> {
     `UPDATE "SavingsRotationPayout" SET status='PAID', "paidAt"=NOW(), "paymentRef"=$2, "updatedAt"=NOW() WHERE id=$1`,
     [rotationId, body.paymentRef || null]
   )
-  return NextResponse.json({ success: true, message: 'Rotation payout marked as paid.' })
+
+  // ── Net off the recipient's own contribution ────────────────
+  // This group's rule is that the cycle's recipient still contributes —
+  // which is what makes the pot arithmetic hold, since the pot is
+  // contribution x ALL members. But they do not transfer money to
+  // themselves and receive it back. Their share is retained out of the
+  // pot, so the invoice is settled here, at payout, by an internal
+  // transfer rather than by anyone attesting a payment.
+  //
+  // Done AFTER the payout is marked paid, and non-fatally: a netting
+  // failure must not undo a payout that has already been recorded.
+  let netted = 0
+  try {
+    const detail = await sql(
+      `SELECT srp."userId", srp.position, sp."groupId", sp.currency
+         FROM "SavingsRotationPayout" srp
+         JOIN "SavingsPool" sp ON sp.id = srp."poolId"
+        WHERE srp.id = $1 LIMIT 1`,
+      [rotationId],
+    )
+    if (detail.length) {
+      const { userId, position, groupId, currency } = detail[0]
+
+      const selfInvoices = await sql(
+        `SELECT id, total, "amountAllocated", (total - "amountAllocated") AS outstanding
+           FROM "LedgerInvoice"
+          WHERE "payerId" = $1 AND "payeeId" = $1
+            AND "groupId" = $2 AND "periodNumber" = $3
+            AND status IN ('ISSUED','DUE','PART_PAID','OVERDUE')
+            AND (total - "amountAllocated") > 0`,
+        [userId, groupId, Number(position)],
+      )
+
+      for (const inv of selfInvoices) {
+        const amount = Number(inv.outstanding)
+        const num = await sql(`SELECT * FROM next_ledger_number($1, 'PAYMENT', 'PAY')`, [groupId])
+        const paymentId = randomUUID()
+
+        await exec(
+          `INSERT INTO "LedgerPayment" (
+             id, "groupId", "paymentNumber", "paymentSeq", "payerId", "payeeType", "payeeId",
+             currency, amount, "amountAllocated", method, reference, status, "recordedBy",
+             "paidAt", "confirmedAt", "confirmedBy", "confirmNote"
+           ) VALUES (
+             $1,$2,$3,$4,$5,'MEMBER',$5,$6,$7,$7,'INTERNAL_TRANSFER',$8,
+             'CONFIRMED','TREASURER',NOW(),NOW(),'TREASURER',
+             'Own share retained from payout - netted, no transfer made'
+           )`,
+          [paymentId, groupId, String(num[0].formatted), Number(num[0].seq), userId, currency, amount, `NET-${rotationId.slice(0, 8)}`],
+        )
+
+        await exec(
+          `INSERT INTO "LedgerAllocation" (id, "paymentId", "invoiceId", amount)
+           VALUES ($1,$2,$3,$4) ON CONFLICT ("paymentId","invoiceId") DO NOTHING`,
+          [randomUUID(), paymentId, inv.id, amount],
+        )
+
+        await exec(
+          `UPDATE "LedgerInvoice"
+              SET "amountAllocated" = total, status = 'PAID',
+                  "settledAt" = CURRENT_TIMESTAMP, "updatedAt" = CURRENT_TIMESTAMP
+            WHERE id = $1`,
+          [inv.id],
+        )
+        netted++
+      }
+    }
+  } catch (e: any) {
+    console.error('Self-contribution netting failed:', e?.message)
+  }
+
+  return NextResponse.json({
+    success: true,
+    data: { netted },
+    message: netted > 0
+      ? `Rotation payout marked as paid. The recipient’s own share was netted off.`
+      : 'Rotation payout marked as paid.',
+  })
 }
 
 // ── Distribute / calculate payouts ───────────────────────────
