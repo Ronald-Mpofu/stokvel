@@ -81,13 +81,21 @@ function wrap(bodyHtml: string): string {
 }
 
 // ── Invitation email ──────────────────────────────────────────
+// NOTE ON CONTRIBUTION AMOUNT — removed deliberately (do not re-add).
+// Contribution terms belong to the Windfall Scheme, not the Group.
+// Group.contributionAmount is a vestigial column, and quoting it here
+// told invitees they owed a monthly sum merely for joining a group.
+// Joining a group commits you to nothing; scheme terms arrive in the
+// scheme introduction email, sent when a scheme is activated.
+// contributionAmount and currency are still accepted so existing
+// callers keep compiling, but they are not rendered.
 export async function sendInvitationEmail(opts: {
   to: string
   inviteeName?: string
   inviterName: string
   groupName: string
-  contributionAmount: number
-  currency: string
+  contributionAmount?: number
+  currency?: string
   token: string
   expiresAt?: Date
 }): Promise<SendResult> {
@@ -105,12 +113,16 @@ export async function sendInvitationEmail(opts: {
       <strong>${opts.groupName}</strong> on Windfall Community Deals —
       a secure platform for community savings, group loans, and collective asset ownership.
     </p>
+    <p style="color:#374151;font-size:14px;line-height:1.7;margin:0 0 20px">
+      Accepting costs you nothing and commits you to nothing. Groups run savings
+      schemes that members choose to join separately, and you'll receive the full
+      terms of any scheme before it starts.
+    </p>
 
     <!-- Group summary card -->
     <div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:10px;padding:16px 20px;margin:0 0 24px">
       <table style="width:100%;font-size:13px;color:#166534">
         <tr><td style="padding:4px 0;color:#64748B">Group</td><td style="padding:4px 0;font-weight:600;text-align:right">${opts.groupName}</td></tr>
-        <tr><td style="padding:4px 0;color:#64748B">Contribution</td><td style="padding:4px 0;font-weight:600;text-align:right">${opts.currency} ${opts.contributionAmount.toLocaleString()} / cycle</td></tr>
         <tr><td style="padding:4px 0;color:#64748B">Invited by</td><td style="padding:4px 0;font-weight:600;text-align:right">${opts.inviterName}</td></tr>
       </table>
     </div>
@@ -161,6 +173,160 @@ export async function sendWelcomeEmail(opts: {
   return sendEmail({
     to:      opts.to,
     subject: `Welcome to ${opts.groupName} — you're in! 🎉`,
+    html,
+  })
+}
+
+// ── Scheme introduction email ─────────────────────────────────
+// Sent to every member of a Windfall Scheme when the scheme is ACTIVATED.
+//
+// WHY ACTIVATION AND NOT CREATION
+//   At creation a pool sits in SETUP: no payout positions exist, no
+//   contribution schedules have been written, and the admin may still
+//   change the amount, add members, or delete it. Activation is the
+//   point at which the terms become real and irreversible — and the
+//   only point at which a rotating member's position can be stated.
+//
+// Every figure here is passed in already resolved. This function does
+// no arithmetic and no database access, so it cannot disagree with the
+// records the caller has just written.
+export async function sendSchemeIntroductionEmail(opts: {
+  to: string
+  memberName: string
+  schemeName: string
+  groupName: string
+  currency: string
+  startDate: Date
+  isRotating: boolean
+  contributionAmount: number
+  contributionFrequency: string      // WEEKLY | FORTNIGHTLY | MONTHLY
+  cycleCount: number
+  potPerCycle: number
+  maturityDate?: Date | null         // maturity pools only
+  payoutStrategy?: string | null     // rotating pools only
+  payoutPosition?: number | null     // this member's position
+  payoutDate?: Date | null           // when this member is paid
+  members: { fullName: string; position?: number | null }[]
+  notes?: string | null
+  allowLoans: boolean
+  interestRatePa?: number | null     // decimal, e.g. 0.24
+  maxLoanAmount?: number | null      // resolved currency amount
+}): Promise<SendResult> {
+
+  const money = (n: number) =>
+    `${opts.currency} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+  const date = (d: Date | null | undefined) =>
+    d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : '—'
+
+  const cadence = (f: string) =>
+    f === 'WEEKLY' ? 'Weekly' : f === 'FORTNIGHTLY' ? 'Fortnightly' : 'Monthly'
+
+  const strategyLabel = (sVal?: string | null) =>
+    sVal === 'RANDOM'     ? 'Random draw'
+    : sVal === 'GROUP_VOTE' ? 'Group vote'
+    : sVal === 'SENIORITY'  ? 'Seniority — longest-standing member first'
+    : '—'
+
+  const row = (label: string, value: string) => `
+        <tr>
+          <td style="padding:7px 0;color:#64748B;font-size:13px;vertical-align:top">${label}</td>
+          <td style="padding:7px 0;font-weight:600;font-size:13px;text-align:right;color:#0D2137">${value}</td>
+        </tr>`
+
+  // Rotating pools pay each member once; the schedule is the rotation.
+  // Maturity pools pay out on one date at the end of the term.
+  const scheduleRows = opts.isRotating
+    ? row('Payout strategy', strategyLabel(opts.payoutStrategy)) +
+      row('Rotation length', `${opts.cycleCount} ${opts.cycleCount === 1 ? 'cycle' : 'cycles'}`)
+    : row('Maturity date', date(opts.maturityDate)) +
+      row('Contribution cycles', `${opts.cycleCount}`)
+
+  // The member's own position is the thing they will look for first, so
+  // it gets its own panel rather than a table row.
+  const positionPanel = (opts.isRotating && opts.payoutPosition)
+    ? `
+    <div style="background:#0F6E56;border-radius:10px;padding:18px 20px;margin:0 0 22px;text-align:center">
+      <div style="color:#9FE1CB;font-size:12px;margin:0 0 4px">Your position in the rotation</div>
+      <div style="color:#ffffff;font-size:30px;font-weight:700;line-height:1.1">#${opts.payoutPosition}</div>
+      <div style="color:#9FE1CB;font-size:13px;margin:6px 0 0">
+        You receive ${money(opts.potPerCycle)}${opts.payoutDate ? ` on ${date(opts.payoutDate)}` : ''}
+      </div>
+    </div>`
+    : ''
+
+  const loanRows = opts.allowLoans
+    ? row('Loans', 'Available to members') +
+      (opts.interestRatePa != null ? row('Interest rate', `${(opts.interestRatePa * 100).toFixed(1)}% per year`) : '') +
+      (opts.maxLoanAmount  != null ? row('Maximum loan', money(opts.maxLoanAmount)) : '')
+    : row('Loans', 'Not available in this scheme')
+
+  const memberList = opts.members.length
+    ? opts.members.map(m => `
+        <tr>
+          <td style="padding:5px 0;font-size:13px;color:#374151">
+            ${m.position ? `<span style="display:inline-block;min-width:22px;color:#0F6E56;font-weight:700">${m.position}.</span>` : '• '}${m.fullName}
+          </td>
+        </tr>`).join('')
+    : `<tr><td style="padding:5px 0;font-size:13px;color:#94A3B8">No members listed</td></tr>`
+
+  const notesBlock = opts.notes
+    ? `
+    <div style="background:#FFFBEB;border-left:4px solid #D97706;border-radius:0 8px 8px 0;padding:13px 16px;margin:0 0 22px">
+      <div style="font-size:12px;font-weight:700;color:#92400E;margin:0 0 4px">Notes from your group admin</div>
+      <div style="font-size:13px;color:#78350F;line-height:1.6">${opts.notes}</div>
+    </div>`
+    : ''
+
+  const html = wrap(`
+    <h2 style="color:#0D2137;font-size:18px;margin:0 0 6px">${opts.schemeName} has started</h2>
+    <p style="color:#94A3B8;font-size:13px;margin:0 0 18px">${opts.groupName}</p>
+
+    <p style="color:#374151;font-size:14px;line-height:1.7;margin:0 0 20px">
+      Dear ${opts.memberName}, you are enrolled in this scheme. Below are the full
+      terms as agreed by your group. Keep this email — it is your record of what
+      was set at the start.
+    </p>
+
+    ${positionPanel}
+
+    <div style="background:#F8FAFC;border:1px solid #E2E8F0;border-radius:10px;padding:6px 18px;margin:0 0 22px">
+      <table style="width:100%;border-collapse:collapse">
+        ${row('Scheme', opts.schemeName)}
+        ${row('Starts', date(opts.startDate))}
+        ${row('Your contribution', `${money(opts.contributionAmount)} ${cadence(opts.contributionFrequency).toLowerCase()}`)}
+        ${row('Pot per cycle', money(opts.potPerCycle))}
+        ${scheduleRows}
+        ${loanRows}
+      </table>
+    </div>
+
+    ${notesBlock}
+
+    <div style="margin:0 0 22px">
+      <div style="font-size:13px;font-weight:700;color:#0D2137;margin:0 0 8px">
+        Members in this scheme (${opts.members.length})
+      </div>
+      <div style="background:#ffffff;border:1px solid #E2E8F0;border-radius:10px;padding:10px 16px">
+        <table style="width:100%;border-collapse:collapse">${memberList}</table>
+      </div>
+    </div>
+
+    <div style="text-align:center;margin:0 0 8px">
+      <a href="${APP_URL}/portal"
+        style="display:inline-block;padding:14px 36px;background:#0F6E56;color:#ffffff;text-decoration:none;border-radius:10px;font-size:15px;font-weight:600">
+        View in your portal →
+      </a>
+    </div>
+    <p style="color:#94A3B8;font-size:12px;text-align:center;margin:12px 0 0">
+      The pot figure is based on ${opts.members.length} ${opts.members.length === 1 ? 'member' : 'members'} at launch
+      and changes if membership changes.
+    </p>
+  `)
+
+  return sendEmail({
+    to:      opts.to,
+    subject: `${opts.schemeName} has started — your scheme details`,
     html,
   })
 }

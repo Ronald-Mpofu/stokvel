@@ -3,6 +3,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
+import { sendSchemeIntroductionEmail } from '@/lib/email'
 import { requireGroupManager } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -240,15 +241,24 @@ export async function POST(req: NextRequest) {
        data.poolType, data.payoutStrategy]
     )
 
+    // Single multi-row insert. This was a sequential loop: one round trip
+    // per member to Supabase in Tokyo at ~160ms each, so a 12-member pool
+    // spent ~2s here for work that is one statement.
     if (data.memberIds.length > 0) {
-      for (const userId of data.memberIds) {
-        const memberId = randomUUID()
-        await exec(
-          `INSERT INTO "SavingsPoolMember" (id,"poolId","userId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
-           VALUES ($1,$2,$3,0,0,0,true,NOW(),NOW()) ON CONFLICT ("poolId","userId") DO NOTHING`,
-          [memberId, poolId, userId]
-        )
-      }
+      const values = data.memberIds
+        .map((_, i) => `($${i * 2 + 1},$${i * 2 + 2},$${data.memberIds.length * 2 + 1},0,0,0,true,NOW(),NOW())`)
+        .join(', ')
+      const params: any[] = []
+      for (const userId of data.memberIds) params.push(randomUUID(), userId)
+      params.push(poolId)
+
+      await exec(
+        `INSERT INTO "SavingsPoolMember"
+           (id,"userId","poolId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
+         VALUES ${values}
+         ON CONFLICT ("poolId","userId") DO NOTHING`,
+        params
+      )
     }
 
     return NextResponse.json({
@@ -283,25 +293,56 @@ async function handleActivate(body: any): Promise<NextResponse> {
   const periodCount = isRotating
     ? members.length
     : calcPeriodCount(Number(pool.periodMonths), pool.contributionFrequency)
+  // ── Contribution schedule, in ONE statement ──────────────────
+  // This was a nested loop issuing members x periods sequential inserts.
+  // Ten members over twelve periods is 120 round trips to Tokyo at ~160ms
+  // — roughly 19 seconds, during which the admin sees a spinner and is
+  // likely to click Activate again. It is now a single multi-row insert.
   let inserted = 0
+  {
+    const rows: string[] = []
+    const params: any[] = []
+    let n = 0
+    for (const member of members) {
+      for (let p = 1; p <= periodCount; p++) {
+        const due = calcDueDate(new Date(pool.startDate), p, pool.contributionFrequency)
+        rows.push(`($${n + 1},$${n + 2},$${n + 3},$${n + 4},$${n + 5},$${n + 6},0,$${n + 7}::"CurrencyCode",'PENDING'::"SavingsContributionStatus",NOW(),NOW())`)
+        params.push(randomUUID(), poolId, member.userId, p, due, pool.contributionAmount, pool.currency)
+        n += 7
+      }
+    }
+    if (rows.length > 0) {
+      // Chunked so a very large pool cannot exceed the parameter limit.
+      // Postgres caps a statement at 65535 bound parameters; 7 per row
+      // gives ~9300 rows, so 2000-row chunks stay comfortably inside it.
+      const ROWS_PER_CHUNK = 2000
+      const PARAMS_PER_ROW = 7
+      for (let i = 0; i < rows.length; i += ROWS_PER_CHUNK) {
+        const chunkRows = rows.slice(i, i + ROWS_PER_CHUNK)
+        const chunkParams = params.slice(i * PARAMS_PER_ROW, (i + chunkRows.length) * PARAMS_PER_ROW)
+        // Placeholder numbering restarts per chunk.
+        let k = 0
+        const renumbered = chunkRows.map(() => {
+          const ph = `($${k + 1},$${k + 2},$${k + 3},$${k + 4},$${k + 5},$${k + 6},0,$${k + 7}::"CurrencyCode",'PENDING'::"SavingsContributionStatus",NOW(),NOW())`
+          k += PARAMS_PER_ROW
+          return ph
+        }).join(', ')
 
-  for (const member of members) {
-    for (let p = 1; p <= periodCount; p++) {
-      const cId = randomUUID()
-      const due = calcDueDate(new Date(pool.startDate), p, pool.contributionFrequency)
-      try {
         await exec(
-          `INSERT INTO "SavingsContribution" (id,"poolId","userId","periodNumber","dueDate","amountDue","amountPaid",currency,status,"createdAt","updatedAt")
-           VALUES ($1,$2,$3,$4,$5,$6,0,$7::"CurrencyCode",'PENDING'::"SavingsContributionStatus",NOW(),NOW()) ON CONFLICT ("poolId","userId","periodNumber") DO NOTHING`,
-          [cId, poolId, member.userId, p, due, pool.contributionAmount, pool.currency]
+          `INSERT INTO "SavingsContribution"
+             (id,"poolId","userId","periodNumber","dueDate","amountDue","amountPaid",currency,status,"createdAt","updatedAt")
+           VALUES ${renumbered}
+           ON CONFLICT ("poolId","userId","periodNumber") DO NOTHING`,
+          chunkParams
         )
-        inserted++
-      } catch {}
+        inserted += chunkRows.length
+      }
     }
   }
 
   // ── Rotating pools: build the payout order and schedule ──
   let rotationCount = 0
+  const rotationOrder: { userId: string; position: number; scheduledDate: Date }[] = []
   if (isRotating) {
     const strategy = pool.payoutStrategy || 'SENIORITY'
     const ordered  = [...members]
@@ -316,27 +357,117 @@ async function handleActivate(body: any): Promise<NextResponse> {
       ordered.sort((a: any, b: any) => new Date(a.joinedAt).getTime() - new Date(b.joinedAt).getTime())
     }
     const pot = Number(pool.contributionAmount) * members.length
+    const rRows: string[] = []
+    const rParams: any[] = []
+    let rn = 0
     for (let pos = 1; pos <= ordered.length; pos++) {
       const recipient = ordered[pos - 1]
       const sched     = calcDueDate(new Date(pool.startDate), pos, pool.contributionFrequency)
-      try {
-        await exec(
-          `INSERT INTO "SavingsRotationPayout" (id,"poolId","userId",position,"scheduledDate",amount,currency,status,"createdAt","updatedAt")
-           VALUES ($1,$2,$3,$4,$5,$6,$7,'SCHEDULED',NOW(),NOW()) ON CONFLICT ("poolId",position) DO NOTHING`,
-          [randomUUID(), poolId, recipient.userId, pos, sched, pot, pool.currency]
-        )
-        rotationCount++
-      } catch {}
+      rRows.push(`($${rn + 1},$${rn + 2},$${rn + 3},$${rn + 4},$${rn + 5},$${rn + 6},$${rn + 7},'SCHEDULED',NOW(),NOW())`)
+      rParams.push(randomUUID(), poolId, recipient.userId, pos, sched, pot, pool.currency)
+      rn += 7
+      // Held for the introduction email — each member is told their own
+      // position and payout date, which only exist from this point on.
+      rotationOrder.push({ userId: recipient.userId, position: pos, scheduledDate: sched })
+      rotationCount++
+    }
+    if (rRows.length > 0) {
+      await exec(
+        `INSERT INTO "SavingsRotationPayout"
+           (id,"poolId","userId",position,"scheduledDate",amount,currency,status,"createdAt","updatedAt")
+         VALUES ${rRows.join(', ')}
+         ON CONFLICT ("poolId",position) DO NOTHING`,
+        rParams
+      )
     }
   }
 
   await exec(`UPDATE "SavingsPool" SET status='ACTIVE',"updatedAt"=NOW() WHERE id=$1`, [poolId])
 
+  // ── Introduction emails ─────────────────────────────────────
+  // Sent AFTER the pool is committed ACTIVE, and deliberately not awaited
+  // as a group: a bounced address must never roll back an activation that
+  // has already written schedules and payout positions. Failures are
+  // logged and reported in the response, never thrown.
+  let emailsSent = 0
+  const emailErrors: string[] = []
+  try {
+    const recipients = await sql(
+      `SELECT u.id, u."fullName", u.email, g.name AS "groupName"
+         FROM "SavingsPoolMember" spm
+         JOIN "User"  u ON u.id = spm."userId"
+         JOIN "SavingsPool" sp ON sp.id = spm."poolId"
+         JOIN "Group" g ON g.id = sp."groupId"
+        WHERE spm."poolId" = $1 AND spm."isActive" = true`,
+      [poolId]
+    )
+
+    const posByUser = new Map(rotationOrder.map(r => [r.userId, r]))
+    const groupName = recipients[0]?.groupName || ''
+    const pot       = Number(pool.contributionAmount) * members.length
+
+    // Member roster, in rotation order where there is one.
+    const roster = recipients
+      .map((r: any) => ({ fullName: r.fullName, position: posByUser.get(r.id)?.position ?? null }))
+      .sort((a, b) => {
+        if (a.position && b.position) return a.position - b.position
+        if (a.position) return -1
+        if (b.position) return 1
+        return String(a.fullName).localeCompare(String(b.fullName))
+      })
+
+    const maxLoanAmount = pool.allowLoans
+      ? Number(pool.contributionAmount) * members.length * Number(pool.periodMonths) * Number(pool.maxLoanPct)
+      : null
+
+    const results = await Promise.allSettled(
+      recipients
+        .filter((r: any) => r.email)
+        .map((r: any) => sendSchemeIntroductionEmail({
+          to:                    r.email,
+          memberName:            r.fullName,
+          schemeName:            pool.name,
+          groupName,
+          currency:              pool.currency,
+          startDate:             new Date(pool.startDate),
+          isRotating,
+          contributionAmount:    Number(pool.contributionAmount),
+          contributionFrequency: pool.contributionFrequency,
+          cycleCount:            periodCount,
+          potPerCycle:           pot,
+          maturityDate:          isRotating ? null : new Date(pool.maturityDate),
+          payoutStrategy:        isRotating ? (pool.payoutStrategy || 'SENIORITY') : null,
+          payoutPosition:        posByUser.get(r.id)?.position ?? null,
+          payoutDate:            posByUser.get(r.id)?.scheduledDate ?? null,
+          members:               roster,
+          notes:                 pool.notes || null,
+          allowLoans:            !!pool.allowLoans,
+          interestRatePa:        pool.allowLoans ? Number(pool.interestRatePa) : null,
+          maxLoanAmount,
+        }))
+    )
+
+    for (const res of results) {
+      if (res.status === 'fulfilled' && res.value?.success) emailsSent++
+      else if (res.status === 'fulfilled') emailErrors.push(res.value?.error || 'send failed')
+      else emailErrors.push(String(res.reason?.message || 'send failed'))
+    }
+    if (emailErrors.length) console.error('Scheme intro email errors:', emailErrors.slice(0, 5))
+  } catch (e: any) {
+    console.error('Scheme intro email block failed:', e?.message)
+    emailErrors.push(e?.message || 'email step failed')
+  }
+
+  const emailNote = emailsSent > 0
+    ? ` ${emailsSent} introduction ${emailsSent === 1 ? 'email' : 'emails'} sent.`
+    : (emailErrors.length ? ' Introduction emails could not be sent.' : '')
+
   return NextResponse.json({
     success: true,
+    data: { emailsSent, emailErrors },
     message: isRotating
-      ? `Pool activated! ${members.length}-member rotation scheduled (${rotationCount} payouts) and ${inserted} contribution records created.`
-      : `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.`,
+      ? `Pool activated! ${members.length}-member rotation scheduled (${rotationCount} payouts) and ${inserted} contribution records created.${emailNote}`
+      : `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.${emailNote}`,
   })
 }
 

@@ -673,8 +673,12 @@ async function sendInvitationEmail({ to, inviteUrl, groupName, inviterName, memb
           <span style="font-size:13px;font-weight:600;color:#0D2137">${groupName}</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F1F5F9">
-          <span style="font-size:13px;color:#64748B">Monthly Contribution</span>
-          <span style="font-size:13px;font-weight:600;color:#0F6E56">${currencySymbol}${contribution.toLocaleString()}/month</span>
+          <span style="font-size:13px;color:#64748B">Cost to join</span>
+          <span style="font-size:13px;font-weight:600;color:#0F6E56">Nothing</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #F1F5F9">
+          <span style="font-size:13px;color:#64748B">Contributions</span>
+          <span style="font-size:13px;color:#64748B;text-align:right;max-width:60%">Set per savings scheme — you'll get the full terms before any scheme starts</span>
         </div>
         <div style="display:flex;justify-content:space-between;padding:8px 0">
           <span style="font-size:13px;color:#64748B">Invitation expires</span>
@@ -731,7 +735,7 @@ async function sendWelcomeEmail({ to, fullName, groupName, contribution, currenc
     </div>
     <div style="padding:36px 40px">
       <p style="font-size:15px;color:#0D2137;font-weight:600">You're now a member of <strong>${groupName}</strong></p>
-      <p style="font-size:14px;color:#475569;line-height:1.6">Your account has been created and you're officially part of the group. Your monthly contribution is <strong>${currencySymbol}${contribution.toLocaleString()}</strong>.</p>
+      <p style="font-size:14px;color:#475569;line-height:1.6">Your account has been created and you're officially part of the group. Contribution terms are set by each savings scheme you join, and you'll receive the full details before any scheme starts.</p>
       <div style="text-align:center;margin:28px 0">
         <a href="${loginUrl}" style="display:inline-block;background:linear-gradient(135deg,#0D2137,#0F6E56);color:white;text-decoration:none;padding:14px 36px;border-radius:10px;font-size:15px;font-weight:600">
           🚀 Go to My Dashboard
@@ -765,7 +769,10 @@ async function sendInvitationSMS({ to, inviteUrl, groupName, inviterName, contri
     : 'https://api.africastalking.com/version1/messaging'
 
   const currencySymbol = currency === 'USD' ? '$' : currency
-  const message = `${inviterName} invited you to join ${groupName} on Windfall Community Deals. Contribute ${currencySymbol}${contribution}/mo. Accept here: ${inviteUrl}`
+  // No contribution figure: contribution terms belong to the Windfall
+  // Scheme, not the Group, and quoting a monthly sum told invitees they
+  // owed money merely for joining a group. Joining commits them to nothing.
+  const message = `${inviterName} invited you to join ${groupName} on Windfall Community Deals. Free to join. Accept here: ${inviteUrl}`
 
   const response = await fetch(endpoint, {
     method:  'POST',
