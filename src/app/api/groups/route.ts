@@ -536,13 +536,28 @@ export async function DELETE(req: NextRequest) {
     if (guardErr) return guardErr
 
     const rows = await sql(`
-      SELECT g.id, g.name, g."deletedAt",
+      SELECT g.id, g.name, g."deletedAt", g."adminUserId",
         g."escrowBalance", g."insurancePoolBalance",
+        -- Members who would be STRANDED by deletion: everyone active
+        -- EXCEPT the group admin. A solo admin has nobody to protect,
+        -- and blocking them just leaves a dead group behind forever.
+        (SELECT COUNT(*) FROM "GroupMember"
+          WHERE "groupId" = g.id AND status = 'ACTIVE'
+            AND "userId" <> g."adminUserId")                                   as "otherActiveMembers",
         (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id AND status = 'ACTIVE') as "activeMembers",
         (SELECT COUNT(*) FROM "Cycle" WHERE "groupId" = g.id AND status = 'ACTIVE') as "activeCycles",
         (SELECT COUNT(*) FROM "Loan" WHERE "groupId" = g.id AND status IN ('ACTIVE','APPROVED','PENDING_APPROVAL')) as "activeLoans",
         (SELECT COUNT(*) FROM "PropertyGroup" WHERE "groupId" = g.id AND status != 'SOLD') as "activeProperties",
-        (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id) as "memberCount"
+        (SELECT COUNT(*) FROM "GroupMember" WHERE "groupId" = g.id) as "memberCount",
+        -- Ledger, added when the invoicing layer landed. A CONFIRMED
+        -- payment is a financial record of money that actually moved
+        -- between members, so it blocks. An unpaid invoice is only a
+        -- plan, so it warns instead of blocking — otherwise any group
+        -- that ever activated a scheme becomes undeletable.
+        (SELECT COUNT(*) FROM "LedgerPayment"
+          WHERE "groupId" = g.id AND status = 'CONFIRMED')                     as "confirmedPayments",
+        (SELECT COUNT(*) FROM "LedgerInvoice"
+          WHERE "groupId" = g.id AND status IN ('ISSUED','DUE','PART_PAID','OVERDUE')) as "openInvoices"
       FROM "Group" g WHERE g.id = $1
     `, [id])
 
@@ -554,10 +569,27 @@ export async function DELETE(req: NextRequest) {
     const blockers: string[] = []
     const warnings: string[] = []
 
-    if (Number(group.activeMembers) > 0)    blockers.push(`${group.activeMembers} active member(s) must be removed first`)
+    // The member check counts everyone EXCEPT the admin. Its purpose is
+    // to stop a group being dissolved out from under people who are
+    // relying on it — and an admin who is the last one standing is
+    // relying on nobody. Previously the admin counted against
+    // themselves, so a solo admin could never delete their own group.
+    if (Number(group.otherActiveMembers) > 0)
+      blockers.push(`${group.otherActiveMembers} other active member(s) must be removed first`)
+
     if (Number(group.activeCycles)  > 0)    blockers.push('Group has an active payout cycle — close it first')
     if (Number(group.activeLoans)   > 0)    blockers.push(`${group.activeLoans} active loan(s) must be settled first`)
     if (Number(group.activeProperties) > 0) blockers.push(`${group.activeProperties} active property investment(s) must be closed first`)
+
+    // Money that actually moved. Never deletable, however few members
+    // remain — the ledger is the group's financial record.
+    if (Number(group.confirmedPayments) > 0)
+      blockers.push(`${group.confirmedPayments} confirmed payment(s) on the ledger — this group has financial records and cannot be deleted`)
+
+    if (Number(group.openInvoices) > 0)
+      warnings.push(`${group.openInvoices} unpaid invoice(s) will be cancelled`)
+    if (Number(group.activeMembers) > 0 && Number(group.otherActiveMembers) === 0)
+      warnings.push('You are the only remaining member — deleting this group will also end your own membership')
     if (Number(group.escrowBalance) > 0)    warnings.push(`Escrow balance of $${Number(group.escrowBalance).toFixed(2)} will be forfeited`)
     if (Number(group.insurancePoolBalance) > 0) warnings.push(`Insurance pool of $${Number(group.insurancePoolBalance).toFixed(2)} will be forfeited`)
 
@@ -583,10 +615,37 @@ export async function DELETE(req: NextRequest) {
 
     await exec(`UPDATE "Group" SET "deletedAt" = NOW(), status = 'DISSOLVED'::"GroupStatus", "updatedAt" = NOW() WHERE id = $1`, [id])
 
+    // Exit whoever is left — in practice the admin alone, since any
+    // other active member is a blocker. Without this the admin keeps an
+    // ACTIVE membership of a dissolved group, which then shows up in
+    // their portal and in entitlement checks.
+    await exec(
+      `UPDATE "GroupMember"
+          SET status = 'EXITED'::"MemberStatus", "exitedAt" = NOW(),
+              "exitReason" = 'Group dissolved', "updatedAt" = NOW()
+        WHERE "groupId" = $1 AND status = 'ACTIVE'`,
+      [id],
+    )
+
+    // Open invoices are cancelled, not deleted. An obligation that was
+    // raised and then withdrawn is part of the record.
+    await exec(
+      `UPDATE "LedgerInvoice"
+          SET status = 'CANCELLED', "cancelledAt" = NOW(),
+              "cancelReason" = 'Group dissolved', "updatedAt" = NOW()
+        WHERE "groupId" = $1 AND status IN ('ISSUED','DUE','PART_PAID','OVERDUE')`,
+      [id],
+    )
+
+    // userId was missing, so every group deletion was recorded with no
+    // actor — the one audit entry where knowing WHO matters most.
+    const session = await getSessionFromRequest(req)
     await prisma.auditLog.create({
       data: {
+        userId: session?.id ?? null,
+        groupId: id,
         action: 'DELETE', entityType: 'Group', entityId: id,
-        description: `Group "${group.name}" soft-deleted`,
+        description: `Group "${group.name}" dissolved by ${session?.fullName || 'unknown'}`,
       } as any,
     })
 
