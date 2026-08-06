@@ -4,6 +4,7 @@ import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
 import { randomUUID } from 'crypto'
 import { sendSchemeIntroductionEmail } from '@/lib/email'
+import { generateInvoicesForPool } from '@/lib/ledger/generate'
 import { requireGroupManager } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
@@ -384,6 +385,29 @@ async function handleActivate(body: any): Promise<NextResponse> {
 
   await exec(`UPDATE "SavingsPool" SET status='ACTIVE',"updatedAt"=NOW() WHERE id=$1`, [poolId])
 
+  // ── Raise the invoices ──────────────────────────────────────
+  // Runs AFTER the schedule and rotation positions are written, because
+  // it reads both: the schedule supplies each due date, the rotation
+  // supplies the payee for each cycle. In a rotating pool every invoice
+  // names a PERSON, not the group — member A pays whoever holds that
+  // cycle's position, directly.
+  //
+  // Idempotent via the unique (sourceType, sourceId) index, so a retried
+  // activation cannot double-bill anyone. Failures are reported, never
+  // thrown: an activation that has already written payout positions must
+  // not roll back because invoicing had a bad day.
+  let invoicesRaised = 0
+  const ledgerErrors: string[] = []
+  try {
+    const gen = await generateInvoicesForPool(poolId, null)
+    invoicesRaised = gen.generated
+    if (gen.errors.length) ledgerErrors.push(...gen.errors)
+  } catch (e: any) {
+    console.error('Invoice generation failed:', e?.message)
+    ledgerErrors.push(e?.message || 'invoice generation failed')
+  }
+  if (ledgerErrors.length) console.error('Ledger errors:', ledgerErrors.slice(0, 5))
+
   // ── Introduction emails ─────────────────────────────────────
   // Sent AFTER the pool is committed ACTIVE, and deliberately not awaited
   // as a group: a bounced address must never roll back an activation that
@@ -458,16 +482,17 @@ async function handleActivate(body: any): Promise<NextResponse> {
     emailErrors.push(e?.message || 'email step failed')
   }
 
+  const ledgerNote = invoicesRaised > 0 ? ` ${invoicesRaised} invoices raised.` : ''
   const emailNote = emailsSent > 0
     ? ` ${emailsSent} introduction ${emailsSent === 1 ? 'email' : 'emails'} sent.`
     : (emailErrors.length ? ' Introduction emails could not be sent.' : '')
 
   return NextResponse.json({
     success: true,
-    data: { emailsSent, emailErrors },
+    data: { emailsSent, emailErrors, invoicesRaised, ledgerErrors },
     message: isRotating
-      ? `Pool activated! ${members.length}-member rotation scheduled (${rotationCount} payouts) and ${inserted} contribution records created.${emailNote}`
-      : `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.${emailNote}`,
+      ? `Pool activated! ${members.length}-member rotation scheduled (${rotationCount} payouts) and ${inserted} contribution records created.${ledgerNote}${emailNote}`
+      : `Pool activated! ${inserted} contribution records created for ${members.length} members over ${periodCount} periods.${ledgerNote}${emailNote}`,
   })
 }
 
