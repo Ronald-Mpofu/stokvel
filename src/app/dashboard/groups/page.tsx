@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import SendInviteModal from '../invitations/SendInviteModal'
 import GroceryClubPanel from '../grocery/GroceryClubPanel'
 import InvestmentPanel  from '../investment/InvestmentPanel'
@@ -542,6 +542,589 @@ function BrandingSelector({ countryCode, value, onChange }: { countryCode:string
         )
       })()}
       {!value && <p style={{ fontSize:'11px', color:'#DC2626', margin:0 }}>⚠️ Branding is required</p>}
+    </div>
+  )
+}
+
+
+// ── Group Banking & Documents panels ──────────────────────────
+// Both are MODULE-LEVEL components. Defining them inside GroupsPage's
+// render would remount them on every keystroke and lose cursor focus in
+// their inputs — the recurring failure on this page.
+//
+// Both mount only when their accordion section is open, so neither adds
+// a request to initial page load.
+//
+// Every button is type="button": these render inside the settings
+// <form onSubmit={handleUpdate}>, and an untyped button there defaults
+// to submit and would save the whole group instead.
+
+const MANDATE_ROLES = [
+  { value: 'CHAIRPERSON', label: 'Chairperson' },
+  { value: 'TREASURER',   label: 'Treasurer'   },
+  { value: 'SECRETARY',   label: 'Secretary'   },
+  { value: 'MEMBER',      label: 'Member'      },
+]
+
+const ACCOUNT_STATUS_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+  PENDING_VERIFICATION: { bg:'#FEF3C7', color:'#92400E', label:'Pending' },
+  ACTIVE:               { bg:'#DCFCE7', color:'#166534', label:'Active'  },
+  SUSPENDED:            { bg:'#FEE2E2', color:'#991B1B', label:'Suspended' },
+  CLOSED:               { bg:'#F1F5F9', color:'#475569', label:'Closed'  },
+}
+
+const EMPTY_ACCOUNT = {
+  id: '', accountType: 'BANK', bankName: '', accountName: '', accountNumber: '',
+  branchName: '', branchCode: '', swiftCode: '',
+  walletProvider: '', walletNumber: '', walletName: '',
+  currency: 'USD', country: '', signatoriesRequired: '2', isPrimary: false, notes: '',
+}
+
+function BankField({ label, value, onChange, placeholder = '', required = false, hint = '' }: any) {
+  return (
+    <div>
+      <label style={{ display:'block', fontSize:'11px', fontWeight:'600', color:'#64748B', marginBottom:'4px', textTransform:'uppercase', letterSpacing:'0.04em' }}>
+        {label}{required && <span style={{ color:'#DC2626' }}> *</span>}
+      </label>
+      <input value={value || ''} onChange={e => onChange(e.target.value)} placeholder={placeholder}
+        style={{ width:'100%', padding:'9px 12px', border:'1.5px solid #E2E8F0', borderRadius:'8px', fontSize:'13px', outline:'none', boxSizing:'border-box', minHeight:'40px' }} />
+      {hint && <p style={{ fontSize:'10px', color:'#94A3B8', margin:'3px 0 0' }}>{hint}</p>}
+    </div>
+  )
+}
+
+function GroupBankingPanel({ groupId, currency, groupMembers, notify }:
+  { groupId: string; currency: string; groupMembers: any[]; notify: (m: string, t: 'success'|'error') => void }) {
+
+  const [accounts, setAccounts] = useState<any[]>([])
+  const [loading, setLoading]   = useState(true)
+  const [showForm, setShowForm] = useState(false)
+  const [form, setForm]         = useState<any>({ ...EMPTY_ACCOUNT, currency })
+  const [saving, setSaving]     = useState(false)
+  const [busyId, setBusyId]     = useState<string|null>(null)
+  const [sigFor, setSigFor]     = useState<string|null>(null)
+  const [sigUser, setSigUser]   = useState('')
+  const [sigRole, setSigRole]   = useState('MEMBER')
+
+  // notify is recreated on every parent render. Holding it in a ref keeps
+  // load's identity stable — with notify in the dependency array, the
+  // mount effect below would refire on every render, forever.
+  const notifyRef = useRef(notify)
+  notifyRef.current = notify
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/groups/bank-accounts?groupId=${groupId}`)
+      const j = await r.json()
+      setAccounts(j.success ? (j.data || []) : [])
+      if (!j.success) notifyRef.current(j.error || 'Could not load bank accounts', 'error')
+    } catch {
+      notifyRef.current('Could not load bank accounts', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [groupId])
+
+  useEffect(() => { load() }, [load])
+
+  const setF = (k: string) => (v: any) => setForm((p: any) => ({ ...p, [k]: v }))
+
+  async function saveAccount() {
+    if (!form.accountName?.trim()) { notify('Account name is required', 'error'); return }
+    if (form.accountType === 'BANK' && !form.accountNumber?.trim()) { notify('Account number is required', 'error'); return }
+    if (form.accountType === 'MOBILE_WALLET' && !form.walletNumber?.trim()) { notify('Wallet number is required', 'error'); return }
+
+    setSaving(true)
+    try {
+      const isEdit = !!form.id
+      const r = await fetch('/api/groups/bank-accounts', {
+        method: isEdit ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...form, groupId, signatoriesRequired: Number(form.signatoriesRequired) || 2 }),
+      })
+      const j = await r.json()
+      if (j.success) {
+        notify(j.message || 'Saved', 'success')
+        setShowForm(false)
+        setForm({ ...EMPTY_ACCOUNT, currency })
+        await load()
+      } else {
+        notify(j.error || 'Could not save', 'error')
+      }
+    } catch {
+      notify('Could not save', 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function setStatus(id: string, status: string) {
+    setBusyId(id)
+    try {
+      const r = await fetch('/api/groups/bank-accounts', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'set-status', id, status }),
+      })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Updated') : (j.error || 'Could not update'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      notify('Could not update', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function addSignatory(accountId: string) {
+    if (!sigUser) { notify('Select a member', 'error'); return }
+    setBusyId(accountId)
+    try {
+      const r = await fetch('/api/groups/bank-accounts', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'add-signatory', bankAccountId: accountId, userId: sigUser, mandateRole: sigRole }),
+      })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Signatory added') : (j.error || 'Could not add'), j.success ? 'success' : 'error')
+      if (j.success) { setSigFor(null); setSigUser(''); setSigRole('MEMBER'); await load() }
+    } catch {
+      notify('Could not add signatory', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function removeSignatory(signatoryId: string, accountId: string) {
+    setBusyId(accountId)
+    try {
+      const r = await fetch('/api/groups/bank-accounts', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'resign-signatory', signatoryId }),
+      })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Removed') : (j.error || 'Could not remove'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      notify('Could not remove signatory', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  async function removeAccount(id: string) {
+    setBusyId(id)
+    try {
+      const r = await fetch(`/api/groups/bank-accounts?id=${id}`, { method: 'DELETE' })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Removed') : (j.error || 'Could not remove'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      notify('Could not remove account', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  function startEdit(a: any) {
+    setForm({
+      id: a.id, accountType: a.accountType, bankName: a.bankName || '', accountName: a.accountName || '',
+      accountNumber: a.accountNumber || '', branchName: a.branchName || '', branchCode: a.branchCode || '',
+      swiftCode: a.swiftCode || '', walletProvider: a.walletProvider || '', walletNumber: a.walletNumber || '',
+      walletName: a.walletName || '', currency: a.currency || currency, country: a.country || '',
+      signatoriesRequired: String(a.signatoriesRequired ?? 2), isPrimary: !!a.isPrimary, notes: a.notes || '',
+    })
+    setShowForm(true)
+  }
+
+  const BTN: React.CSSProperties = { padding:'7px 12px', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor:'pointer', minHeight:'34px' }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+
+      <div style={{ background:'#F0F9FF', border:'1px solid #BAE6FD', borderRadius:'10px', padding:'11px 13px' }}>
+        <div style={{ fontSize:'12px', fontWeight:'600', color:'#075985', marginBottom:'3px' }}>🏦 The group&apos;s own account</div>
+        <div style={{ fontSize:'11px', color:'#0C4A6E', lineHeight:'1.5' }}>
+          Windfall never holds this money. These details record where the group&apos;s funds live so contributions
+          and payouts can be instructed and reconciled. An account cannot be activated until every required
+          signatory has been appointed.
+        </div>
+      </div>
+
+      {loading && <p style={{ fontSize:'12px', color:'#94A3B8', margin:0 }}>Loading accounts…</p>}
+
+      {!loading && accounts.length === 0 && !showForm && (
+        <div style={{ textAlign:'center', padding:'22px 14px', background:'#FAFBFC', border:'1.5px dashed #E2E8F0', borderRadius:'10px' }}>
+          <div style={{ fontSize:'26px', marginBottom:'6px' }}>🏦</div>
+          <p style={{ fontSize:'12px', color:'#64748B', margin:'0 0 12px' }}>No bank account recorded for this group yet.</p>
+          <button type="button" onClick={() => { setForm({ ...EMPTY_ACCOUNT, currency }); setShowForm(true) }}
+            style={{ ...BTN, background:TEAL, color:'white', border:'none', padding:'9px 18px', fontSize:'12px' }}>
+            + Add bank account
+          </button>
+        </div>
+      )}
+
+      {!loading && accounts.map((a: any) => {
+        const st  = ACCOUNT_STATUS_STYLE[a.status] || ACCOUNT_STATUS_STYLE.CLOSED
+        const sigs = Array.isArray(a.signatories) ? a.signatories : []
+        const need = Number(a.signatoriesRequired || 0)
+        const short = Math.max(0, need - sigs.length)
+        const taken = new Set(sigs.map((s: any) => s.userId))
+        const available = (groupMembers || []).filter((m: any) => !taken.has(m.userId || m.id))
+
+        return (
+          <div key={a.id} style={{ border:'1px solid #E2E8F0', borderRadius:'10px', background:'white', overflow:'hidden' }}>
+
+            <div style={{ padding:'12px 14px', borderBottom:'1px solid #F1F5F9' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:'8px', flexWrap:'wrap', marginBottom:'6px' }}>
+                <span style={{ fontSize:'16px' }}>{a.accountType === 'BANK' ? '🏦' : '📱'}</span>
+                <span style={{ fontSize:'13px', fontWeight:'700', color:NAVY }}>{a.accountName}</span>
+                {a.isPrimary && (
+                  <span style={{ background:'#EEF2FF', color:'#3730A3', fontSize:'10px', fontWeight:'700', padding:'2px 7px', borderRadius:'999px' }}>PRIMARY</span>
+                )}
+                <span style={{ background:st.bg, color:st.color, fontSize:'10px', fontWeight:'700', padding:'2px 7px', borderRadius:'999px' }}>{st.label}</span>
+                <span style={{ marginLeft:'auto', fontSize:'11px', color:'#64748B', fontWeight:'600' }}>{a.currency}</span>
+              </div>
+              <div style={{ fontSize:'11px', color:'#64748B', lineHeight:'1.6' }}>
+                {a.accountType === 'BANK' ? (
+                  <>
+                    {a.bankName && <div>{a.bankName}{a.branchName ? ` · ${a.branchName}` : ''}</div>}
+                    <div style={{ fontFamily:'ui-monospace, monospace' }}>{a.accountNumber}</div>
+                    {(a.branchCode || a.swiftCode) && (
+                      <div>{a.branchCode ? `Branch ${a.branchCode}` : ''}{a.branchCode && a.swiftCode ? ' · ' : ''}{a.swiftCode ? `SWIFT ${a.swiftCode}` : ''}</div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {a.walletProvider && <div>{a.walletProvider}</div>}
+                    <div style={{ fontFamily:'ui-monospace, monospace' }}>{a.walletNumber}</div>
+                    {a.walletName && <div>{a.walletName}</div>}
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div style={{ padding:'12px 14px', background:'#FAFBFC', borderBottom:'1px solid #F1F5F9' }}>
+              <div style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'8px' }}>
+                <span style={{ fontSize:'11px', fontWeight:'700', color:NAVY, textTransform:'uppercase', letterSpacing:'0.04em' }}>Mandate signatories</span>
+                <span style={{ background: short > 0 ? '#FEF3C7' : '#DCFCE7', color: short > 0 ? '#92400E' : '#166534',
+                  fontSize:'10px', fontWeight:'700', padding:'2px 7px', borderRadius:'999px' }}>
+                  {sigs.length} of {need}
+                </span>
+              </div>
+
+              {sigs.length === 0 && (
+                <p style={{ fontSize:'11px', color:'#94A3B8', margin:'0 0 8px' }}>No signatories appointed.</p>
+              )}
+
+              {sigs.map((s: any) => (
+                <div key={s.id} style={{ display:'flex', alignItems:'center', gap:'8px', padding:'6px 0', borderBottom:'1px solid #F1F5F9' }}>
+                  <span style={{ fontSize:'13px' }}>✍️</span>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:'12px', fontWeight:'600', color:NAVY }}>{s.fullName}</div>
+                    <div style={{ fontSize:'10px', color:'#94A3B8' }}>{s.email}</div>
+                  </div>
+                  <span style={{ background:'#F1F5F9', color:'#475569', fontSize:'10px', fontWeight:'700', padding:'2px 7px', borderRadius:'999px' }}>
+                    {(MANDATE_ROLES.find(r => r.value === s.mandateRole) || { label: s.mandateRole }).label}
+                  </span>
+                  <button type="button" disabled={busyId === a.id} onClick={() => removeSignatory(s.id, a.id)}
+                    style={{ ...BTN, background:'white', color:'#991B1B', border:'1.5px solid #FECACA', padding:'4px 9px' }}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+
+              {sigFor === a.id ? (
+                <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', marginTop:'9px' }}>
+                  <select value={sigUser} onChange={e => setSigUser(e.target.value)}
+                    style={{ flex:'1 1 150px', padding:'8px 10px', border:'1.5px solid #E2E8F0', borderRadius:'7px', fontSize:'12px', minHeight:'36px' }}>
+                    <option value="">Select a member…</option>
+                    {available.map((m: any) => (
+                      <option key={m.userId || m.id} value={m.userId || m.id}>{m.fullName || m.name}</option>
+                    ))}
+                  </select>
+                  <select value={sigRole} onChange={e => setSigRole(e.target.value)}
+                    style={{ flex:'0 1 130px', padding:'8px 10px', border:'1.5px solid #E2E8F0', borderRadius:'7px', fontSize:'12px', minHeight:'36px' }}>
+                    {MANDATE_ROLES.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
+                  </select>
+                  <button type="button" disabled={busyId === a.id} onClick={() => addSignatory(a.id)}
+                    style={{ ...BTN, background:TEAL, color:'white', border:'none' }}>Add</button>
+                  <button type="button" onClick={() => { setSigFor(null); setSigUser('') }}
+                    style={{ ...BTN, background:'white', color:'#64748B', border:'1.5px solid #E2E8F0' }}>Cancel</button>
+                </div>
+              ) : (
+                <button type="button" onClick={() => { setSigFor(a.id); setSigUser(''); setSigRole('MEMBER') }}
+                  style={{ ...BTN, background:'white', color:TEAL, border:`1.5px solid ${TEAL}40`, marginTop:'9px' }}>
+                  + Appoint signatory
+                </button>
+              )}
+
+              {short > 0 && (
+                <p style={{ fontSize:'10px', color:'#92400E', margin:'8px 0 0' }}>
+                  ⚠️ {short} more {short === 1 ? 'signatory' : 'signatories'} required before this account can be activated.
+                </p>
+              )}
+            </div>
+
+            <div style={{ padding:'10px 14px', display:'flex', gap:'6px', flexWrap:'wrap' }}>
+              {a.status !== 'ACTIVE' && (
+                <button type="button" disabled={busyId === a.id} onClick={() => setStatus(a.id, 'ACTIVE')}
+                  style={{ ...BTN, background:'#DCFCE7', color:'#166534', border:'1.5px solid #BBF7D0' }}>
+                  ✓ Activate
+                </button>
+              )}
+              {a.status === 'ACTIVE' && (
+                <button type="button" disabled={busyId === a.id} onClick={() => setStatus(a.id, 'SUSPENDED')}
+                  style={{ ...BTN, background:'#FEF3C7', color:'#92400E', border:'1.5px solid #FDE68A' }}>
+                  ⏸ Suspend
+                </button>
+              )}
+              <button type="button" onClick={() => startEdit(a)}
+                style={{ ...BTN, background:'white', color:NAVY, border:'1.5px solid #E2E8F0' }}>✏️ Edit</button>
+              <button type="button" disabled={busyId === a.id} onClick={() => removeAccount(a.id)}
+                style={{ ...BTN, background:'white', color:'#991B1B', border:'1.5px solid #FECACA', marginLeft:'auto' }}>
+                🗑️ Remove
+              </button>
+            </div>
+          </div>
+        )
+      })}
+
+      {!loading && accounts.length > 0 && !showForm && (
+        <button type="button" onClick={() => { setForm({ ...EMPTY_ACCOUNT, currency }); setShowForm(true) }}
+          style={{ ...BTN, background:'white', color:TEAL, border:`1.5px solid ${TEAL}40`, alignSelf:'flex-start' }}>
+          + Add another account
+        </button>
+      )}
+
+      {showForm && (
+        <div style={{ border:`1.5px solid ${TEAL}30`, borderRadius:'10px', background:'white', padding:'14px' }}>
+          <div style={{ fontSize:'13px', fontWeight:'700', color:NAVY, marginBottom:'12px' }}>
+            {form.id ? 'Edit account' : 'New account'}
+          </div>
+
+          <div style={{ display:'flex', gap:'8px', marginBottom:'12px' }}>
+            {[{ v:'BANK', l:'🏦 Bank account' }, { v:'MOBILE_WALLET', l:'📱 Mobile wallet' }].map(t => (
+              <button key={t.v} type="button" onClick={() => setF('accountType')(t.v)}
+                style={{ flex:1, padding:'9px', borderRadius:'8px', fontSize:'12px', fontWeight:'600', cursor:'pointer', minHeight:'40px',
+                  background: form.accountType === t.v ? TEAL : 'white',
+                  color:      form.accountType === t.v ? 'white' : '#64748B',
+                  border:     form.accountType === t.v ? 'none' : '1.5px solid #E2E8F0' }}>
+                {t.l}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'12px', marginBottom:'12px' }}>
+            <BankField label="Account name" value={form.accountName} onChange={setF('accountName')} required
+              placeholder="Group name as registered" hint="Should match the group's registered name" />
+            {form.accountType === 'BANK' ? (
+              <>
+                <BankField label="Account number" value={form.accountNumber} onChange={setF('accountNumber')} required />
+                <BankField label="Bank name" value={form.bankName} onChange={setF('bankName')} />
+                <BankField label="Branch name" value={form.branchName} onChange={setF('branchName')} />
+                <BankField label="Branch code" value={form.branchCode} onChange={setF('branchCode')} />
+                <BankField label="SWIFT / BIC" value={form.swiftCode} onChange={setF('swiftCode')} hint="Only for international transfers" />
+              </>
+            ) : (
+              <>
+                <BankField label="Wallet number" value={form.walletNumber} onChange={setF('walletNumber')} required
+                  placeholder="+263 …" />
+                <BankField label="Provider" value={form.walletProvider} onChange={setF('walletProvider')}
+                  placeholder="EcoCash, M-Pesa, MTN MoMo" />
+                <BankField label="Registered wallet name" value={form.walletName} onChange={setF('walletName')} />
+              </>
+            )}
+            <BankField label="Currency" value={form.currency} onChange={setF('currency')} required />
+            <BankField label="Signatories required" value={form.signatoriesRequired} onChange={setF('signatoriesRequired')}
+              hint="Must match the bank mandate — two or more is recommended" />
+          </div>
+
+          <label style={{ display:'flex', alignItems:'center', gap:'8px', marginBottom:'12px', cursor:'pointer', minHeight:'36px' }}>
+            <input type="checkbox" checked={!!form.isPrimary} onChange={e => setF('isPrimary')(e.target.checked)}
+              style={{ width:'16px', height:'16px', cursor:'pointer' }} />
+            <span style={{ fontSize:'12px', color:'#475569' }}>Primary account for {form.currency || currency}</span>
+          </label>
+
+          <div style={{ display:'flex', gap:'8px' }}>
+            <button type="button" disabled={saving} onClick={saveAccount}
+              style={{ ...BTN, background:TEAL, color:'white', border:'none', padding:'9px 18px', fontSize:'12px' }}>
+              {saving ? 'Saving…' : (form.id ? 'Save changes' : 'Add account')}
+            </button>
+            <button type="button" onClick={() => { setShowForm(false); setForm({ ...EMPTY_ACCOUNT, currency }) }}
+              style={{ ...BTN, background:'white', color:'#64748B', border:'1.5px solid #E2E8F0', padding:'9px 18px', fontSize:'12px' }}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const DOC_KINDS = [
+  { key:'CONSTITUTION',     label:'Constitution',     desc:'Group rules, governance and banking mandate', icon:'📜', bg:'#EEF2FF', color:'#3730A3', template:'/templates/windfall-constitution-template.docx' },
+  { key:'WELCOME_LETTER',   label:'Welcome Letter',   desc:'Sent to new members on joining',              icon:'👋', bg:'#F0FDF4', color:'#166534', template:'' },
+  { key:'DISMISSAL_LETTER', label:'Dismissal Letter', desc:'Formal exit or removal notice',               icon:'📨', bg:'#FEF2F2', color:'#991B1B', template:'' },
+  { key:'RESOLUTION',       label:'Board Resolution', desc:'Signed resolution the bank will act on',      icon:'⚖️', bg:'#FFFBEB', color:'#92400E', template:'' },
+]
+
+function GroupDocumentsPanel({ groupId, notify }:
+  { groupId: string; notify: (m: string, t: 'success'|'error') => void }) {
+
+  const [docs, setDocs]         = useState<any[]>([])
+  const [loading, setLoading]   = useState(true)
+  const [busyKey, setBusyKey]   = useState<string|null>(null)
+
+  // Ref for the same reason as GroupBankingPanel: a notify in the
+  // dependency array would make the mount effect loop.
+  const notifyRef = useRef(notify)
+  notifyRef.current = notify
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await fetch(`/api/groups/documents?groupId=${groupId}`)
+      const j = await r.json()
+      setDocs(j.success ? (j.data || []) : [])
+      if (!j.success) notifyRef.current(j.error || 'Could not load documents', 'error')
+    } catch {
+      notifyRef.current('Could not load documents', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [groupId])
+
+  useEffect(() => { load() }, [load])
+
+  async function upload(docType: string, file: File) {
+    if (!file) return
+    if (file.size > 10 * 1024 * 1024) { notify('File must be 10 MB or smaller', 'error'); return }
+
+    setBusyKey(docType)
+    try {
+      const fd = new FormData()
+      fd.append('file', file)
+      fd.append('groupId', groupId)
+      fd.append('docType', docType)
+      const r = await fetch('/api/groups/documents', { method: 'POST', body: fd })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Uploaded') : (j.error || 'Upload failed'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      notify('Upload failed', 'error')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function download(docId: string, docType: string) {
+    setBusyKey(docType)
+    try {
+      const r = await fetch(`/api/groups/documents?action=download&id=${docId}`)
+      const j = await r.json()
+      if (j.success && j.data?.url) {
+        window.open(j.data.url, '_blank', 'noopener,noreferrer')
+      } else {
+        notify(j.error || 'Could not open document', 'error')
+      }
+    } catch {
+      notify('Could not open document', 'error')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  async function removeDoc(docId: string, docType: string) {
+    setBusyKey(docType)
+    try {
+      const r = await fetch(`/api/groups/documents?id=${docId}`, { method: 'DELETE' })
+      const j = await r.json()
+      notify(j.success ? (j.message || 'Removed') : (j.error || 'Could not remove'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      notify('Could not remove document', 'error')
+    } finally {
+      setBusyKey(null)
+    }
+  }
+
+  const BTN: React.CSSProperties = { padding:'6px 11px', borderRadius:'7px', fontSize:'11px', fontWeight:'600', cursor:'pointer', minHeight:'34px' }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+
+      {loading && <p style={{ fontSize:'12px', color:'#94A3B8', margin:0 }}>Loading documents…</p>}
+
+      {!loading && DOC_KINDS.map(kind => {
+        const current = docs.find((d: any) => d.docType === kind.key && d.isCurrent)
+        const busy    = busyKey === kind.key
+
+        return (
+          <div key={kind.key} style={{ background:kind.bg, borderRadius:'10px', border:`1px solid ${kind.color}20`, padding:'12px 14px' }}>
+            <div style={{ display:'flex', alignItems:'flex-start', gap:'12px', flexWrap:'wrap' }}>
+              <span style={{ fontSize:'22px', flexShrink:0 }}>{kind.icon}</span>
+              <div style={{ flex:'1 1 180px', minWidth:0 }}>
+                <div style={{ fontSize:'13px', fontWeight:'600', color:kind.color }}>{kind.label}</div>
+                <div style={{ fontSize:'11px', color:'#64748B' }}>{kind.desc}</div>
+                {current && (
+                  <div style={{ fontSize:'11px', color:'#475569', marginTop:'5px' }}>
+                    <span style={{ background:'white', color:kind.color, fontSize:'10px', fontWeight:'700', padding:'1px 6px', borderRadius:'999px', marginRight:'6px' }}>
+                      v{current.version}
+                    </span>
+                    {current.fileName}
+                    {current.sizeBytes ? ` · ${(current.sizeBytes / 1024).toFixed(0)} KB` : ''}
+                    {current.uploadedByName ? ` · ${current.uploadedByName}` : ''}
+                  </div>
+                )}
+                {!current && (
+                  <div style={{ fontSize:'11px', color:'#94A3B8', marginTop:'5px' }}>Not uploaded yet</div>
+                )}
+              </div>
+
+              <div style={{ display:'flex', gap:'6px', flexWrap:'wrap', alignItems:'center' }}>
+                {kind.template && (
+                  <a href={kind.template} download
+                    style={{ ...BTN, background:'white', color:kind.color, border:`1.5px solid ${kind.color}40`,
+                      textDecoration:'none', display:'inline-flex', alignItems:'center' }}>
+                    📥 Template
+                  </a>
+                )}
+                <label style={{ ...BTN, background:'white', color:kind.color, border:`1.5px solid ${kind.color}40`,
+                  display:'inline-flex', alignItems:'center', opacity: busy ? 0.6 : 1 }}>
+                  {busy ? '⏳ Working…' : (current ? '⬆️ Replace' : '⬆️ Upload')}
+                  <input type="file" disabled={busy}
+                    accept=".pdf,.doc,.docx,.jpg,.jpeg,.png"
+                    onChange={e => {
+                      const f = e.target.files?.[0]
+                      e.target.value = ''
+                      if (f) upload(kind.key, f)
+                    }}
+                    style={{ display:'none' }} />
+                </label>
+                {current && (
+                  <button type="button" disabled={busy} onClick={() => download(current.id, kind.key)}
+                    style={{ ...BTN, background:'white', color:'#475569', border:'1.5px solid #E2E8F0' }}>
+                    ⬇️ Download
+                  </button>
+                )}
+                {current && (
+                  <button type="button" disabled={busy} onClick={() => removeDoc(current.id, kind.key)}
+                    style={{ ...BTN, background:'white', color:'#991B1B', border:'1.5px solid #FECACA' }}>
+                    🗑️
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )
+      })}
+
+      {!loading && (
+        <p style={{ fontSize:'11px', color:'#94A3B8', margin:'2px 0 0', lineHeight:'1.5' }}>
+          Documents are stored privately. Download links are signed and expire after five minutes.
+          Uploading a replacement creates a new version — earlier versions are retained, not overwritten.
+        </p>
+      )}
     </div>
   )
 }
@@ -2296,6 +2879,7 @@ export default function GroupsPage() {
                 { id:'location',       icon:'📍', label:'Location'         },
                 { id:'currency',       icon:'💱', label:'Currency'         },
                 { id:'branding',       icon:'🏷️', label:'Branding'        },
+                { id:'banking',        icon:'🏦', label:'Bank Account & Signatories' },
                 { id:'dates',          icon:'📅', label:'Dates'            },
                 { id:'documentation',  icon:'📄', label:'Documentation'    },
                 { id:'danger',         icon:'🗑️', label:'Delete Group'    },
@@ -2469,33 +3053,17 @@ export default function GroupsPage() {
                               </div>
                             )}
 
+                            {sec.id === 'banking' && (
+                              <GroupBankingPanel
+                                groupId={g.id}
+                                currency={ef.currency || g.currency || 'USD'}
+                                groupMembers={groupMembers}
+                                notify={showToast}
+                              />
+                            )}
+
                             {sec.id === 'documentation' && (
-                              <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
-                                {[
-                                  { key:'constitution',    label:'Constitution',     desc:'Group rules and governance document', icon:'📜', bg:'#EEF2FF', color:'#3730A3' },
-                                  { key:'welcome-letter',  label:'Welcome Letter',   desc:'Sent to new members on joining',       icon:'👋', bg:'#F0FDF4', color:'#166534' },
-                                  { key:'dismissal-letter',label:'Dismissal Letter', desc:'Formal exit or removal notice',        icon:'📨', bg:'#FEF2F2', color:'#991B1B' },
-                                ].map(doc => (
-                                  <div key={doc.key} style={{ display:'flex', alignItems:'center', gap:'12px', padding:'12px 14px', background:doc.bg, borderRadius:'10px', border:`1px solid ${doc.color}20` }}>
-                                    <span style={{ fontSize:'22px', flexShrink:0 }}>{doc.icon}</span>
-                                    <div style={{ flex:1 }}>
-                                      <div style={{ fontSize:'13px', fontWeight:'600', color:doc.color }}>{doc.label}</div>
-                                      <div style={{ fontSize:'11px', color:'#64748B' }}>{doc.desc}</div>
-                                    </div>
-                                    <div style={{ display:'flex', gap:'6px' }}>
-                                      <button type="button" style={{ padding:'5px 10px', background:'white', color:doc.color, border:`1.5px solid ${doc.color}40`, borderRadius:'6px', fontSize:'11px', fontWeight:'600', cursor:'pointer' }}>
-                                        ⬆️ Upload
-                                      </button>
-                                      <button type="button" style={{ padding:'5px 10px', background:'white', color:'#64748B', border:'1.5px solid #E2E8F0', borderRadius:'6px', fontSize:'11px', cursor:'pointer' }}>
-                                        ⬇️ Download
-                                      </button>
-                                    </div>
-                                  </div>
-                                ))}
-                                <p style={{ fontSize:'11px', color:'#94A3B8', margin:'2px 0 0' }}>
-                                  Document storage coming soon. Templates will be auto-generated from group details.
-                                </p>
-                              </div>
+                              <GroupDocumentsPanel groupId={g.id} notify={showToast} />
                             )}
 
                             {sec.id === 'danger' && (
