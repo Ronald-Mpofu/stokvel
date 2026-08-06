@@ -1,5 +1,5 @@
 'use client'
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import NotificationBell from '../dashboard/notifications/NotificationBell'
 // Same component the dashboard uses. One implementation, so the opt-in
 // and cancellation behaviour cannot drift between the two surfaces.
@@ -1056,6 +1056,392 @@ function VersionBadge({ label, ver }: { label: string; ver: string }) {  return 
   )
 }
 
+// ── Ledger tab ────────────────────────────────────────────────
+// Three sections, because a member in a rotating pool occupies three
+// positions at once and they answer different questions:
+//
+//   I OWE            invoices where the member is payer
+//   OWED TO ME       invoices where the member is the cycle's recipient
+//   AWAITING ME      payer attestations sitting on this member to
+//                    confirm or dispute
+//
+// THE PRIMARY ACTION IS "MARK RECEIVED", BY THE RECIPIENT.
+// They are the only party who knows whether money arrived. A payer who
+// has paid but sees no confirmation can log it instead, which starts
+// the confirmation window rather than settling anything.
+
+const INV_STATUS_META: Record<string, { bg: string; color: string; label: string }> = {
+  ISSUED:      { bg: '#F1F5F9', color: '#475569', label: 'Upcoming'  },
+  DUE:         { bg: '#FEF3C7', color: '#92400E', label: 'Due now'   },
+  PART_PAID:   { bg: '#DBEAFE', color: '#1E40AF', label: 'Part paid' },
+  OVERDUE:     { bg: '#FEE2E2', color: '#991B1B', label: 'Overdue'   },
+  PAID:        { bg: '#DCFCE7', color: '#166534', label: 'Paid'      },
+  CANCELLED:   { bg: '#F1F5F9', color: '#94A3B8', label: 'Cancelled' },
+  WRITTEN_OFF: { bg: '#F1F5F9', color: '#94A3B8', label: 'Written off' },
+}
+
+const PAY_METHODS = [
+  { value: 'BANK_TRANSFER', label: 'Bank transfer' },
+  { value: 'ECOCASH',       label: 'EcoCash'       },
+  { value: 'MPESA',         label: 'M-Pesa'        },
+  { value: 'MTN_MOMO',      label: 'MTN MoMo'      },
+  { value: 'CASH',          label: 'Cash'          },
+]
+
+const shortDate = (d: any) =>
+  d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' }) : '—'
+
+const daysUntil = (d: any) => {
+  if (!d) return null
+  const ms = new Date(d).setHours(0, 0, 0, 0) - new Date().setHours(0, 0, 0, 0)
+  return Math.round(ms / 86400000)
+}
+
+function LedgerAmount({ amount, currency, bold }: any) {
+  return (
+    <span style={{ fontVariantNumeric: 'tabular-nums', fontWeight: bold ? 700 : 600, whiteSpace: 'nowrap' }}>
+      {currency} {fmt(Number(amount || 0))}
+    </span>
+  )
+}
+
+// Settle modal. Used for both directions; the copy changes because the
+// two actions mean different things.
+function SettleModal({ invoice, mode, onClose, onDone, onError }: any) {
+  const isMobile = useIsMobile()
+  const [method, setMethod]   = useState('BANK_TRANSFER')
+  const [reference, setRef]   = useState('')
+  const [note, setNote]       = useState('')
+  const [busy, setBusy]       = useState(false)
+
+  const isReceipt = mode === 'receive'
+
+  async function submit() {
+    setBusy(true)
+    try {
+      const r = await fetch('/api/ledger/payments', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          invoiceIds: [invoice.id],
+          method,
+          reference: reference.trim() || null,
+          note: note.trim() || null,
+        }),
+      })
+      const j = await r.json()
+      if (j.success) onDone(j.message || 'Recorded')
+      else onError(j.error || 'Could not record this')
+    } catch {
+      onError('Could not record this')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div onClick={onClose}
+      style={{ position: 'fixed', inset: 0, background: 'rgba(13,33,55,0.55)', zIndex: 3000,
+        display: 'flex', alignItems: isMobile ? 'flex-end' : 'center', justifyContent: 'center', padding: isMobile ? 0 : '20px' }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background: 'white', borderRadius: isMobile ? '16px 16px 0 0' : '14px', width: '100%', maxWidth: '440px',
+          padding: '22px', maxHeight: '90vh', overflowY: 'auto' }}>
+
+        <h3 style={{ margin: '0 0 4px', fontSize: '17px', fontWeight: 700, color: NAVY }}>
+          {isReceipt ? 'Mark as received' : 'Log your payment'}
+        </h3>
+        <p style={{ margin: '0 0 16px', fontSize: '12px', color: '#64748B', lineHeight: 1.6 }}>
+          {isReceipt
+            ? `Confirm that ${invoice.payerName} has paid you. This settles the invoice on the group ledger immediately.`
+            : `This tells ${invoice.payeeName || 'the group'} you have paid. It does not settle the invoice until they confirm receipt.`}
+        </p>
+
+        <div style={{ background: '#F8FAFC', border: '1px solid #E2E8F0', borderRadius: '10px', padding: '12px 14px', marginBottom: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '5px' }}>
+            <span style={{ fontSize: '12px', color: '#64748B' }}>{invoice.invoiceNumber}</span>
+            <LedgerAmount amount={invoice.amountOutstanding ?? invoice.total} currency={invoice.currency} bold />
+          </div>
+          <div style={{ fontSize: '12px', color: '#475569' }}>{invoice.description}</div>
+          <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '4px' }}>Due {shortDate(invoice.dueDate)}</div>
+        </div>
+
+        <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#64748B', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          How was it paid
+        </label>
+        <select value={method} onChange={e => setMethod(e.target.value)}
+          style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E2E8F0', borderRadius: '8px', fontSize: '13px', marginBottom: '12px', minHeight: '44px', boxSizing: 'border-box' }}>
+          {PAY_METHODS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
+        </select>
+
+        <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#64748B', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          Reference {isReceipt ? '(optional)' : ''}
+        </label>
+        <input value={reference} onChange={e => setRef(e.target.value)}
+          placeholder="Bank or wallet reference"
+          style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E2E8F0', borderRadius: '8px', fontSize: '13px', marginBottom: '12px', minHeight: '44px', boxSizing: 'border-box' }} />
+
+        <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#64748B', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+          Note (optional)
+        </label>
+        <textarea value={note} onChange={e => setNote(e.target.value)} rows={2}
+          style={{ width: '100%', padding: '10px 12px', border: '1.5px solid #E2E8F0', borderRadius: '8px', fontSize: '13px', marginBottom: '18px', boxSizing: 'border-box', resize: 'vertical', fontFamily: 'inherit' }} />
+
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button type="button" onClick={submit} disabled={busy}
+            style={{ flex: 1, padding: '13px', background: TEAL, color: 'white', border: 'none', borderRadius: '10px', fontSize: '14px', fontWeight: 600, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.6 : 1, minHeight: '46px' }}>
+            {busy ? 'Saving…' : (isReceipt ? 'Confirm received' : 'Log payment')}
+          </button>
+          <button type="button" onClick={onClose}
+            style={{ padding: '13px 20px', background: 'white', color: '#64748B', border: '1.5px solid #E2E8F0', borderRadius: '10px', fontSize: '14px', fontWeight: 600, cursor: 'pointer', minHeight: '46px' }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function InvoiceRow({ inv, direction, onAct }: any) {
+  const meta = INV_STATUS_META[inv.status] || INV_STATUS_META.ISSUED
+  const days = daysUntil(inv.dueDate)
+  const owing = Number(inv.amountOutstanding ?? inv.total) > 0
+  const settled = inv.status === 'PAID'
+  const isSelf = inv.payerId === inv.payeeId
+
+  const counterparty = direction === 'owe'
+    ? (inv.payeeType === 'MEMBER' ? inv.payeeName : inv.groupName)
+    : inv.payerName
+
+  return (
+    <div style={{ padding: '13px 0', borderBottom: '1px solid #F1F5F9' }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' }}>
+        <div style={{ flex: '1 1 190px', minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '7px', flexWrap: 'wrap', marginBottom: '3px' }}>
+            <span style={{ fontSize: '13px', fontWeight: 700, color: NAVY }}>
+              {direction === 'owe' ? `To ${counterparty}` : `From ${counterparty}`}
+            </span>
+            <span style={{ background: meta.bg, color: meta.color, fontSize: '10px', fontWeight: 700, padding: '2px 7px', borderRadius: '999px' }}>
+              {meta.label}
+            </span>
+            {isSelf && (
+              <span style={{ background: '#EEF2FF', color: '#3730A3', fontSize: '10px', fontWeight: 700, padding: '2px 7px', borderRadius: '999px' }}>
+                NETTED
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: '11px', color: '#64748B' }}>{inv.periodLabel} · {inv.invoiceNumber}</div>
+          <div style={{ fontSize: '11px', color: days != null && days < 0 && !settled ? '#991B1B' : '#94A3B8', marginTop: '2px' }}>
+            {settled ? 'Settled' : days === 0 ? 'Due today'
+              : days != null && days > 0 ? `Due in ${days} day${days === 1 ? '' : 's'}`
+              : days != null ? `${Math.abs(days)} day${Math.abs(days) === 1 ? '' : 's'} overdue` : shortDate(inv.dueDate)}
+          </div>
+        </div>
+
+        <div style={{ textAlign: 'right', display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: '6px' }}>
+          <div style={{ fontSize: '14px', color: settled ? '#166534' : NAVY }}>
+            <LedgerAmount amount={inv.amountOutstanding ?? inv.total} currency={inv.currency} bold />
+          </div>
+          {!settled && owing && !isSelf && (
+            <button type="button" onClick={() => onAct(inv)}
+              style={{ padding: '7px 13px', borderRadius: '8px', fontSize: '11px', fontWeight: 700, cursor: 'pointer', minHeight: '36px',
+                background: direction === 'receive' ? TEAL : 'white',
+                color:      direction === 'receive' ? 'white' : TEAL,
+                border:     direction === 'receive' ? 'none' : `1.5px solid ${TEAL}55` }}>
+              {direction === 'receive' ? '✓ Mark received' : 'I have paid'}
+            </button>
+          )}
+          {isSelf && !settled && (
+            <span style={{ fontSize: '10px', color: '#94A3B8', maxWidth: '160px' }}>
+              Retained from your payout
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function LedgerTab({ userId, showToast }: { userId: string; showToast: (m: string, t?: 'success' | 'error') => void }) {
+  const isMobile = useIsMobile()
+  const [section, setSection] = useState<'owe' | 'receive'>('owe')
+  const [payable, setPayable]   = useState<any[]>([])
+  const [receivable, setRecv]   = useState<any[]>([])
+  const [awaiting, setAwaiting] = useState<any[]>([])
+  const [totals, setTotals]     = useState<any>({ owe: 0, recv: 0, currency: '' })
+  const [loading, setLoading]   = useState(true)
+  const [settle, setSettle]     = useState<any>(null)
+  const [busyId, setBusyId]     = useState<string | null>(null)
+
+  // showToast is recreated on every parent render; a ref keeps load's
+  // identity stable so the mount effect does not fire in a loop.
+  const toastRef = useRef(showToast)
+  toastRef.current = showToast
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      // Three endpoints in parallel — one round trip's latency, not three.
+      const [p, r, a] = await Promise.all([
+        fetch('/api/ledger/invoices?view=payable').then(x => x.json()).catch(() => ({ success: false })),
+        fetch('/api/ledger/invoices?view=receivable').then(x => x.json()).catch(() => ({ success: false })),
+        fetch('/api/ledger/payments?view=awaiting-me').then(x => x.json()).catch(() => ({ success: false })),
+      ])
+      const pl = p.success ? (p.data || []) : []
+      const rl = r.success ? (r.data || []) : []
+      setPayable(pl)
+      setRecv(rl)
+      setAwaiting(a.success ? (a.data || []) : [])
+      setTotals({
+        owe:      pl.filter((i: any) => i.status !== 'PAID' && i.payerId !== i.payeeId)
+                    .reduce((s: number, i: any) => s + Number(i.amountOutstanding || 0), 0),
+        recv:     rl.filter((i: any) => i.status !== 'PAID' && i.payerId !== i.payeeId)
+                    .reduce((s: number, i: any) => s + Number(i.amountOutstanding || 0), 0),
+        currency: pl[0]?.currency || rl[0]?.currency || '',
+      })
+    } catch {
+      toastRef.current('Could not load your ledger', 'error')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function respond(paymentId: string, action: 'confirm' | 'dispute') {
+    let reason = ''
+    if (action === 'dispute') {
+      reason = window.prompt('Why are you disputing this? The treasurer will review it.') || ''
+      if (!reason.trim()) return
+    }
+    setBusyId(paymentId)
+    try {
+      const r = await fetch('/api/ledger/payments', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, paymentId, reason }),
+      })
+      const j = await r.json()
+      showToast(j.success ? (j.message || 'Done') : (j.error || 'Could not do that'), j.success ? 'success' : 'error')
+      if (j.success) await load()
+    } catch {
+      showToast('Could not do that', 'error')
+    } finally {
+      setBusyId(null)
+    }
+  }
+
+  const list = section === 'owe' ? payable : receivable
+  const open = list.filter((i: any) => i.status !== 'PAID' && i.status !== 'CANCELLED')
+  const done = list.filter((i: any) => i.status === 'PAID')
+
+  return (
+    <div>
+      {settle && (
+        <SettleModal
+          invoice={settle.inv}
+          mode={settle.mode}
+          onClose={() => setSettle(null)}
+          onDone={(m: string) => { setSettle(null); showToast(m); load() }}
+          onError={(m: string) => showToast(m, 'error')}
+        />
+      )}
+
+      {/* Awaiting my confirmation — first, because someone is waiting */}
+      {awaiting.length > 0 && (
+        <div style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: '12px', padding: '14px 16px', marginBottom: '16px' }}>
+          <div style={{ fontSize: '13px', fontWeight: 700, color: '#92400E', marginBottom: '3px' }}>
+            ⏳ {awaiting.length} payment{awaiting.length === 1 ? '' : 's'} awaiting your confirmation
+          </div>
+          <div style={{ fontSize: '11px', color: '#78350F', marginBottom: '10px', lineHeight: 1.6 }}>
+            Someone says they have paid you. Confirm it once the money is in your account.
+            If it never arrived, dispute it and your treasurer will review.
+          </div>
+          {awaiting.map((p: any) => (
+            <div key={p.id} style={{ background: 'white', borderRadius: '9px', padding: '11px 13px', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '10px', flexWrap: 'wrap' }}>
+                <div style={{ flex: '1 1 160px', minWidth: 0 }}>
+                  <div style={{ fontSize: '13px', fontWeight: 700, color: NAVY }}>{p.payerName}</div>
+                  <div style={{ fontSize: '11px', color: '#64748B' }}>
+                    {(PAY_METHODS.find(m => m.value === p.method) || { label: p.method }).label}
+                    {p.reference ? ` · ${p.reference}` : ''} · {shortDate(p.paidAt)}
+                  </div>
+                  {p.payerNote && <div style={{ fontSize: '11px', color: '#94A3B8', marginTop: '3px' }}>“{p.payerNote}”</div>}
+                </div>
+                <div style={{ textAlign: 'right' }}>
+                  <div style={{ fontSize: '14px', color: NAVY, marginBottom: '6px' }}>
+                    <LedgerAmount amount={p.amount} currency={p.currency} bold />
+                  </div>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <button type="button" disabled={busyId === p.id} onClick={() => respond(p.id, 'confirm')}
+                      style={{ padding: '7px 12px', background: TEAL, color: 'white', border: 'none', borderRadius: '8px', fontSize: '11px', fontWeight: 700, cursor: 'pointer', minHeight: '36px' }}>
+                      ✓ Received
+                    </button>
+                    <button type="button" disabled={busyId === p.id} onClick={() => respond(p.id, 'dispute')}
+                      style={{ padding: '7px 12px', background: 'white', color: '#991B1B', border: '1.5px solid #FECACA', borderRadius: '8px', fontSize: '11px', fontWeight: 700, cursor: 'pointer', minHeight: '36px' }}>
+                      Dispute
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Totals */}
+      <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr 1fr' : 'repeat(2, minmax(0,1fr))', gap: '10px', marginBottom: '16px' }}>
+        <KpiCard label="You owe"     value={`${totals.currency} ${fmt(totals.owe)}`}  color="#991B1B" icon="↗" />
+        <KpiCard label="Owed to you" value={`${totals.currency} ${fmt(totals.recv)}`} color={TEAL}    icon="↙" />
+      </div>
+
+      {/* Section switch */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '14px' }}>
+        {[
+          { id: 'owe',     label: `What I owe (${payable.filter((i: any) => i.status !== 'PAID').length})` },
+          { id: 'receive', label: `Owed to me (${receivable.filter((i: any) => i.status !== 'PAID').length})` },
+        ].map(s => (
+          <button key={s.id} type="button" onClick={() => setSection(s.id as any)}
+            style={{ flex: 1, padding: '11px', borderRadius: '10px', fontSize: '12px', fontWeight: 700, cursor: 'pointer', minHeight: '44px',
+              background: section === s.id ? NAVY : 'white',
+              color:      section === s.id ? 'white' : '#64748B',
+              border:     section === s.id ? 'none' : '1.5px solid #E2E8F0' }}>
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {loading && <p style={{ fontSize: '13px', color: '#94A3B8' }}>Loading your ledger…</p>}
+
+      {!loading && open.length === 0 && done.length === 0 && (
+        <EmptyState icon={section === 'owe' ? '💸' : '💰'}
+          text={section === 'owe'
+            ? 'Nothing owing. Invoices appear here when a scheme starts.'
+            : 'Nothing owed to you yet. In a rotating pool this fills up when it is your turn.'} />
+      )}
+
+      {!loading && open.length > 0 && (
+        <SectionCard title={section === 'owe' ? 'Outstanding' : 'Expected'}>
+          {open.map((inv: any) => (
+            <InvoiceRow key={inv.id} inv={inv} direction={section}
+              onAct={(i: any) => setSettle({ inv: i, mode: section === 'receive' ? 'receive' : 'pay' })} />
+          ))}
+        </SectionCard>
+      )}
+
+      {!loading && done.length > 0 && (
+        <div style={{ marginTop: '14px' }}>
+          <SectionCard title={`Settled (${done.length})`}>
+            {done.slice(0, 20).map((inv: any) => (
+              <InvoiceRow key={inv.id} inv={inv} direction={section} onAct={() => {}} />
+            ))}
+          </SectionCard>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function MemberPortal() {
   const isMobile = useIsMobile()
   const [menuOpen, setMenuOpen] = useState(false)
@@ -1119,6 +1505,7 @@ export default function MemberPortal() {
     { id: 'overview',      icon: '🏠', label: 'Overview'      },
     { id: 'discover',      icon: '🔎', label: 'Discover Groups' },
     { id: 'contributions', icon: '💸', label: 'Contributions' },
+    { id: 'ledger',        icon: '📒', label: 'My Ledger'     },
     { id: 'assets',        icon: '🏭', label: 'My Assets'     },
     { id: 'documents',     icon: '📄', label: 'Documents'     },
     { id: 'profile',       icon: '👤', label: 'My Profile'    },
@@ -1254,6 +1641,7 @@ export default function MemberPortal() {
             {tab === 'overview'      && <OverviewTab data={data} onViewCert={setCertEntry} onPay={setPayItem} onOpenGroup={(id: string, name: string) => setOpenGroup({ id, name })} />}
             {tab === 'discover'      && <DiscoverTab showToast={showToast} user={data?.user} />}
             {tab === 'contributions' && <ContributionsTab userId={userId} />}
+            {tab === 'ledger'        && <LedgerTab userId={userId} showToast={showToast} />}
             {tab === 'assets'        && <AssetsTab data={data} onViewCert={setCertEntry} />}
             {tab === 'documents'     && <DocumentsTab userId={userId} />}
             {tab === 'profile'       && <ProfileTab user={data.user} />}
