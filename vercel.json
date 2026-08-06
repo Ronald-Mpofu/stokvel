@@ -1,4 +1,7 @@
 {
-  "framework": "nextjs"
+  "framework": "nextjs",
+  "crons": [
+    { "path": "/api/cron/ledger", "schedule": "0 6 * * *" }
+  ]
 }
-{ "crons": [{ "path": "/api/cron/ledger", "schedule": "0 6 * * *" }] }
+
