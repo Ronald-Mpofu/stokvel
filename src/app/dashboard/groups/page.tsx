@@ -1130,6 +1130,85 @@ function GroupDocumentsPanel({ groupId, notify }:
 }
 
 
+// ── PageIntro ─────────────────────────────────────────────────
+// Page-level guidance. One always-visible line, plus an optional
+// expandable body and numbered steps.
+//
+// WHY IT IS BUILT THIS WAY
+//   A paragraph above a form is the thing users scroll past fastest,
+//   and on a phone it pushes the first field below the fold. So the
+//   only text that is always on screen is a single sentence saying what
+//   the page is for. Everything else is one tap away.
+//
+//   Open by default on desktop, collapsed on mobile — the constraint is
+//   vertical space, and only the phone has that problem.
+//
+// Module-level, like every other helper on this page, so it is not
+// redefined on each render.
+
+function PageIntro({ title, summary, body, steps, tone = 'teal' }: {
+  title: string
+  summary: string
+  body?: string[]
+  steps?: { label: string; text: string }[]
+  tone?: 'teal' | 'navy'
+}) {
+  const isMobile = useIsMobile()
+  // Desktop opens expanded; mobile starts collapsed. Deliberately not
+  // persisted — there is no dismissal state to get wrong, and a user who
+  // wants it gone simply collapses it.
+  const [open, setOpen] = useState(!isMobile)
+  const hasMore = (body && body.length > 0) || (steps && steps.length > 0)
+
+  const accent = tone === 'navy' ? NAVY : TEAL
+  const bg     = tone === 'navy' ? '#F1F5F9' : '#F0FDF4'
+  const border = tone === 'navy' ? '#CBD5E1' : '#BBF7D0'
+
+  return (
+    <div style={{ background:bg, border:`1px solid ${border}`, borderRadius:'12px', padding:'13px 15px', marginBottom:'18px' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', gap:'10px' }}>
+        <span style={{ fontSize:'16px', lineHeight:1.3, flexShrink:0 }}>💡</span>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:'13px', fontWeight:'700', color:accent, marginBottom:'2px' }}>{title}</div>
+          <div style={{ fontSize:'12px', color:'#475569', lineHeight:1.6 }}>{summary}</div>
+        </div>
+        {hasMore && (
+          <button type="button" onClick={() => setOpen(o => !o)}
+            aria-expanded={open}
+            style={{ background:'white', border:`1px solid ${border}`, borderRadius:'8px',
+              padding:'6px 11px', cursor:'pointer', fontSize:'11px', fontWeight:'600',
+              color:accent, whiteSpace:'nowrap', minHeight:'32px', flexShrink:0 }}>
+            {open ? 'Hide' : 'How it works'}
+          </button>
+        )}
+      </div>
+
+      {open && hasMore && (
+        <div style={{ marginTop:'11px', paddingTop:'11px', borderTop:`1px solid ${border}` }}>
+          {body?.map((p, i) => (
+            <p key={i} style={{ fontSize:'12px', color:'#475569', lineHeight:1.65, margin:i === 0 ? '0 0 8px' : '0 0 8px' }}>{p}</p>
+          ))}
+          {steps && steps.length > 0 && (
+            <div style={{ display:'flex', flexDirection:'column', gap:'7px', marginTop: body?.length ? '4px' : 0 }}>
+              {steps.map((s, i) => (
+                <div key={i} style={{ display:'flex', alignItems:'flex-start', gap:'9px' }}>
+                  <span style={{ background:accent, color:'white', borderRadius:'50%', width:'19px', height:'19px',
+                    display:'flex', alignItems:'center', justifyContent:'center', fontSize:'10px',
+                    fontWeight:'700', flexShrink:0, marginTop:'1px' }}>{i + 1}</span>
+                  <div style={{ fontSize:'12px', color:'#475569', lineHeight:1.55 }}>
+                    <strong style={{ color:NAVY }}>{s.label}</strong> — {s.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function GroupsPage() {
   const isMobile = useIsMobile()
   const [view, setView]                 = useState<'list'|'detail'|'create'>('list')
@@ -1911,6 +1990,19 @@ export default function GroupsPage() {
           <p style={{ fontSize:'12px', color:'#64748B', margin:0 }}>Set up a new stokvel savings group</p>
         </div>
       </div>
+
+      <PageIntro
+        title="Creating your group"
+        summary="Fill in the details below. Your group can run one or more Windfall Schemes — savings, grocery, loans, assets, property or investment."
+        body={[
+          'A group is the people. The schemes are what they save for. You set the schemes up afterwards, so nothing here locks you in.',
+        ]}
+        steps={[
+          { label: 'Create the group',  text: 'Name, country, currency and contribution settings.' },
+          { label: 'Invite members',    text: 'They join automatically when they accept the email.' },
+          { label: 'Add your schemes',  text: 'Set up each Windfall Scheme once your members are in.' },
+        ]}
+      />
 
       {formError && (
         <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'10px', padding:'12px 16px', marginBottom:'16px', color:'#991B1B', fontSize:'13px' }}>
