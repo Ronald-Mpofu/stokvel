@@ -5,6 +5,7 @@ import prisma from '@/lib/prisma/client'
 import { getClaimsFromRequest, getSessionFromRequest, requireGroupManager, hasPermission } from '@/lib/auth'
 import { syncGroupSubscriptionTier } from '@/lib/payments/groupTier'
 import { stampGroupActivated, stampGroupReachedMinimum } from '@/lib/group-entitlement'
+import { sendInvitationEmail } from '@/lib/email'
 
 export const dynamic = 'force-dynamic'
 
@@ -236,10 +237,37 @@ export async function POST(req: NextRequest) {
 
     const adminUser = await prisma.user.findFirst({
       where:  { id: adminUserId, deletedAt: null },
-      select: { id: true },
+      select: { id: true, fullName: true },
     })
     if (!adminUser) {
       return NextResponse.json({ success: false, error: 'Admin user not found' }, { status: 400 })
+    }
+
+    // ── QUICK_CREATE ─────────────────────────────────────────
+    // Group and invitations in one submit. The full form asks for five
+    // sections before anything exists; testers found that cumbersome
+    // for what is usually "a name, a country, and these eight people".
+    //
+    // contributionAmount is defaulted to zero and NOT asked for.
+    // Contribution terms belong to the Windfall Scheme, not the Group —
+    // Group.contributionAmount is a vestigial column, and prompting for
+    // it here would repeat the mistake the invitation email used to make
+    // by telling invitees they owed a monthly sum just for joining.
+    const isQuickCreate = body.action === 'QUICK_CREATE'
+    const quickInvites: { fullName: string; email: string }[] =
+      isQuickCreate && Array.isArray(body.invites) ? body.invites : []
+
+    if (isQuickCreate) {
+      if (!body.name || !String(body.name).trim()) {
+        return NextResponse.json({ success: false, error: 'Group name is required' }, { status: 400 })
+      }
+      if (!body.country) {
+        return NextResponse.json({ success: false, error: 'Country is required' }, { status: 400 })
+      }
+      if (quickInvites.length > 100) {
+        return NextResponse.json({ success: false, error: 'Too many invitations in one request (maximum 100)' }, { status: 400 })
+      }
+      body.contributionAmount = body.contributionAmount ?? 0
     }
 
     // Create group with Prisma (branding stored via raw SQL after)
@@ -347,6 +375,8 @@ export async function POST(req: NextRequest) {
 
     await prisma.auditLog.create({
       data: {
+        userId:      session.id,
+        groupId:     group.id,
         action:      'CREATE',
         entityType:  'Group',
         entityId:    group.id,
@@ -354,9 +384,85 @@ export async function POST(req: NextRequest) {
       } as any,
     })
 
+    // ── QUICK_CREATE: send the invitations ───────────────────
+    // Runs AFTER the group is committed. Partial failure is reported,
+    // never rolled back: if six of eight addresses accept and two
+    // bounce, the organiser keeps their group and is told which two to
+    // retry. Discarding a good group over one mistyped address would be
+    // the worse outcome by far.
+    if (isQuickCreate && quickInvites.length > 0) {
+      const sent: string[] = []
+      const failed: { email: string; reason: string }[] = []
+      const seen = new Set<string>()
+      const expiresAt = new Date(Date.now() + 14 * 86400000)
+
+      for (const raw of quickInvites) {
+        const email    = String(raw?.email || '').trim().toLowerCase()
+        const fullName = String(raw?.fullName || '').trim()
+
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+          failed.push({ email: email || '(blank)', reason: 'Not a valid email address' })
+          continue
+        }
+        // Client-side validation already catches duplicates, but the
+        // API cannot assume it was the client that called.
+        if (seen.has(email)) {
+          failed.push({ email, reason: 'Listed more than once' })
+          continue
+        }
+        seen.add(email)
+
+        try {
+          const invitation = await prisma.memberInvitation.create({
+            data: {
+              groupId:     group.id,
+              invitedById: session.id,   // bound to the session, never the body
+              email,
+              fullName:    fullName || null,
+              role:        'MEMBER',
+              channel:     'EMAIL',
+              expiresAt,
+            },
+          })
+
+          const res = await sendInvitationEmail({
+            to:          email,
+            inviteeName: fullName || undefined,
+            inviterName: adminUser.fullName || 'Your group admin',
+            groupName:   String(body.name),
+            token:       invitation.token,
+            expiresAt,
+          })
+
+          if (res.success) {
+            sent.push(email)
+            await prisma.memberInvitation.update({
+              where: { id: invitation.id },
+              data:  { emailSentAt: new Date() },
+            })
+          } else {
+            // The invitation row survives: the link is valid and can be
+            // resent or shared manually from the Members tab.
+            failed.push({ email, reason: res.error || 'Email could not be sent' })
+          }
+        } catch (e: any) {
+          const dup = e?.code === 'P2002'
+          failed.push({ email, reason: dup ? 'Already invited to this group' : (e?.message || 'Could not create the invitation') })
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        data: { groupId: group.id, id: group.id, sent: sent.length, failed },
+        message: failed.length === 0
+          ? `"${body.name}" created and ${sent.length} invitation${sent.length === 1 ? '' : 's'} sent`
+          : `"${body.name}" created. ${sent.length} invitation${sent.length === 1 ? '' : 's'} sent, ${failed.length} could not be sent.`,
+      }, { status: 201 })
+    }
+
     return NextResponse.json({
       success: true,
-      data:    { id: group.id },
+      data:    { id: group.id, groupId: group.id },
       message: `"${body.name}" group created successfully`,
     }, { status: 201 })
   } catch (e: any) {

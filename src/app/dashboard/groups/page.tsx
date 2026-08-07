@@ -1209,9 +1209,373 @@ function PageIntro({ title, summary, body, steps, tone = 'teal' }: {
 }
 
 
+// ── Quick Create ──────────────────────────────────────────────
+// Group + invitations in one submit.
+//
+// WHY THIS EXISTS
+//   The full form is five accordion sections, then a separate invite
+//   modal per member. For a group of eight that is a lot of steps
+//   before anything useful exists. Testers called it cumbersome and
+//   they were right.
+//
+// WHAT IS DELIBERATELY ABSENT
+//   - Max members. Asking someone to declare a capacity before they
+//     have thought about who is in is a decision that can only be got
+//     wrong. maxMembers is derived from the rows entered, plus headroom.
+//   - Contribution amount. Contribution terms belong to the SCHEME, not
+//     the group. Putting one here would repeat the mistake the group
+//     invitation email used to make.
+//
+// WHAT IS DELIBERATELY PRESENT
+//   - Currency chips beside Country, because Zimbabwe runs USD and ZWG
+//     side by side and country alone does not determine currency.
+//   - Paste-a-list, because most organisers already have their people
+//     in WhatsApp or a spreadsheet.
+//   - Validation BEFORE sending. An invitation to a mistyped address is
+//     unrecoverable: the member never arrives and nobody knows why.
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/
+
+interface InviteRow { id: string; fullName: string; email: string }
+
+const newRow = (): InviteRow => ({
+  id: Math.random().toString(36).slice(2, 10),
+  fullName: '', email: '',
+})
+
+/**
+ * Parses pasted text into invite rows.
+ *
+ * Accepts, per line, whichever of these the organiser happens to have:
+ *   Full Name, email@x.com
+ *   Full Name <email@x.com>
+ *   Full Name  email@x.com          (tab or multiple spaces)
+ *   email@x.com                     (name derived from the local part)
+ *
+ * Deliberately forgiving on input and strict on output: anything without
+ * a recoverable email address is returned as a rejected line, shown to
+ * the organiser rather than silently dropped.
+ */
+function parsePastedList(text: string): { rows: InviteRow[]; rejected: string[] } {
+  const rows: InviteRow[] = []
+  const rejected: string[] = []
+
+  for (const raw of text.split(/[\n\r]+/)) {
+    const line = raw.trim()
+    if (!line) continue
+
+    // Pull the first email-looking token out, wherever it sits.
+    const m = line.match(/[^\s<>,;:]+@[^\s<>,;:]+\.[^\s<>,;:]{2,}/)
+    if (!m) { rejected.push(line); continue }
+
+    const email = m[0].replace(/[.,;]+$/, '')
+    if (!EMAIL_RE.test(email)) { rejected.push(line); continue }
+
+    // Whatever is left, minus separators, is the name.
+    let name = line.replace(m[0], '')
+      .replace(/[<>,;:]/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trim()
+
+    // No name given: derive something readable from the local part so
+    // the invitation is not addressed to nobody.
+    if (!name) {
+      name = email.split('@')[0]
+        .replace(/[._-]+/g, ' ')
+        .replace(/\b\w/g, c => c.toUpperCase())
+        .trim()
+    }
+
+    rows.push({ id: Math.random().toString(36).slice(2, 10), fullName: name, email: email.toLowerCase() })
+  }
+
+  return { rows, rejected }
+}
+
+function PasteListModal({ onClose, onParsed }: any) {
+  const isMobile = useIsMobile()
+  const [text, setText] = useState('')
+  const preview = text.trim() ? parsePastedList(text) : { rows: [], rejected: [] }
+
+  return (
+    <div onClick={onClose}
+      style={{ position:'fixed', inset:0, background:'rgba(13,33,55,0.55)', zIndex:3000,
+        display:'flex', alignItems:isMobile?'flex-end':'center', justifyContent:'center', padding:isMobile?0:'20px' }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{ background:'white', borderRadius:isMobile?'16px 16px 0 0':'14px', width:'100%',
+          maxWidth:'520px', padding:'22px', maxHeight:'88vh', overflowY:'auto' }}>
+
+        <h3 style={{ margin:'0 0 4px', fontSize:'17px', fontWeight:700, color:NAVY }}>Paste your list</h3>
+        <p style={{ margin:'0 0 14px', fontSize:'12px', color:'#64748B', lineHeight:1.6 }}>
+          One person per line, from WhatsApp, a spreadsheet, anywhere. Name and email in
+          almost any order works — <code style={{ background:'#F1F5F9', padding:'1px 4px', borderRadius:'3px' }}>Grace Ncube, grace@mail.com</code>
+        </p>
+
+        <textarea value={text} onChange={e => setText(e.target.value)} rows={7}
+          placeholder={'Grace Ncube, grace@mail.com\nTendai Moyo <tendai@mail.com>\njohn@mail.com'}
+          style={{ width:'100%', padding:'11px 13px', border:'1.5px solid #E2E8F0', borderRadius:'9px',
+            fontSize:'13px', fontFamily:'ui-monospace, monospace', boxSizing:'border-box',
+            resize:'vertical', marginBottom:'12px' }} />
+
+        {text.trim() && (
+          <div style={{ marginBottom:'14px' }}>
+            <div style={{ fontSize:'12px', fontWeight:700, color:preview.rows.length ? TEAL : '#991B1B', marginBottom:'6px' }}>
+              {preview.rows.length} recognised{preview.rejected.length ? `, ${preview.rejected.length} not understood` : ''}
+            </div>
+            {preview.rows.slice(0, 6).map(r => (
+              <div key={r.id} style={{ fontSize:'12px', color:'#475569', padding:'3px 0' }}>
+                {r.fullName} · <span style={{ color:'#94A3B8' }}>{r.email}</span>
+              </div>
+            ))}
+            {preview.rows.length > 6 && (
+              <div style={{ fontSize:'11px', color:'#94A3B8', paddingTop:'3px' }}>…and {preview.rows.length - 6} more</div>
+            )}
+            {preview.rejected.length > 0 && (
+              <div style={{ background:'#FEF2F2', borderRadius:'7px', padding:'8px 11px', marginTop:'8px' }}>
+                <div style={{ fontSize:'11px', color:'#991B1B', marginBottom:'3px' }}>No email address found on these lines:</div>
+                {preview.rejected.slice(0, 4).map((l, i) => (
+                  <div key={i} style={{ fontSize:'11px', color:'#7F1D1D', fontFamily:'ui-monospace, monospace' }}>{l}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div style={{ display:'flex', gap:'10px' }}>
+          <button type="button" disabled={!preview.rows.length}
+            onClick={() => { onParsed(preview.rows); onClose() }}
+            style={{ flex:1, padding:'13px', background:preview.rows.length?TEAL:'#E2E8F0',
+              color:preview.rows.length?'white':'#94A3B8', border:'none', borderRadius:'10px',
+              fontSize:'14px', fontWeight:600, cursor:preview.rows.length?'pointer':'default', minHeight:'46px' }}>
+            Add {preview.rows.length || ''} {preview.rows.length === 1 ? 'person' : 'people'}
+          </button>
+          <button type="button" onClick={onClose}
+            style={{ padding:'13px 20px', background:'white', color:'#64748B', border:'1.5px solid #E2E8F0',
+              borderRadius:'10px', fontSize:'14px', fontWeight:600, cursor:'pointer', minHeight:'46px' }}>
+            Cancel
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function QuickCreateForm({ onAdvanced, onCreated, showToast }: {
+  onAdvanced: () => void
+  onCreated: (groupId: string) => void
+  showToast: (m: string, t?: 'success'|'error') => void
+}) {
+  const isMobile = useIsMobile()
+  const [name, setName]         = useState('')
+  const [location, setLocation] = useState<any>({ countryCode:'', countryName:'', currency:'', city:'', provinceCode:'', provinceName:'' })
+  const [rows, setRows]         = useState<InviteRow[]>([newRow(), newRow(), newRow()])
+  const [paste, setPaste]       = useState(false)
+  const [busy, setBusy]         = useState(false)
+  const [error, setError]       = useState('')
+  const [result, setResult]     = useState<any>(null)
+
+  const setRow = (id: string, field: 'fullName'|'email') => (v: string) =>
+    setRows(rs => rs.map(r => r.id === id ? { ...r, [field]: v } : r))
+
+  // Rows the organiser has actually started filling in. A trailing empty
+  // row is not an error — it is just an unused slot.
+  const filled = rows.filter(r => r.fullName.trim() || r.email.trim())
+
+  // Validation runs live so problems surface while typing, not after a
+  // failed submit. Duplicates are caught here because an invitation to
+  // the same address twice is confusing for the recipient and creates
+  // two pending records for the admin to clean up.
+  const seen = new Map<string, number>()
+  filled.forEach(r => {
+    const e = r.email.trim().toLowerCase()
+    if (e) seen.set(e, (seen.get(e) || 0) + 1)
+  })
+  const rowError = (r: InviteRow): string | null => {
+    if (!r.fullName.trim() && !r.email.trim()) return null
+    if (!r.fullName.trim()) return 'Full name required'
+    if (!r.email.trim())    return 'Email required'
+    if (!EMAIL_RE.test(r.email.trim())) return 'Not a valid email'
+    if ((seen.get(r.email.trim().toLowerCase()) || 0) > 1) return 'Duplicate'
+    return null
+  }
+  const rowErrors = filled.map(rowError).filter(Boolean)
+  const valid = name.trim() && location.countryCode && filled.length > 0 && rowErrors.length === 0
+
+  async function submit() {
+    setError('')
+    if (!name.trim())            return setError('Group name is required')
+    if (!location.countryCode)   return setError('Select a country')
+    if (filled.length === 0)     return setError('Add at least one person to invite')
+    if (rowErrors.length > 0)    return setError('Fix the highlighted rows first')
+
+    setBusy(true)
+    try {
+      const res = await fetch('/api/groups', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action:      'QUICK_CREATE',
+          name:        name.trim(),
+          country:     location.countryCode,
+          region:      location.provinceName || '',
+          city:        location.city || '',
+          currency:    location.currency || 'USD',
+          // Derived, not asked for: the count entered plus headroom, so
+          // the organiser never has to guess a capacity up front.
+          maxMembers:  Math.max(filled.length + 2, 5),
+          invites:     filled.map(r => ({ fullName: r.fullName.trim(), email: r.email.trim().toLowerCase() })),
+        }),
+      })
+      const j = await res.json()
+      if (!j.success) { setError(j.error || 'Could not create the group'); return }
+
+      // Partial success is reported, not hidden. If six of eight send,
+      // the group still exists and the organiser is told which two did
+      // not — rolling back a good group over one bad address is worse.
+      setResult(j.data)
+      if (!j.data?.failed?.length) {
+        showToast(j.message || 'Group created and invitations sent')
+        onCreated(j.data.groupId)
+      }
+    } catch {
+      setError('Network error — please try again')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // ── Partial-failure report ────────────────────────────────
+  if (result?.failed?.length) {
+    return (
+      <div style={{ maxWidth:'620px' }}>
+        <div style={{ background:'#F0FDF4', border:'1px solid #BBF7D0', borderRadius:'12px', padding:'16px 18px', marginBottom:'14px' }}>
+          <div style={{ fontSize:'15px', fontWeight:700, color:TEAL, marginBottom:'4px' }}>✓ {name} created</div>
+          <div style={{ fontSize:'12px', color:'#166534' }}>
+            {result.sent} invitation{result.sent === 1 ? '' : 's'} sent successfully.
+          </div>
+        </div>
+        <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'12px', padding:'16px 18px', marginBottom:'16px' }}>
+          <div style={{ fontSize:'13px', fontWeight:700, color:'#991B1B', marginBottom:'6px' }}>
+            {result.failed.length} could not be sent
+          </div>
+          {result.failed.map((f: any, i: number) => (
+            <div key={i} style={{ fontSize:'12px', color:'#7F1D1D', padding:'3px 0' }}>
+              {f.email} — {f.reason}
+            </div>
+          ))}
+          <div style={{ fontSize:'11px', color:'#991B1B', marginTop:'8px' }}>
+            The group is created. Retry these from the group&apos;s Members tab.
+          </div>
+        </div>
+        <button type="button" onClick={() => onCreated(result.groupId)}
+          style={{ padding:'12px 22px', background:TEAL, color:'white', border:'none', borderRadius:'10px',
+            fontSize:'14px', fontWeight:600, cursor:'pointer', minHeight:'46px' }}>
+          Open {name} →
+        </button>
+      </div>
+    )
+  }
+
+  const CARD: React.CSSProperties = { background:'white', border:'1px solid #E2E8F0', borderRadius:'12px', padding:'16px 18px', marginBottom:'14px' }
+
+  return (
+    <div style={{ maxWidth:'620px' }}>
+      {paste && <PasteListModal onClose={() => setPaste(false)}
+        onParsed={(parsed: InviteRow[]) => setRows(rs => [...rs.filter(r => r.fullName.trim() || r.email.trim()), ...parsed, newRow()])} />}
+
+      <PageIntro
+        title="Quick create"
+        summary="Name your group, pick a country, list who you want in it. Invitations go out as soon as you submit."
+        body={['Everything else — branding, documents, contribution settings — can be set afterwards from the group\u2019s Settings tab.']}
+      />
+
+      {error && (
+        <div style={{ background:'#FEF2F2', border:'1px solid #FECACA', borderRadius:'10px', padding:'12px 16px', marginBottom:'14px', color:'#991B1B', fontSize:'13px' }}>
+          ❌ {error}
+        </div>
+      )}
+
+      <div style={CARD}>
+        <label style={{ display:'block', fontSize:'11px', fontWeight:600, color:'#64748B', marginBottom:'5px', textTransform:'uppercase', letterSpacing:'0.04em' }}>
+          Group name <span style={{ color:'#DC2626' }}>*</span>
+        </label>
+        <input value={name} onChange={e => setName(e.target.value)}
+          placeholder="e.g. Harare Mothers Savings Club"
+          style={{ width:'100%', padding:'11px 13px', border:'1.5px solid #E2E8F0', borderRadius:'9px',
+            fontSize:'14px', boxSizing:'border-box', minHeight:'44px', marginBottom:'14px' }} />
+
+        <CountrySelector value={location} onChange={setLocation}
+          onNameSuggested={(n: string) => setName(cur => cur.trim() ? cur : n)} />
+      </div>
+
+      <div style={CARD}>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:'10px', marginBottom:'10px', flexWrap:'wrap' }}>
+          <div>
+            <div style={{ fontSize:'13px', fontWeight:700, color:NAVY }}>Invite members</div>
+            <div style={{ fontSize:'11px', color:'#94A3B8' }}>They join automatically when they accept.</div>
+          </div>
+          <button type="button" onClick={() => setPaste(true)}
+            style={{ background:'white', border:`1.5px solid ${TEAL}55`, color:TEAL, borderRadius:'8px',
+              padding:'8px 13px', fontSize:'12px', fontWeight:600, cursor:'pointer', minHeight:'38px' }}>
+            📋 Paste a list
+          </button>
+        </div>
+
+        {rows.map((r, i) => {
+          const err = rowError(r)
+          return (
+            <div key={r.id} style={{ marginBottom:'8px' }}>
+              <div style={{ display:'grid', gridTemplateColumns: isMobile ? '1fr 1fr 32px' : '1fr 1.3fr 32px', gap:'7px', alignItems:'center' }}>
+                <input value={r.fullName} onChange={e => setRow(r.id, 'fullName')(e.target.value)}
+                  placeholder={i === 0 ? 'Full name' : ''}
+                  style={{ padding:'10px 12px', border:`1.5px solid ${err ? '#FECACA' : '#E2E8F0'}`, borderRadius:'8px',
+                    fontSize:'13px', boxSizing:'border-box', minHeight:'42px', width:'100%' }} />
+                <input value={r.email} onChange={e => setRow(r.id, 'email')(e.target.value)}
+                  placeholder={i === 0 ? 'Email address' : ''} inputMode="email"
+                  style={{ padding:'10px 12px', border:`1.5px solid ${err ? '#FECACA' : '#E2E8F0'}`, borderRadius:'8px',
+                    fontSize:'13px', boxSizing:'border-box', minHeight:'42px', width:'100%' }} />
+                <button type="button" onClick={() => setRows(rs => rs.length > 1 ? rs.filter(x => x.id !== r.id) : rs)}
+                  aria-label="Remove row"
+                  style={{ background:'none', border:'none', color:'#CBD5E1', fontSize:'17px', cursor:'pointer', minHeight:'42px' }}>
+                  ✕
+                </button>
+              </div>
+              {err && <div style={{ fontSize:'11px', color:'#991B1B', marginTop:'2px' }}>{err}</div>}
+            </div>
+          )
+        })}
+
+        <button type="button" onClick={() => setRows(rs => [...rs, newRow()])}
+          style={{ background:'none', border:'none', color:TEAL, fontSize:'12px', fontWeight:600,
+            cursor:'pointer', padding:'8px 0', minHeight:'38px' }}>
+          + Add another
+        </button>
+      </div>
+
+      <div style={{ display:'flex', gap:'10px', alignItems:'center', flexWrap:'wrap' }}>
+        <button type="button" onClick={submit} disabled={busy || !valid}
+          style={{ flex:'1 1 220px', padding:'14px', background: valid && !busy ? TEAL : '#E2E8F0',
+            color: valid && !busy ? 'white' : '#94A3B8', border:'none', borderRadius:'10px',
+            fontSize:'14px', fontWeight:700, cursor: valid && !busy ? 'pointer' : 'default', minHeight:'48px' }}>
+          {busy ? 'Creating…'
+            : filled.length > 0
+              ? `Create group and send ${filled.length} invitation${filled.length === 1 ? '' : 's'}`
+              : 'Create group'}
+        </button>
+        <button type="button" onClick={onAdvanced}
+          style={{ padding:'14px 18px', background:'white', color:'#64748B', border:'1.5px solid #E2E8F0',
+            borderRadius:'10px', fontSize:'13px', fontWeight:600, cursor:'pointer', minHeight:'48px' }}>
+          Advanced setup
+        </button>
+      </div>
+    </div>
+  )
+}
+
+
 export default function GroupsPage() {
   const isMobile = useIsMobile()
-  const [view, setView]                 = useState<'list'|'detail'|'create'>('list')
+  const [view, setView]                 = useState<'list'|'detail'|'create'|'quick'>('list')
   const [groups, setGroups]             = useState<any[]>([])
   const [loading, setLoading]           = useState(true)
   const [saving, setSaving]             = useState(false)
@@ -1783,7 +2147,7 @@ export default function GroupsPage() {
         loading={loading}
         currentUserId={currentUserId}
         onOpenGroup={(g: any) => { setSelectedGroup(g); setView('detail') }}
-        onCreateGroup={() => setView('create')}
+        onCreateGroup={() => setView('quick')}
       />
     )
   }
@@ -1812,7 +2176,7 @@ export default function GroupsPage() {
           <button onClick={() => { window.location.href = '/portal' }} style={{ background:'white', color:NAVY, border:'1.5px solid #E2E8F0', borderRadius:'8px', padding:'10px 16px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
             👤 My Portal
           </button>
-          <button onClick={() => setView('create')} style={{ background:TEAL, color:'white', border:'none', borderRadius:'8px', padding:'10px 18px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
+          <button onClick={() => setView('quick')} style={{ background:TEAL, color:'white', border:'none', borderRadius:'8px', padding:'10px 18px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
             + Create Group
           </button>
         </div>
@@ -1870,7 +2234,7 @@ export default function GroupsPage() {
             {search || filterStatus !== 'ALL' ? 'Try adjusting your search or filter.' : 'Create your first savings group to get started.'}
           </p>
           {!search && filterStatus === 'ALL' && (
-            <button onClick={() => setView('create')} style={{ padding:'10px 20px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
+            <button onClick={() => setView('quick')} style={{ padding:'10px 20px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>
               + Create First Group
             </button>
           )}
@@ -1980,6 +2344,25 @@ export default function GroupsPage() {
   )
 
   // ── CREATE VIEW ─────────────────────────────────────────────
+  if (view === 'quick') return (
+    <div style={{ maxWidth:'720px' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'20px' }}>
+        <button onClick={() => setView('list')}
+          style={{ background:'#F1F5F9', border:'none', borderRadius:'8px', padding:'8px 14px', cursor:'pointer', fontSize:'13px', color:'#475569' }}>← Back</button>
+        <div>
+          <h2 style={{ fontSize:'20px', fontWeight:'700', color:NAVY, margin:'0 0 2px' }}>Create New Group</h2>
+          <p style={{ fontSize:'12px', color:'#64748B', margin:0 }}>Group and invitations in one step</p>
+        </div>
+      </div>
+
+      <QuickCreateForm
+        onAdvanced={() => setView('create')}
+        onCreated={(groupId: string) => { setView('list'); fetchGroups() }}
+        showToast={showToast}
+      />
+    </div>
+  )
+
   if (view === 'create') return (
     <div style={{ maxWidth:'720px' }}>
       <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'24px' }}>
