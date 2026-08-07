@@ -541,7 +541,7 @@ function BrandingSelector({ countryCode, value, onChange }: { countryCode:string
           </div>
         )
       })()}
-      {!value && <p style={{ fontSize:'11px', color:'#DC2626', margin:0 }}>⚠️ Branding is required</p>}
+      {!value && <p style={{ fontSize:'11px', color:'#94A3B8', margin:0 }}>Optional — you can add or change this later in Settings.</p>}
     </div>
   )
 }
@@ -2019,7 +2019,7 @@ export default function GroupsPage() {
             { id:'cr-members',  icon:'👥', label:'Members',        required:false },
             { id:'cr-location', icon:'📍', label:'Location',       required:true  },
             { id:'cr-currency', icon:'💱', label:'Currency',       required:false },
-            { id:'cr-branding', icon:'🏷️', label:'Branding',      required:true  },
+            { id:'cr-branding', icon:'🏷️', label:'Branding',      required:false },
           ].map((sec, si) => {
             const isOpen = openAccordion.includes(sec.id)
             const toggle = () => setOpenAccordion((prev: string[]) =>
@@ -2122,7 +2122,19 @@ export default function GroupsPage() {
                         <CountrySelector
                           value={location}
                           onChange={r => { setLocation(r); setForm(f=>({...f,country:r.countryCode,region:r.provinceName||'',city:r.city||'',currency:r.currency,branding:''})) }}
-                          onNameSuggested={name => setForm(f=>({...f,name}))}
+                          onNameSuggested={name => setForm(f => {
+                            // ONLY fill an EMPTY name field.
+                            //
+                            // CountrySelector emits the local savings term for
+                            // the chosen country — Mukando, Chama, Stokvel — and
+                            // re-emits on every province and city change too.
+                            // Applied unconditionally it wiped whatever the user
+                            // had typed, every time they touched Location. The
+                            // edit form has always passed a no-op here for the
+                            // same reason.
+                            if (f.name && f.name.trim()) return f
+                            return { ...f, name }
+                          })}
                         />
                         <div style={GRID2}>
                           <div>
@@ -2179,7 +2191,7 @@ export default function GroupsPage() {
                     {sec.id === 'cr-branding' && (
                       <div>
                         <p style={{ fontSize:'12px', color:'#64748B', margin:'0 0 12px', lineHeight:'1.5' }}>
-                          Select the local savings tradition that best represents this group. This branding appears prominently on the group dashboard.
+                          Optionally choose the local savings tradition that best represents this group. It appears on the group dashboard, and can be set or changed later in Settings.
                         </p>
                         {location.countryCode ? (
                           <BrandingSelector
@@ -3113,7 +3125,7 @@ export default function GroupsPage() {
                             {sec.id === 'branding' && (
                               <div>
                                 <p style={{ fontSize:'12px', color:'#64748B', margin:'0 0 12px', lineHeight:'1.5' }}>
-                                  Select the local savings tradition that best represents this group. This branding appears prominently on the group dashboard.
+                                  Optionally choose the local savings tradition that best represents this group. It appears on the group dashboard, and can be set or changed later in Settings.
                                 </p>
                                 {(editLocation.countryCode || ef.country) ? (
                                   <BrandingSelector
