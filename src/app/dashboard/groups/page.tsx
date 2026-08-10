@@ -2651,7 +2651,7 @@ export default function GroupsPage() {
               {groupTypeBadge(g.groupType || 'PRIVATE')}
             </div>
             <p style={{ fontSize:'12px', color:'#64748B', margin:'2px 0 0' }}>
-              {g.region && g.country ? `${g.region}, ${g.country} · ` : ''}{g.currency} · {g.payoutStrategy.replace('_',' ')} · Admin: {g.adminName}
+              {g.region && g.country ? `${g.region}, ${g.country} · ` : ''}{g.currency} · Admin: {g.adminName}
             </p>
           </div>
           <div style={{ display:'flex', gap:'8px' }}>
