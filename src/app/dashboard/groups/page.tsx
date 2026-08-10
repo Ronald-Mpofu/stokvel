@@ -1581,22 +1581,18 @@ export default function GroupsPage() {
   const [saving, setSaving]             = useState(false)
   const [selectedGroup, setSelectedGroup] = useState<any>(null)
   const [detailTab, setDetailTab]       = useState('overview')
+  const [ovTab, setOvTab]               = useState('ov-details')
   const [search, setSearch]             = useState('')
   const [filterStatus, setFilterStatus] = useState('ALL')
   const [showInviteModal, setShowInviteModal] = useState(false)
   const [inviteGroupId, setInviteGroupId]     = useState<string|null>(null)
   const [currentUserId, setCurrentUserId]     = useState<string>('')
 
-  // Get current user ID and fetch all stokvel brands on mount
+  // Get current user ID on mount.
   useEffect(() => {
     fetch('/api/auth/me')
       .then(r => r.json())
       .then(d => { if (d.success && d.data?.id) setCurrentUserId(d.data.id) })
-      .catch(() => {})
-    // Fetch all brands upfront so the overview banner can look them up
-    fetch('/api/reference?type=stokvel-brands')
-      .then(r => r.json())
-      .then(d => { if (d.success) setAllBrands(d.data) })
       .catch(() => {})
   }, [])
   const [toast, setToast]               = useState<{msg:string; type:'success'|'error'}|null>(null)
@@ -1617,7 +1613,6 @@ export default function GroupsPage() {
   const [deleteCheck, setDeleteCheck]    = useState<any>(null)
   const [deleteConfirmName, setDeleteConfirmName] = useState('')
   const [openAccordion, setOpenAccordion]  = useState<string[]>(['group-details'])
-  const [allBrands, setAllBrands]          = useState<any[]>([])
   const [refCurrencies, setRefCurrencies]  = useState<any[]>([])
   const [statusChangingId, setStatusChangingId] = useState<string | null>(null)
   const [invitations, setInvitations]      = useState<any[]>([])
@@ -2624,7 +2619,7 @@ export default function GroupsPage() {
   // ── DETAIL VIEW ─────────────────────────────────────────────
   if (view === 'detail' && selectedGroup) {
     const g = selectedGroup
-    const TABS = ['overview','members','schemes','cycle','settings']
+    const TABS = ['overview','members','schemes','settings']
 
     return (
       <div style={{ display:'flex', flexDirection:'column', gap:'16px' }}>
@@ -2680,41 +2675,6 @@ export default function GroupsPage() {
         {detailTab==='overview' && (
           <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
 
-            {/* ── Group Identity Banner ── */}
-            {(() => {
-              const branding    = g.branding || ''
-              const countryCode = g.country  || ''
-              const brandData   = allBrands.find((s: any) => s.name === branding && (!s.countryId || s.countryId === countryCode))
-              const meta        = brandData ? (STOKVEL_TYPE_COLORS[brandData.type] || STOKVEL_TYPE_COLORS.GENERAL) : null
-              return (
-                <div style={{ background:`linear-gradient(135deg,${NAVY} 0%,#1A3A5C 100%)`, borderRadius:'16px', padding:'24px 28px', position:'relative', overflow:'hidden' }}>
-                  <div style={{ position:'absolute', right:'-20px', bottom:'-20px', fontSize:'120px', opacity:0.06, lineHeight:1, userSelect:'none', pointerEvents:'none', transform:'rotate(-10deg)' }}>
-                    {meta ? meta.icon : '🌍'}
-                  </div>
-                  <div style={{ fontSize:'11px', fontWeight:'600', color:'rgba(255,255,255,0.5)', textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:'6px' }}>Group Name</div>
-                  <div style={{ fontSize:'24px', fontWeight:'700', color:'white', marginBottom:'16px', lineHeight:1.2 }}>{g.name}</div>
-                  {branding && meta ? (
-                    <div>
-                      <div style={{ fontSize:'10px', fontWeight:'600', color:'rgba(255,255,255,0.5)', textTransform:'uppercase', letterSpacing:'0.1em', marginBottom:'6px' }}>Group Branding</div>
-                      <div style={{ display:'inline-flex', alignItems:'center', gap:'10px', background:meta.bg, borderRadius:'12px', padding:'10px 18px' }}>
-                        <span style={{ fontSize:'24px' }}>{meta.icon}</span>
-                        <div>
-                          <div style={{ fontSize:'26px', fontWeight:'900', color:meta.color, letterSpacing:'-0.5px', lineHeight:1 }}>{branding}</div>
-                          {brandData.type && <div style={{ fontSize:'11px', color:meta.color, opacity:0.7, marginTop:'2px' }}>{brandData.type}</div>}
-                        </div>
-                      </div>
-                      {brandData.description && <div style={{ fontSize:'12px', color:'rgba(255,255,255,0.5)', marginTop:'10px', fontStyle:'italic' }}>"{brandData.description}"</div>}
-                    </div>
-                  ) : (
-                    <div style={{ display:'inline-flex', alignItems:'center', gap:'8px', background:'rgba(255,165,0,0.15)', border:'1px solid rgba(255,165,0,0.4)', borderRadius:'8px', padding:'8px 14px' }}>
-                      <span style={{ fontSize:'14px' }}>⚠️</span>
-                      <span style={{ fontSize:'12px', color:'rgba(255,165,0,0.9)' }}>No branding selected — go to Settings tab to add one</span>
-                    </div>
-                  )}
-                </div>
-              )
-            })()}
-
             {/* ── KPI strip ── */}
             <div style={{ display:'grid', gridTemplateColumns:'repeat(5,1fr)', gap:'10px' }}>
               {[
@@ -2760,7 +2720,12 @@ export default function GroupsPage() {
               </div>
             )}
 
-            {/* ── Accordion sections ── */}
+            {/* ── Group Information — tabbed ── */}
+            {/* Was an accordion. Now one horizontal tab strip: exactly one
+                section renders at a time, so the panel height is stable and
+                the reader never scrolls past collapsed headers to reach the
+                next fact. ovTab is its own state — openAccordion still
+                belongs to Settings and the create form. */}
             {(() => {
               const OV_SECTIONS = [
                 { id:'ov-details',  icon:'📋', label:'Group Details'  },
@@ -2769,149 +2734,148 @@ export default function GroupsPage() {
                 { id:'ov-currency', icon:'💱', label:'Currency'       },
                 { id:'ov-dates',    icon:'📅', label:'Dates'          },
               ]
-              const isOpen = (id: string) => openAccordion.includes(id)
-              const toggle = (id: string) => setOpenAccordion((prev: string[]) =>
-                prev.includes(id) ? prev.filter((x: string) => x !== id) : [...prev, id]
-              )
               const ROW: React.CSSProperties = { display:'grid', gridTemplateColumns:'180px 1fr', gap:'8px', alignItems:'flex-start', padding:'9px 0', borderBottom:'1px solid #F1F5F9' }
               const DLABEL: React.CSSProperties = { color:'#64748B', fontSize:'12px', fontWeight:'500', paddingTop:'1px' }
-              const SEP: React.CSSProperties    = { color:'#CBD5E1', fontSize:'12px', paddingTop:'1px' }
               const DVALUE: React.CSSProperties = { color:NAVY, fontSize:'13px', fontWeight:'500', wordBreak:'break-word' as any }
 
               return (
                 <div style={{ borderRadius:'12px', border:'1px solid #E2E8F0', overflow:'hidden', background:'white' }}>
-                  {OV_SECTIONS.map((sec, si) => (
-                    <div key={sec.id}>
-                      <button type="button" onClick={() => toggle(sec.id)}
-                        style={{ width:'100%', display:'flex', alignItems:'center', gap:'10px', padding:'13px 16px',
-                          background: isOpen(sec.id) ? '#F8FAFC' : 'white',
-                          border:'none', borderTop: si > 0 ? '1px solid #F1F5F9' : 'none',
-                          cursor:'pointer', textAlign:'left' as any }}>
-                        <span style={{ fontSize:'15px' }}>{sec.icon}</span>
-                        <span style={{ flex:1, fontSize:'13px', fontWeight:'600', color:NAVY }}>{sec.label}</span>
-                        <span style={{ fontSize:'11px', color:'#94A3B8', display:'inline-block',
-                          transform: isOpen(sec.id) ? 'rotate(180deg)' : 'rotate(0deg)', transition:'transform 0.2s' }}>▼</span>
-                      </button>
 
-                      {isOpen(sec.id) && (
-                        <div style={{ padding:'12px 16px 16px', borderTop:'1px solid #F1F5F9', background:'#FAFBFC' }}>
+                  {/* Tab strip */}
+                  <div role="tablist" aria-label="Group information"
+                    style={{ display:'flex', gap:'0', background:'#F8FAFC', borderBottom:'1px solid #E2E8F0', overflowX:'auto' }}>
+                    {OV_SECTIONS.map(sec => {
+                      const active = ovTab === sec.id
+                      return (
+                        <button
+                          key={sec.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={active}
+                          onClick={() => setOvTab(sec.id)}
+                          style={{
+                            display:'flex', alignItems:'center', gap:'7px',
+                            padding:'12px 18px', minHeight:'44px', whiteSpace:'nowrap',
+                            background: active ? 'white' : 'transparent',
+                            border:'none',
+                            borderBottom: active ? `2px solid ${TEAL}` : '2px solid transparent',
+                            color: active ? TEAL : '#64748B',
+                            fontWeight: active ? '600' : '500',
+                            fontSize:'13px', cursor:'pointer', marginBottom:'-1px',
+                          }}>
+                          <span style={{ fontSize:'14px' }}>{sec.icon}</span>
+                          {sec.label}
+                        </button>
+                      )
+                    })}
+                  </div>
 
-                          {sec.id === 'ov-details' && (
-                            <div>
-                              {[
-                                ['Name',        g.name],
-                                ['Description', g.description || '—'],
-                                ['Admin',       g.adminName],
-                                ['Status',      g.status],
-                                ['Group Type',  g.groupType === 'PUBLIC' ? '🌐 Public — open to join requests' : '🔒 Private — invitation only'],
-                              ].map(([l,v]) => (
-                                <div key={l as string} style={ROW}>
-                                  <span style={DLABEL}>{l}</span>
-                                  <span style={DVALUE}>: &nbsp;{v}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
+                  {/* Panel */}
+                  <div style={{ padding:'14px 18px 18px' }}>
 
-                          {sec.id === 'ov-members' && (
-                            <div>
-                              {[
-                                ['Admin',        g.adminName],
-                                ['Treasurer',    officerName(g.treasurerName, g.treasurerId, groupMembers)],
-                                ['Secretary',    officerName(g.secretaryName, g.secretaryId, groupMembers)],
-                                ['Enrolled',     `${g.memberCount} members`],
-                                ['Max Members',  g.maxMembers],
-                                ['Vacancies',    Math.max(0, g.maxMembers - g.memberCount)],
-                                ['Payout Order', g.payoutStrategy?.replace('_',' ')],
-                              ].map(([l,v]) => (
-                                <div key={l as string} style={ROW}>
-                                  <span style={DLABEL}>{l}</span>
-                                  <span style={DVALUE}>: &nbsp;{v}</span>
-                                </div>
-                              ))}
-                              {/* Capacity bar */}
-                              <div style={{ marginTop:'10px' }}>
-                                <div style={{ display:'flex', justifyContent:'space-between', fontSize:'11px', color:'#94A3B8', marginBottom:'4px' }}>
-                                  <span>Capacity</span>
-                                  <span>{g.memberCount}/{g.maxMembers}</span>
-                                </div>
-                                <div style={{ height:'6px', background:'#F1F5F9', borderRadius:'3px', overflow:'hidden' }}>
-                                  <div style={{ height:'100%', borderRadius:'3px', background:g.memberCount>=g.maxMembers?'#166534':TEAL,
-                                    width:`${Math.min(100, g.memberCount/g.maxMembers*100)}%`, transition:'width 0.4s' }}/>
-                                </div>
-                              </div>
-                            </div>
-                          )}
+                    {ovTab === 'ov-details' && (
+                      <div>
+                        {[
+                          ['Name',        g.name],
+                          ['Description', g.description || '—'],
+                          ['Admin',       g.adminName],
+                          ['Status',      g.status],
+                          ['Group Type',  g.groupType === 'PUBLIC' ? '🌐 Public — open to join requests' : '🔒 Private — invitation only'],
+                        ].map(([l,v]) => (
+                          <div key={l as string} style={ROW}>
+                            <span style={DLABEL}>{l}</span>
+                            <span style={DVALUE}>: &nbsp;{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
 
-                          {sec.id === 'ov-location' && (
-                            <div>
-                              {[
-                                ['Country',      g.country || '—'],
-                                ['State/Region', g.region  || '—'],
-                                ['City',         g.city    || '—'],
-                                ['ZIP/Postcode', g.zipCode || '—'],
-                              ].map(([l,v]) => (
-                                <div key={l as string} style={ROW}>
-                                  <span style={DLABEL}>{l}</span>
-                                  <span style={DVALUE}>: &nbsp;{v}</span>
-                                </div>
-                              ))}
-                              {!g.country && (
-                                <div style={{ marginTop:'8px', fontSize:'11px', color:'#854D0E', background:'#FEF9C3', padding:'7px 10px', borderRadius:'6px' }}>
-                                  ⚠️ No location set — update in Settings tab
-                                </div>
-                              )}
-                            </div>
-                          )}
-
-                          {sec.id === 'ov-currency' && (
-                            <div>
-                              {[
-                                ['Group Currency',  g.currency],
-                                ['Insurance Pool',  `${(g.insurancePoolPct*100).toFixed(1)}%`],
-                                ['Platform Fee',    `${(g.platformFeePct*100).toFixed(0)}%`],
-                                ['Escrow Balance',  `$${Number(g.escrowBalance||0).toLocaleString()}`],
-                              ].map(([l,v]) => (
-                                <div key={l as string} style={ROW}>
-                                  <span style={DLABEL}>{l}</span>
-                                  <span style={DVALUE}>: &nbsp;{v}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
-                          {sec.id === 'ov-dates' && (
-                            <div>
-                              {[
-                                ['Date Created', g.createdAt ? new Date(g.createdAt).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}) : '—'],
-                                ['Last Updated', g.updatedAt ? new Date(g.updatedAt).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}) : '—'],
-                                ['Date Closed',  '—'],
-                              ].map(([l,v]) => (
-                                <div key={l as string} style={ROW}>
-                                  <span style={DLABEL}>{l}</span>
-                                  <span style={DVALUE}>: &nbsp;{v}</span>
-                                </div>
-                              ))}
-                            </div>
-                          )}
-
+                    {ovTab === 'ov-members' && (
+                      <div>
+                        {[
+                          ['Admin',        g.adminName],
+                          ['Treasurer',    officerName(g.treasurerName, g.treasurerId, groupMembers)],
+                          ['Secretary',    officerName(g.secretaryName, g.secretaryId, groupMembers)],
+                          ['Enrolled',     `${g.memberCount} members`],
+                          ['Max Members',  g.maxMembers],
+                          ['Vacancies',    Math.max(0, g.maxMembers - g.memberCount)],
+                          ['Payout Order', g.payoutStrategy?.replace('_',' ')],
+                        ].map(([l,v]) => (
+                          <div key={l as string} style={ROW}>
+                            <span style={DLABEL}>{l}</span>
+                            <span style={DVALUE}>: &nbsp;{v}</span>
+                          </div>
+                        ))}
+                        {/* Capacity bar */}
+                        <div style={{ marginTop:'12px' }}>
+                          <div style={{ display:'flex', justifyContent:'space-between', fontSize:'11px', color:'#94A3B8', marginBottom:'4px' }}>
+                            <span>Capacity</span>
+                            <span>{g.memberCount}/{g.maxMembers}</span>
+                          </div>
+                          <div style={{ height:'6px', background:'#F1F5F9', borderRadius:'3px', overflow:'hidden' }}>
+                            <div style={{ height:'100%', borderRadius:'3px', background:g.memberCount>=g.maxMembers?'#166534':TEAL,
+                              width:`${Math.min(100, g.memberCount/g.maxMembers*100)}%`, transition:'width 0.4s' }}/>
+                          </div>
                         </div>
-                      )}
-                    </div>
-                  ))}
+                      </div>
+                    )}
+
+                    {ovTab === 'ov-location' && (
+                      <div>
+                        {[
+                          ['Country',      g.country || '—'],
+                          ['State/Region', g.region  || '—'],
+                          ['City',         g.city    || '—'],
+                          ['ZIP/Postcode', g.zipCode || '—'],
+                        ].map(([l,v]) => (
+                          <div key={l as string} style={ROW}>
+                            <span style={DLABEL}>{l}</span>
+                            <span style={DVALUE}>: &nbsp;{v}</span>
+                          </div>
+                        ))}
+                        {!g.country && (
+                          <div style={{ marginTop:'10px', fontSize:'11px', color:'#854D0E', background:'#FEF9C3', padding:'7px 10px', borderRadius:'6px' }}>
+                            ⚠️ No location set — update in Settings tab
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {ovTab === 'ov-currency' && (
+                      <div>
+                        {[
+                          ['Group Currency',  g.currency],
+                          ['Insurance Pool',  `${(g.insurancePoolPct*100).toFixed(1)}%`],
+                          ['Platform Fee',    `${(g.platformFeePct*100).toFixed(0)}%`],
+                          ['Escrow Balance',  `$${Number(g.escrowBalance||0).toLocaleString()}`],
+                        ].map(([l,v]) => (
+                          <div key={l as string} style={ROW}>
+                            <span style={DLABEL}>{l}</span>
+                            <span style={DVALUE}>: &nbsp;{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {ovTab === 'ov-dates' && (
+                      <div>
+                        {[
+                          ['Date Created', g.createdAt ? new Date(g.createdAt).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}) : '—'],
+                          ['Last Updated', g.updatedAt ? new Date(g.updatedAt).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'}) : '—'],
+                          ['Date Closed',  '—'],
+                        ].map(([l,v]) => (
+                          <div key={l as string} style={ROW}>
+                            <span style={DLABEL}>{l}</span>
+                            <span style={DVALUE}>: &nbsp;{v}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                  </div>
                 </div>
               )
             })()}
-
-            {/* ── No cycle notice ── */}
-            {!g.activeCycle && (
-              <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', padding:'24px', textAlign:'center' }}>
-                <div style={{ fontSize:'32px', marginBottom:'8px' }}>🔄</div>
-                <h3 style={{ fontSize:'14px', fontWeight:'600', color:NAVY, margin:'0 0 6px' }}>No Active Cycle</h3>
-                <p style={{ color:'#64748B', fontSize:'13px', marginBottom:'14px' }}>Add members first, then start the first cycle to begin collecting contributions and assigning payout positions.</p>
-                <button style={{ padding:'9px 18px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>🚀 Start Cycle 1</button>
-              </div>
-            )}
           </div>
         )}
 
@@ -3297,25 +3261,6 @@ export default function GroupsPage() {
                   </tfoot>
                 </table>
               </div>
-            )}
-          </div>
-        )}
-  
-        {/* Cycle tab */}
-        {detailTab==='cycle' && (
-          <div style={{ background:'white', borderRadius:'12px', border:'1px solid #E2E8F0', padding:'32px', textAlign:'center' }}>
-            {g.activeCycle ? (
-              <div>
-                <h3 style={{ fontSize:'15px', fontWeight:'600', color:NAVY, margin:'0 0 8px' }}>Cycle {g.activeCycle.cycleNumber} Active</h3>
-                <p style={{ color:'#64748B', fontSize:'13px' }}>Pool: ${Number(g.activeCycle.poolAmount).toLocaleString()}</p>
-              </div>
-            ) : (
-              <>
-                <div style={{ fontSize:'36px', marginBottom:'10px' }}>🔄</div>
-                <h3 style={{ fontSize:'15px', fontWeight:'600', color:NAVY, margin:'0 0 6px' }}>No Cycle Started</h3>
-                <p style={{ color:'#64748B', fontSize:'13px', marginBottom:'16px' }}>Start the first cycle to assign payout positions.</p>
-                <button style={{ padding:'10px 20px', background:TEAL, color:'white', border:'none', borderRadius:'8px', fontSize:'13px', fontWeight:'600', cursor:'pointer' }}>🚀 Start Cycle 1</button>
-              </>
             )}
           </div>
         )}

@@ -189,7 +189,6 @@ export async function GET(req: NextRequest) {
       adminUserId:           g.adminUserId,
       memberCount:           Number(g.memberCount),
       loanCount:             Number(g.loanCount),
-      activeCycle:           null,
       createdAt:             g.createdAt,
       updatedAt:             g.updatedAt,
     }))
