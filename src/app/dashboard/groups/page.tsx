@@ -2729,7 +2729,7 @@ export default function GroupsPage() {
             {(() => {
               const OV_SECTIONS = [
                 { id:'ov-details',  icon:'📋', label:'Group Details'  },
-                { id:'ov-members',  icon:'👥', label:'Members'        },
+                { id:'ov-members',  icon:'👥', label:'Membership Roles' },
                 { id:'ov-location', icon:'📍', label:'Location'       },
                 { id:'ov-currency', icon:'💱', label:'Currency'       },
                 { id:'ov-dates',    icon:'📅', label:'Dates'          },
@@ -2799,7 +2799,6 @@ export default function GroupsPage() {
                           ['Enrolled',     `${g.memberCount} members`],
                           ['Max Members',  g.maxMembers],
                           ['Vacancies',    Math.max(0, g.maxMembers - g.memberCount)],
-                          ['Payout Order', g.payoutStrategy?.replace('_',' ')],
                         ].map(([l,v]) => (
                           <div key={l as string} style={ROW}>
                             <span style={DLABEL}>{l}</span>
