@@ -237,11 +237,39 @@ export async function POST(req: NextRequest) {
 
     const data = createSchema.parse(body)
 
-    const group = await prisma.group.findUnique({
-      where:  { id: data.groupId },
-      select: { currency: true },
-    })
+    // Currency AND the group's SAVINGS_POOL registry row, in one query.
+    // This replaces a prisma.group.findUnique that fetched currency only —
+    // same single round trip to Tokyo, one more column.
+    //
+    // Resolving the scheme here rather than leaving "schemeId" NULL is the
+    // whole point: /api/schemes/passbook counts pools by "schemeId", so a
+    // pool created without it is invisible to its own scheme and every
+    // member is told no pool exists.
+    const groupRows = await sql(
+      `SELECT g.currency::text AS currency,
+              (SELECT ws.id FROM "WindfallScheme" ws
+                WHERE ws."groupId"    = g.id
+                  AND ws."schemeType" = 'SAVINGS_POOL'::"WindfallSchemeType"
+                ORDER BY ws."createdAt"
+                LIMIT 1)              AS "schemeId"
+         FROM "Group" g
+        WHERE g.id = $1::text
+          AND g."deletedAt" IS NULL`,
+      [data.groupId]
+    )
+    const group = groupRows[0]
     if (!group) return NextResponse.json({ success: false, error: 'Group not found' }, { status: 404 })
+
+    // Refuse rather than orphan. A pool with no scheme behind it looks
+    // created and is unreachable — the failure mode this route already
+    // produced silently. Groups seeded before the scheme seeder existed
+    // are repaired by 07-backfill-windfall-schemes.sql.
+    if (!group.schemeId) {
+      return NextResponse.json({
+        success: false,
+        error: 'This group has no Savings Pool scheme registered. Run the Windfall Scheme backfill for this group, then try again.',
+      }, { status: 409 })
+    }
 
     const startDate    = new Date(data.startDate)
     const maturityDate = calcMaturityDate(startDate, data.periodMonths)
@@ -249,16 +277,16 @@ export async function POST(req: NextRequest) {
 
     await exec(
       `INSERT INTO "SavingsPool" (
-        id, "groupId", name, description, "periodMonths", "contributionAmount",
+        id, "groupId", "schemeId", name, description, "periodMonths", "contributionAmount",
         "contributionFrequency", "startDate", "maturityDate", status, currency,
         "interestRatePa", "maxLoanPct", "allowLoans", notes,
         "poolType", "payoutStrategy",
         "totalContributed", "totalInterestEarned", "totalPoolValue",
         "createdAt", "updatedAt"
       ) VALUES (
-        $1,$2,$3,$4,$5,$6,$7::"SavingsPoolFrequency",$8,$9,'SETUP'::"SavingsPoolStatus",$10::"CurrencyCode",$11,$12,$13,$14,$15,$16,0,0,0,NOW(),NOW()
+        $1,$2,$3,$4,$5,$6,$7,$8::"SavingsPoolFrequency",$9,$10,'SETUP'::"SavingsPoolStatus",$11::"CurrencyCode",$12,$13,$14,$15,$16,$17,0,0,0,NOW(),NOW()
       )`,
-      [poolId, data.groupId, data.name, data.description || null,
+      [poolId, data.groupId, group.schemeId, data.name, data.description || null,
        data.periodMonths, data.contributionAmount, data.contributionFrequency,
        startDate, maturityDate, group.currency,
        data.interestRatePa, data.maxLoanPct, data.allowLoans, data.notes || null,
@@ -284,6 +312,35 @@ export async function POST(req: NextRequest) {
         params
       )
     }
+
+    // Enrolment is tracked in TWO tables and nothing keeps them in sync.
+    // SavingsPoolMember gates the passbook; SchemeMember gates whether the
+    // scheme card on the group hub is tappable at all. Writing only the
+    // first is why members sat inside a pool while their card read "not
+    // enrolled" and refused to open.
+    //
+    // The isContributory flag and the enrolment rows go in ONE statement.
+    // A data-modifying CTE always executes exactly once, so the flag is
+    // still set when memberIds is empty and unnest yields no rows.
+    //
+    // NOT EXISTS rather than ON CONFLICT: this does not assume a unique
+    // index on (schemeId, userId), and stays correct either way.
+    await exec(
+      `WITH flag AS (
+         UPDATE "WindfallScheme"
+            SET "isContributory" = true
+          WHERE id = $1::text
+            AND "isContributory" = false
+       )
+       INSERT INTO "SchemeMember" ("schemeId", "userId")
+       SELECT $1::text, u
+         FROM unnest($2::text[]) AS u
+        WHERE NOT EXISTS (
+          SELECT 1 FROM "SchemeMember" sm
+           WHERE sm."schemeId" = $1::text AND sm."userId" = u
+        )`,
+      [group.schemeId, data.memberIds]
+    )
 
     return NextResponse.json({
       success: true,
@@ -675,27 +732,73 @@ async function handleAddMember(body: any): Promise<NextResponse> {
   if (pool.status === 'CLOSED') return NextResponse.json({ success: false, error: 'Cannot add members to a closed pool' }, { status: 400 })
 
   const memberId = randomUUID()
+
+  // Both membership tables in one statement. The pool row gates the
+  // passbook, the SchemeMember row gates the hub card — a member written
+  // to only the first is enrolled in a book they cannot reach.
+  //
+  // reactivate and the INSERT cover disjoint cases against the same
+  // snapshot: a row that exists is un-exited, a row that does not is
+  // created. pool."schemeId" can be NULL on pools predating the backfill,
+  // so both are guarded on it.
   await exec(
-    `INSERT INTO "SavingsPoolMember" (id,"poolId","userId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
-     VALUES ($1,$2,$3,0,0,0,true,NOW(),NOW())
-     ON CONFLICT ("poolId","userId") DO UPDATE SET "isActive"=true,"exitedAt"=NULL,"updatedAt"=NOW()`,
-    [memberId, poolId, userId]
+    `WITH pm AS (
+       INSERT INTO "SavingsPoolMember" (id,"poolId","userId","totalContributed","sharePercentage","loanBalance","isActive","createdAt","updatedAt")
+       VALUES ($1,$2,$3,0,0,0,true,NOW(),NOW())
+       ON CONFLICT ("poolId","userId") DO UPDATE SET "isActive"=true,"exitedAt"=NULL,"updatedAt"=NOW()
+     ),
+     reactivate AS (
+       UPDATE "SchemeMember"
+          SET status = 'ACTIVE'::"MemberStatus", "exitedAt" = NULL, "updatedAt" = NOW()
+        WHERE $4::text IS NOT NULL
+          AND "schemeId" = $4::text
+          AND "userId"   = $3::text
+     )
+     INSERT INTO "SchemeMember" ("schemeId", "userId")
+     SELECT $4::text, $3::text
+      WHERE $4::text IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM "SchemeMember" sm
+           WHERE sm."schemeId" = $4::text AND sm."userId" = $3::text
+        )`,
+    [memberId, poolId, userId, pool.schemeId || null]
   )
 
   if (pool.status === 'ACTIVE') {
     const now = new Date()
     const periodCount = calcPeriodCount(Number(pool.periodMonths), pool.contributionFrequency)
+
+    // One statement, not one per period. This was a sequential loop: a
+    // 36-month pool joined at the start issued 36 round trips to Tokyo at
+    // ~160ms each — nearly six seconds for work Postgres does in one.
+    // Same pattern already applied to pool activation.
+    const rows: { p: number; due: Date }[] = []
     for (let p = 1; p <= periodCount; p++) {
       const due = calcDueDate(new Date(pool.startDate), p, pool.contributionFrequency)
-      if (due >= now) {
-        const cId = randomUUID()
-        try {
-          await exec(
-            `INSERT INTO "SavingsContribution" (id,"poolId","userId","periodNumber","dueDate","amountDue","amountPaid",currency,status,"createdAt","updatedAt")
-             VALUES ($1,$2,$3,$4,$5,$6,0,$7::"CurrencyCode",'PENDING'::"SavingsContributionStatus",NOW(),NOW()) ON CONFLICT ("poolId","userId","periodNumber") DO NOTHING`,
-            [cId, poolId, userId, p, due, pool.contributionAmount, pool.currency]
-          )
-        } catch {}
+      if (due >= now) rows.push({ p, due })
+    }
+
+    if (rows.length > 0) {
+      // 5 params per row; poolId, userId, amountDue and currency are
+      // shared and appended once at the end.
+      const base = rows.length * 3
+      const values = rows
+        .map((_, i) => `($${i * 3 + 1},$${base + 1},$${base + 2},$${i * 3 + 2},$${i * 3 + 3},$${base + 3},0,$${base + 4}::"CurrencyCode",'PENDING'::"SavingsContributionStatus",NOW(),NOW())`)
+        .join(', ')
+
+      const params: any[] = []
+      for (const r of rows) params.push(randomUUID(), r.p, r.due)
+      params.push(poolId, userId, pool.contributionAmount, pool.currency)
+
+      try {
+        await exec(
+          `INSERT INTO "SavingsContribution" (id,"poolId","userId","periodNumber","dueDate","amountDue","amountPaid",currency,status,"createdAt","updatedAt")
+           VALUES ${values}
+           ON CONFLICT ("poolId","userId","periodNumber") DO NOTHING`,
+          params
+        )
+      } catch (e: any) {
+        console.error('handleAddMember contribution seed failed:', e?.message)
       }
     }
   }
