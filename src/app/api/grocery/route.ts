@@ -1,4 +1,8 @@
-// src/app/api/grocery/route.ts — v1.0
+// src/app/api/grocery/route.ts — v1.1
+// v1.1: handleActivate no longer issues one INSERT per (member × period) —
+//       schedule rows are written in batched multi-row INSERTs. Club creation
+//       batches its member INSERTs. recalcTotals is now two set-based
+//       statements run in parallel instead of N+3 sequential round trips.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -180,12 +184,19 @@ export async function POST(req: NextRequest) {
        data.coordinatorId, data.notes]
     )
 
-    for (const userId of data.memberIds) {
-      const mId = randomUUID()
+    // v1.1: one batched INSERT rather than one round trip per member.
+    if (data.memberIds.length) {
+      const params: any[] = [clubId]
+      const tuples = data.memberIds.map(userId => {
+        const b = params.length
+        params.push(randomUUID(), userId)
+        return `($${b+1},$1,$${b+2},0,0,true,NOW(),NOW())`
+      }).join(',')
       await exec(
         `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
-         VALUES ($1,$2,$3,0,0,true,NOW(),NOW()) ON CONFLICT ("clubId","userId") DO NOTHING`,
-        [mId, clubId, userId]
+         VALUES ${tuples}
+         ON CONFLICT ("clubId","userId") DO NOTHING`,
+        params
       )
     }
 
@@ -263,34 +274,68 @@ export async function DELETE(req: NextRequest) {
 }
 
 // ── Activate — generate contribution schedule ─────────────────
+// v1.1: the schedule is written with batched multi-row INSERTs instead of one
+//       round trip per (member × period). A 12-month WEEKLY club with 10
+//       members is 520 rows — previously 520 sequential round trips at ~160ms
+//       Tokyo↔Washington (~83s), now a handful of statements (well under 1s).
+//
+// Placeholders stay untyped so Postgres infers each parameter's type from the
+// target column. Do NOT switch this to unnest(...::text[]) — an explicit array
+// cast defeats that inference and will fail if a column is uuid rather than text.
+const ACTIVATE_CHUNK_ROWS = 500
+
 async function handleActivate(body: any): Promise<NextResponse> {
   const { clubId } = body
-  const clubs = await sql(`SELECT * FROM "GroceryClub" WHERE id=$1`, [clubId])
+
+  // One round trip for club + roster + items instead of three sequential ones.
+  const [clubs, members, items] = await Promise.all([
+    sql(`SELECT * FROM "GroceryClub" WHERE id=$1`, [clubId]),
+    sql(`SELECT * FROM "GroceryMember" WHERE "clubId"=$1 AND "isActive"=true`, [clubId]),
+    sql(`SELECT "estimatedTotalPrice" FROM "GroceryItem" WHERE "clubId"=$1`, [clubId]),
+  ])
+
   if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
   const club = clubs[0]
   if (club.status !== 'SETUP') return NextResponse.json({ success:false, error:'Club already activated' }, { status:400 })
-
-  const members = await sql(`SELECT * FROM "GroceryMember" WHERE "clubId"=$1 AND "isActive"=true`, [clubId])
   if (!members.length) return NextResponse.json({ success:false, error:'Add at least one member before activating' }, { status:400 })
 
   // Recalc budget and contribution amount from items
-  const items = await sql(`SELECT * FROM "GroceryItem" WHERE "clubId"=$1`, [clubId])
-  const totalBudget = items.reduce((s: number, i: any) => s + Number(i.estimatedTotalPrice), 0)
-  const contribAmount = members.length > 0 ? totalBudget / members.length : 0
+  const totalBudget   = items.reduce((s: number, i: any) => s + Number(i.estimatedTotalPrice), 0)
+  const contribAmount = totalBudget / members.length
 
   const periodCount = calcPeriodCount(Number(club.periodMonths), club.contributionFrequency)
+  const startDate   = new Date(club.startDate)
 
+  // Build the full row set in memory first — cheap, and lets us size the batches.
+  const rows: { id: string; userId: string; period: number; due: Date }[] = []
   for (const m of members) {
     for (let p = 1; p <= periodCount; p++) {
-      const cId = randomUUID()
-      const due = calcDueDate(new Date(club.startDate), p, club.contributionFrequency)
-      await exec(
-        `INSERT INTO "GroceryContribution" (id,"clubId","userId","periodNumber","dueDate","amountDue","amountPaid",status,"createdAt","updatedAt")
-         VALUES ($1,$2,$3,$4,$5,$6,0,'PENDING'::"GroceryContribStatus",NOW(),NOW())
-         ON CONFLICT ("clubId","userId","periodNumber") DO NOTHING`,
-        [cId, clubId, m.userId, p, due, contribAmount]
-      )
+      rows.push({
+        id:     randomUUID(),
+        userId: m.userId,
+        period: p,
+        due:    calcDueDate(startDate, p, club.contributionFrequency),
+      })
     }
+  }
+
+  // $1 = clubId and $2 = amountDue are shared by every tuple, so each row costs
+  // only 4 further placeholders. Chunked to keep any single statement modest.
+  for (let i = 0; i < rows.length; i += ACTIVATE_CHUNK_ROWS) {
+    const chunk  = rows.slice(i, i + ACTIVATE_CHUNK_ROWS)
+    const params: any[] = [clubId, contribAmount]
+    const tuples = chunk.map(r => {
+      const b = params.length
+      params.push(r.id, r.userId, r.period, r.due)
+      return `($${b+1},$1,$${b+2},$${b+3},$${b+4},$2,0,'PENDING'::"GroceryContribStatus",NOW(),NOW())`
+    }).join(',')
+
+    await exec(
+      `INSERT INTO "GroceryContribution" (id,"clubId","userId","periodNumber","dueDate","amountDue","amountPaid",status,"createdAt","updatedAt")
+       VALUES ${tuples}
+       ON CONFLICT ("clubId","userId","periodNumber") DO NOTHING`,
+      params
+    )
   }
 
   await exec(
@@ -300,6 +345,7 @@ async function handleActivate(body: any): Promise<NextResponse> {
 
   return NextResponse.json({
     success:true,
+    data:{ periodCount, memberCount: members.length, scheduleRows: rows.length },
     message:`Club activated! Budget: $${totalBudget.toFixed(2)}. Each member contributes $${contribAmount.toFixed(2)} over ${periodCount} periods.`,
   })
 }
@@ -499,28 +545,47 @@ async function recalcContribAmount(clubId: string) {
   await exec(`UPDATE "GroceryClub" SET "contributionAmount"=$1,"updatedAt"=NOW() WHERE id=$2`, [amount, clubId])
 }
 
+// v1.1: was 2 reads + 1 write + one UPDATE per member (N+3 sequential round
+// trips on every single payment). Now two set-based statements run in parallel,
+// both computed entirely in the database. Correlated scalar subqueries are used
+// rather than UPDATE…FROM with a LEFT JOIN, because Postgres rejects a join
+// condition in the FROM list that references the UPDATE target.
 async function recalcTotals(clubId: string) {
-  const result = await sql(
-    `SELECT COALESCE(SUM("amountPaid"),0) as total FROM "GroceryContribution" WHERE "clubId"=$1 AND status='PAID'`,
-    [clubId]
-  )
-  await exec(
-    `UPDATE "GroceryClub" SET "totalContributed"=$1,"updatedAt"=NOW() WHERE id=$2`,
-    [Number(result[0]?.total || 0), clubId]
-  )
-  // Recalc member shares
-  const memberContribs = await sql(
-    `SELECT "userId", COALESCE(SUM("amountPaid"),0) as paid FROM "GroceryContribution" WHERE "clubId"=$1 AND status='PAID' GROUP BY "userId"`,
-    [clubId]
-  )
-  const total = memberContribs.reduce((s: number, m: any) => s + Number(m.paid), 0)
-  for (const mc of memberContribs) {
-    const share = total > 0 ? Number(mc.paid) / total * 100 : 0
-    await exec(
-      `UPDATE "GroceryMember" SET "totalContributed"=$1,"sharePercentage"=$2,"updatedAt"=NOW() WHERE "clubId"=$3 AND "userId"=$4`,
-      [Number(mc.paid), share, clubId, mc.userId]
-    )
-  }
+  await Promise.all([
+    exec(
+      `UPDATE "GroceryClub"
+          SET "totalContributed" = (SELECT COALESCE(SUM("amountPaid"),0)
+                                      FROM "GroceryContribution"
+                                     WHERE "clubId"=$1 AND status='PAID'),
+              "updatedAt" = NOW()
+        WHERE id = $1`,
+      [clubId]
+    ),
+    exec(
+      `UPDATE "GroceryMember" gm
+          SET "totalContributed" = COALESCE((SELECT SUM(gc."amountPaid")
+                                               FROM "GroceryContribution" gc
+                                              WHERE gc."clubId"=$1
+                                                AND gc."userId"=gm."userId"
+                                                AND gc.status='PAID'), 0),
+              "sharePercentage"  = CASE
+                WHEN (SELECT COALESCE(SUM("amountPaid"),0)
+                        FROM "GroceryContribution"
+                       WHERE "clubId"=$1 AND status='PAID') > 0
+                THEN COALESCE((SELECT SUM(gc2."amountPaid")
+                                 FROM "GroceryContribution" gc2
+                                WHERE gc2."clubId"=$1
+                                  AND gc2."userId"=gm."userId"
+                                  AND gc2.status='PAID'), 0)
+                     / (SELECT SUM("amountPaid")
+                          FROM "GroceryContribution"
+                         WHERE "clubId"=$1 AND status='PAID') * 100
+                ELSE 0 END,
+              "updatedAt" = NOW()
+        WHERE gm."clubId" = $1`,
+      [clubId]
+    ),
+  ])
 }
 
 function formatClub(c: any) {

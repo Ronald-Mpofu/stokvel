@@ -1,5 +1,7 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.0
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.1
+// v1.1: blocking BusyOverlay with elapsed counter for long-running actions
+//       (Activate, Mark All Distributed); Activate buttons show in-button state.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -35,6 +37,31 @@ function Toast({ msg, type, onClose }: any) {
 
 function Pill({ bg, color, children }: any) {
   return <span style={{background:bg,color,fontSize:'11px',fontWeight:'600',padding:'3px 9px',borderRadius:'999px',whiteSpace:'nowrap',display:'inline-flex',alignItems:'center',gap:'4px'}}>{children}</span>
+}
+
+// ── Busy Overlay ──────────────────────────────────────────────
+// Module-level (never defined inside a render) so it is not remounted on every
+// parent re-render. Shows a real elapsed counter rather than a fake progress
+// bar — the client cannot observe server-side stages of a single request.
+function BusyOverlay({ label, detail }: { label: string; detail?: string }) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    const t = setInterval(() => setElapsed(e => e + 1), 1000)
+    return () => clearInterval(t)
+  }, [])
+  return (
+    <div style={{position:'fixed',inset:0,background:'rgba(13,33,55,0.55)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:2000,padding:'16px'}}>
+      <style>{`@keyframes wfSpin{to{transform:rotate(360deg)}}`}</style>
+      <div style={{background:'white',borderRadius:'16px',padding:'28px 32px',minWidth:'260px',maxWidth:'380px',textAlign:'center',boxShadow:'0 25px 60px rgba(0,0,0,0.3)'}}>
+        <div style={{width:'34px',height:'34px',margin:'0 auto 14px',border:`3px solid #E2E8F0`,borderTopColor:TEAL,borderRadius:'50%',animation:'wfSpin 0.8s linear infinite'}}/>
+        <div style={{fontSize:'14px',fontWeight:'600',color:NAVY,marginBottom:'6px'}}>{label}</div>
+        {detail&&<div style={{fontSize:'12px',color:'#64748B',marginBottom:'6px'}}>{detail}</div>}
+        <div style={{fontSize:'11px',color:'#94A3B8'}}>
+          {elapsed < 3 ? 'Please wait…' : `${elapsed}s elapsed — please keep this window open.`}
+        </div>
+      </div>
+    </div>
+  )
 }
 
 // ── Create Club Modal ─────────────────────────────────────────
@@ -347,6 +374,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [editItem, setEditItem]           = useState<any>(null)
   const [purchaseItem, setPurchaseItem]   = useState<any>(null)
   const [saving, setSaving]               = useState(false)
+  const [busy, setBusy]                   = useState<{label:string;detail?:string}|null>(null)
   const [search, setSearch]               = useState('')
 
   const fetchClub = useCallback(async () => {
@@ -358,15 +386,25 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
   useEffect(()=>{ fetchClub() },[fetchClub])
 
-  async function doAction(action: string, payload: any = {}) {
+  // `busyLabel` shows a blocking overlay for long-running actions. Actions that
+  // return quickly pass nothing and just disable their button as before.
+  async function doAction(action: string, payload: any = {}, busyLabel?: {label:string;detail?:string}) {
     setSaving(true)
+    if (busyLabel) setBusy(busyLabel)
     try {
       const res  = await fetch('/api/grocery', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ action, clubId, ...payload }) })
       const data = await res.json()
-      if (data.success) { onAction(data.message); fetchClub() }
+      if (data.success) { onAction(data.message); await fetchClub() }
       else onAction(data.error||'Failed','error')
-    } catch { onAction('Network error','error') } finally { setSaving(false) }
+    } catch { onAction('Network error','error') } finally { setSaving(false); setBusy(null) }
   }
+
+  const activateBusy = (memberCount: number) => ({
+    label:  'Activating club…',
+    detail: memberCount > 0
+      ? `Building the contribution schedule for ${memberCount} member${memberCount===1?'':'s'}.`
+      : 'Building the contribution schedule.',
+  })
 
   if (loading) return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
@@ -392,6 +430,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:'16px'}}>
       <div style={{background:'white',borderRadius:'16px',width:'100%',maxWidth:'820px',maxHeight:'95vh',display:'flex',flexDirection:'column',boxShadow:'0 25px 60px rgba(0,0,0,0.3)',overflow:'hidden'}}>
+        {busy&&<BusyOverlay label={busy.label} detail={busy.detail}/>}
         {showItemModal&&<ItemModal clubId={clubId} item={editItem} memberCount={members.length||1}
           onClose={()=>{ setShowItemModal(false); setEditItem(null) }}
           onSuccess={(msg:string)=>{ onAction(msg); fetchClub() }}/>}
@@ -448,11 +487,11 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
           {/* Action buttons */}
           <div style={{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'}}>
-            {canActivate&&<button onClick={()=>doAction('ACTIVATE')} disabled={saving}
-              style={{padding:'6px 14px',background:TEAL,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>▶️ Activate Club</button>}
+            {canActivate&&<button onClick={()=>doAction('ACTIVATE',{},activateBusy(members.length))} disabled={saving}
+              style={{padding:'6px 14px',background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Club'}</button>}
             {club.status==='ACTIVE'&&<button onClick={()=>setTab('items')}
               style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>🛒 Manage Items</button>}
-            {['PURCHASING','ACTIVE'].includes(club.status)&&<button onClick={()=>doAction('MARK_DISTRIBUTED')} disabled={saving}
+            {['PURCHASING','ACTIVE'].includes(club.status)&&<button onClick={()=>doAction('MARK_DISTRIBUTED',{},{label:'Updating items…',detail:'Marking all purchased items as distributed.'})} disabled={saving}
               style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>📦 Mark All Distributed</button>}
           </div>
         </div>
@@ -477,8 +516,8 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                   <span>{done?'✅':'⬜'}</span><span>{label as string}</span>
                 </div>
               ))}
-              {canActivate&&<button onClick={()=>doAction('ACTIVATE')} disabled={saving}
-                style={{marginTop:'8px',padding:'8px 18px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>▶️ Activate Now</button>}
+              {canActivate&&<button onClick={()=>doAction('ACTIVATE',{},activateBusy(members.length))} disabled={saving}
+                style={{marginTop:'8px',padding:'8px 18px',background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Now'}</button>}
               {!canActivate&&<p style={{fontSize:'12px',color:'#64748B',margin:'8px 0 0'}}>Add at least one member and one grocery item to activate.</p>}
             </div>}
 
