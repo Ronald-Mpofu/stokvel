@@ -13,6 +13,11 @@
 //   Everything here comes from /api/groups/schemes in a single call.
 //   Nothing is fetched per card.
 //
+// WHO MAY ACT
+//   canManage and each card's adminAction arrive from the route. This file
+//   never inspects a role or a token — an admin gets the create action
+//   because the server said so, and the create endpoint checks again anyway.
+//
 // NO DERIVATION
 //   subtitle and trailing arrive as finished strings. This file decides
 //   colour and layout, never meaning. If a card reads wrongly, the fix
@@ -34,6 +39,7 @@ import {
   C, S, T, TOUCH, FONT_STACK, MONEY_STYLE, money,
 } from '@/lib/mobile/tokens'
 import { APP_BOTTOM_NAV_HEIGHT } from '@/lib/mobile/passbook'
+import MobileGroceryClubSheet from './MobileGroceryClubSheet'
 
 export type HubScheme = {
   id: string
@@ -51,6 +57,9 @@ export type HubScheme = {
   overdue: boolean
   monthsPaid: number
   monthsTotal: number
+  // Server-decided admin affordance. 'CREATE' means the caller manages this
+  // group, is not in this scheme, and a mobile create sheet exists for it.
+  adminAction: 'CREATE' | null
 }
 
 type HubData = {
@@ -69,6 +78,9 @@ type HubData = {
     schemesTotal: number
   }
   schemes: HubScheme[]
+  // Resolved server-side from GroupMember.role and Group.adminUserId. Used
+  // for display only — every write endpoint re-authorises independently.
+  canManage: boolean
 }
 
 // Amber for anything owed, so a debt never wears the same colour as a
@@ -88,12 +100,16 @@ const GLYPH: Record<string, string> = {
 }
 
 function SchemeCard({
-  scheme, currency, onOpen,
+  scheme, currency, onOpen, onCreate,
 }: {
   scheme: HubScheme
   currency: string
   onOpen: (s: HubScheme) => void
+  onCreate: (s: HubScheme) => void
 }) {
+  // A manager's not-enrolled card is an invitation to set the scheme up, not
+  // a dead end. "Ask your admin" shown to the admin is the bug this fixes.
+  const isCreate = !scheme.openable && scheme.adminAction === 'CREATE'
   const dim = !scheme.enrolled
   const owed = scheme.overdue
 
@@ -112,7 +128,7 @@ function SchemeCard({
   // A card that cannot be opened renders as a div, not a disabled button.
   // A member should not be able to tap into a dead end and be told nothing
   // happened.
-  const interactive = scheme.openable
+  const interactive = scheme.openable || isCreate
 
   const inner = (
     <>
@@ -171,7 +187,8 @@ function SchemeCard({
           style={{
             fontSize: T.caption.fontSize,
             marginTop: 2,
-            color: owed ? C.amberText : C.textFaint,
+            color: isCreate ? C.teal : owed ? C.amberText : C.textFaint,
+            fontWeight: isCreate ? 500 : 400,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -201,8 +218,8 @@ function SchemeCard({
 
   return (
     <button
-      onClick={() => onOpen(scheme)}
-      aria-label={`Open ${scheme.name}`}
+      onClick={() => (isCreate ? onCreate(scheme) : onOpen(scheme))}
+      aria-label={isCreate ? `Set up ${scheme.name}` : `Open ${scheme.name}`}
       style={{ ...shared, border: 'none', borderTop: `1px solid ${C.border}`, cursor: 'pointer' }}
     >
       {inner}
@@ -298,6 +315,9 @@ export default function MobileSchemeHub({
   const [data, setData] = useState<HubData | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Which scheme type's create sheet is open, if any.
+  const [createFor, setCreateFor] = useState<HubScheme | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   // State lives in the component, not at module level. Module-level caches
   // do not survive App Router client navigations reliably, so a value
@@ -323,6 +343,22 @@ export default function MobileSchemeHub({
   }, [groupId])
 
   useEffect(() => {
+    load()
+  }, [load])
+
+  const openCreate = useCallback((scheme: HubScheme) => {
+    setNotice(null)
+    setCreateFor(scheme)
+  }, [])
+
+  const closeCreate = useCallback(() => setCreateFor(null), [])
+
+  const afterCreate = useCallback((message: string) => {
+    setCreateFor(null)
+    setNotice(message)
+    // Reload rather than patch local state: creating a club changes the
+    // caller's enrolment, the scheme's state and the header totals, and the
+    // route is the only thing that decides what those now read.
     load()
   }, [load])
 
@@ -442,18 +478,49 @@ export default function MobileSchemeHub({
           ) : null}
         </div>
 
+        {notice ? (
+          <div
+            role="status"
+            style={{
+              margin: `0 ${S.screenX}px ${S.sm}px`,
+              padding: `${S.sm}px ${S.md}px`,
+              background: C.tealBg,
+              color: C.tealDark,
+              borderRadius: 10,
+              fontSize: T.small.fontSize,
+              lineHeight: 1.45,
+            }}
+          >
+            {notice}
+          </div>
+        ) : null}
+
         {loading ? (
           <HubSkeleton />
         ) : error ? (
           <HubError message={error} onRetry={load} />
         ) : (
           (data?.schemes || []).map(s => (
-            <SchemeCard key={s.id} scheme={s} currency={currency} onOpen={onOpenScheme} />
+            <SchemeCard
+              key={s.id}
+              scheme={s}
+              currency={currency}
+              onOpen={onOpenScheme}
+              onCreate={openCreate}
+            />
           ))
         )}
       </div>
 
       {footer}
+
+      {createFor && createFor.schemeType === 'GROCERY_CLUB' ? (
+        <MobileGroceryClubSheet
+          groupId={groupId}
+          onClose={closeCreate}
+          onCreated={afterCreate}
+        />
+      ) : null}
 
       {/* Clears the app's fixed bottom nav. Without it the last scheme
           card sits underneath Home / Groups / Pool / Alerts / More. */}

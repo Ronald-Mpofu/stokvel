@@ -16,6 +16,12 @@
 //   cycle, the caller's contribution aggregate and their next due row for
 //   every scheme at once.
 //
+// WHO MAY ACT
+//   canManage is resolved here from GroupMember.role and Group.adminUserId,
+//   in the same statement as everything else. The hub uses it to decide
+//   whether a not-enrolled card reads "Ask your admin" or offers a create
+//   action. It is a display hint only — every write endpoint re-authorises.
+//
 // PAYLOAD DISCIPLINE
 //   Returns display strings and one number per card. No fee percentages,
 //   no other members' contributions, no scheme config beyond what a card
@@ -57,6 +63,7 @@ type Row = {
   country: string | null
   memberCount: number | null
   isGroupMember: boolean | null
+  isGroupManager: boolean | null
   schemes: SchemeRow[] | null
 }
 
@@ -82,6 +89,21 @@ SELECT
        AND gm."userId"  = $1::text
        AND gm.status <> 'EXITED'::"MemberStatus"
   )                                             AS "isGroupMember",
+
+  -- Whether the caller may create and configure schemes in this group.
+  -- Resolved server-side and never accepted from the client: the create
+  -- endpoints re-authorise independently, but the hub must not offer an
+  -- action a member cannot perform.
+  (
+    EXISTS (
+      SELECT 1 FROM "GroupMember" gm
+       WHERE gm."groupId" = g.id
+         AND gm."userId"  = $1::text
+         AND gm.status <> 'EXITED'::"MemberStatus"
+         AND gm.role IN ('GROUP_ADMIN'::"UserRole", 'TREASURER'::"UserRole")
+    )
+    OR g."adminUserId" = $1::text
+  )                                             AS "isGroupManager",
 
   (SELECT COALESCE(json_agg(s ORDER BY s.sort_order, s.name), '[]'::json)
      FROM (
@@ -168,6 +190,11 @@ WHERE g.id = $2::text
   AND g."deletedAt" IS NULL
 `
 
+// Scheme types with a mobile create sheet built. A card only offers the
+// create action when its type appears here, so an admin is never shown a
+// button that opens nothing. Add a type as its sheet ships.
+const MOBILE_CREATE_READY = new Set(['GROCERY_CLUB'])
+
 const MONTHS_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
@@ -214,6 +241,9 @@ export async function GET(req: NextRequest) {
       return forbidden('You are not a member of this group')
     }
 
+    const canManage =
+      Boolean(d.isGroupManager) || SUPER_ROLES.includes(claims.role)
+
     const now = new Date()
     const raw = Array.isArray(d.schemes) ? d.schemes : []
 
@@ -259,7 +289,12 @@ export async function GET(req: NextRequest) {
       switch (state) {
         case 'NOT_ENROLLED':
           subtitle = 'Not enrolled'
-          trailing = 'Ask your admin'
+          // "Ask your admin" is addressed to a member. Shown to the person
+          // who IS the admin it is a dead end — they are the one who would
+          // be asked. Managers get the action instead.
+          trailing = canManage
+            ? (MOBILE_CREATE_READY.has(s.schemeType) ? 'Set up' : 'Not set up')
+            : 'Ask your admin'
           break
         case 'NOT_AVAILABLE':
           subtitle = grammar === 'REPAYMENT' ? 'Repayment book' : 'Stake statement'
@@ -297,6 +332,13 @@ export async function GET(req: NextRequest) {
         // Only a scheme with a readable book is worth opening. The hub
         // greys the rest rather than letting a member tap into a dead end.
         openable: state === 'ACTIVE' || state === 'NOT_STARTED',
+        // The admin affordance for this card, or null. CREATE means the
+        // group has no instance of this scheme yet — or the manager is not
+        // in the one it has — and the mobile sheet can make one.
+        adminAction:
+          canManage && !s.enrolled && MOBILE_CREATE_READY.has(s.schemeType)
+            ? 'CREATE'
+            : null,
         subtitle,
         trailing,
         // Terms as numbers, appended to the subtitle by the card. Sent for
@@ -324,6 +366,9 @@ export async function GET(req: NextRequest) {
           country: d.country,
           memberCount: num(d.memberCount),
         },
+        // Drives the admin affordances on the hub. The client uses this for
+        // display only — /api/grocery re-checks with requireGroupManager.
+        canManage,
         // Holdings and what is owed are kept apart on purpose. Netting
         // them into a single figure is how a member comes to believe a
         // loan is savings.

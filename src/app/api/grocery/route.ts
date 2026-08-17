@@ -1,8 +1,14 @@
-// src/app/api/grocery/route.ts — v1.1
+// src/app/api/grocery/route.ts — v1.2
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
 //       statements run in parallel instead of N+3 sequential round trips.
+// v1.2: club creation now writes GroceryClub."schemeId" and enrols members
+//       into "SchemeMember" as well as "GroceryMember". Without both, the
+//       mobile hub reads the Grocery Club card as "Not enrolled" for every
+//       member of every group. Run sql/13-grocery-scheme-link.sql first to
+//       repair rows created before this version. Adds enrolAllMembers so the
+//       mobile create sheet does not need a roster fetch.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -29,7 +35,94 @@ const clubSchema = z.object({
   coordinatorId:         z.string().uuid().nullish().transform(v => v || null),
   notes:                 z.string().nullish().transform(v => v || null),
   memberIds:             z.array(z.string().uuid()).default([]),
+  // Mobile create sheet sends this instead of a member list. Selecting
+  // members needs a roster fetch the phone should not have to make just to
+  // create a club — the server already knows who is in the group.
+  enrolAllMembers:       z.coerce.boolean().default(false),
 })
+
+// Resolves the group's single GROCERY_CLUB scheme row, creating it if the
+// group has never run one, and marks it contributory.
+//
+// WindfallScheme has UNIQUE ("groupId","schemeType") — one row per type per
+// group — so this never produces a second grocery scheme. A club is an
+// instance underneath that one row, which is why creating "another grocery
+// club" does not add a seventh card to the hub.
+async function ensureGrocerySchemeId(groupId: string): Promise<string> {
+  const existing = await sql(
+    `SELECT id FROM "WindfallScheme"
+      WHERE "groupId" = $1 AND "schemeType" = 'GROCERY_CLUB'::"WindfallSchemeType"`,
+    [groupId]
+  )
+  if (existing.length) {
+    // isContributory defaults to false. Left false, the hub reads the card
+    // as "No passbook" even for an enrolled member.
+    await exec(
+      `UPDATE "WindfallScheme" SET "isContributory"=true,"updatedAt"=NOW()
+        WHERE id=$1 AND "isContributory"=false`,
+      [existing[0].id]
+    )
+    return existing[0].id
+  }
+
+  const schemeId = randomUUID()
+  await exec(
+    `INSERT INTO "WindfallScheme"
+       (id,"groupId","schemeType",name,description,status,"isContributory","isRotating","createdAt","updatedAt")
+     VALUES ($1,$2,'GROCERY_CLUB'::"WindfallSchemeType",$3,$4,'ACTIVE'::"WindfallSchemeStatus",true,false,NOW(),NOW())
+     ON CONFLICT ("groupId","schemeType") DO NOTHING`,
+    [schemeId, groupId, 'Grocery Club', 'Bulk grocery buying for members']
+  )
+
+  // ON CONFLICT DO NOTHING means a concurrent request may have won the race,
+  // in which case our id was never inserted. Re-read rather than assume.
+  const row = await sql(
+    `SELECT id FROM "WindfallScheme"
+      WHERE "groupId" = $1 AND "schemeType" = 'GROCERY_CLUB'::"WindfallSchemeType"`,
+    [groupId]
+  )
+  if (!row.length) throw new Error('Could not resolve the group\'s Grocery Club scheme')
+  return row[0].id
+}
+
+// Enrols users into BOTH membership tables in one pass.
+//
+// GroceryMember scopes a member to one club. SchemeMember scopes them to the
+// scheme and is what the mobile hub reads to decide enrolment. Writing only
+// the first is why every grocery card read "Not enrolled / Ask your admin".
+async function enrolMembers(clubId: string, schemeId: string, userIds: string[]) {
+  const ids = Array.from(new Set(userIds.filter(Boolean)))
+  if (!ids.length) return
+
+  const memberParams: any[] = [clubId]
+  const memberTuples = ids.map(userId => {
+    const b = memberParams.length
+    memberParams.push(randomUUID(), userId)
+    return `($${b+1},$1,$${b+2},0,0,true,NOW(),NOW())`
+  }).join(',')
+
+  const schemeParams: any[] = [schemeId]
+  const schemeTuples = ids.map(userId => {
+    const b = schemeParams.length
+    schemeParams.push(randomUUID(), userId)
+    return `($${b+1},$1,$${b+2},'ACTIVE'::"MemberStatus",NOW(),NOW(),NOW())`
+  }).join(',')
+
+  await Promise.all([
+    exec(
+      `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
+       VALUES ${memberTuples}
+       ON CONFLICT ("clubId","userId") DO UPDATE SET "isActive"=true,"updatedAt"=NOW()`,
+      memberParams
+    ),
+    exec(
+      `INSERT INTO "SchemeMember" (id,"schemeId","userId",status,"joinedAt","createdAt","updatedAt")
+       VALUES ${schemeTuples}
+       ON CONFLICT ("schemeId","userId") DO UPDATE SET status='ACTIVE'::"MemberStatus","exitedAt"=NULL,"updatedAt"=NOW()`,
+      schemeParams
+    ),
+  ])
+}
 
 const itemSchema = z.object({
   clubId:              z.string().uuid(),
@@ -174,31 +267,34 @@ export async function POST(req: NextRequest) {
     endDate.setMonth(endDate.getMonth() + data.periodMonths)
     const clubId = randomUUID()
 
+    // Resolve the scheme BEFORE inserting the club. A club with a NULL
+    // schemeId is invisible to the mobile hub, and we would rather fail
+    // loudly here than write an orphan that reads as "Not enrolled".
+    const schemeId = await ensureGrocerySchemeId(data.groupId)
+
     await exec(
-      `INSERT INTO "GroceryClub" (id,"groupId",name,description,"periodMonths","contributionFrequency",
+      `INSERT INTO "GroceryClub" (id,"groupId","schemeId",name,description,"periodMonths","contributionFrequency",
         "contributionAmount","startDate","endDate",status,currency,"totalBudget","totalContributed",
         "totalSpent","coordinatorId",notes,"createdAt","updatedAt")
-       VALUES ($1,$2,$3,$4,$5,$6,0,$7,$8,'SETUP'::"GroceryClubStatus",$9::"CurrencyCode",0,0,0,$10,$11,NOW(),NOW())`,
-      [clubId, data.groupId, data.name, data.description, data.periodMonths,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,0,$8,$9,'SETUP'::"GroceryClubStatus",$10::"CurrencyCode",0,0,0,$11,$12,NOW(),NOW())`,
+      [clubId, data.groupId, schemeId, data.name, data.description, data.periodMonths,
        data.contributionFrequency, startDate, endDate, group.currency,
        data.coordinatorId, data.notes]
     )
 
-    // v1.1: one batched INSERT rather than one round trip per member.
-    if (data.memberIds.length) {
-      const params: any[] = [clubId]
-      const tuples = data.memberIds.map(userId => {
-        const b = params.length
-        params.push(randomUUID(), userId)
-        return `($${b+1},$1,$${b+2},0,0,true,NOW(),NOW())`
-      }).join(',')
-      await exec(
-        `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
-         VALUES ${tuples}
-         ON CONFLICT ("clubId","userId") DO NOTHING`,
-        params
+    // The mobile create sheet asks the server for the roster rather than
+    // fetching it on the phone first.
+    let memberIds = data.memberIds
+    if (data.enrolAllMembers) {
+      const roster = await sql(
+        `SELECT "userId" FROM "GroupMember"
+          WHERE "groupId" = $1 AND status <> 'EXITED'::"MemberStatus"`,
+        [data.groupId]
       )
+      memberIds = roster.map((r: any) => r.userId)
     }
+
+    await enrolMembers(clubId, schemeId, memberIds)
 
     return NextResponse.json({
       success:true, data:{ id:clubId },
@@ -353,18 +449,43 @@ async function handleActivate(body: any): Promise<NextResponse> {
 // ── Add/Remove member ─────────────────────────────────────────
 async function handleAddMember(body: any): Promise<NextResponse> {
   const { clubId, userId } = body
-  const mId = randomUUID()
-  await exec(
-    `INSERT INTO "GroceryMember" (id,"clubId","userId","totalContributed","sharePercentage","isActive","createdAt","updatedAt")
-     VALUES ($1,$2,$3,0,0,true,NOW(),NOW()) ON CONFLICT ("clubId","userId") DO UPDATE SET "isActive"=true,"updatedAt"=NOW()`,
-    [mId, clubId, userId]
-  )
+  const clubs = await sql(`SELECT "groupId","schemeId" FROM "GroceryClub" WHERE id=$1`, [clubId])
+  if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
+
+  // A club created before migration 13 may still have a NULL schemeId.
+  const schemeId = clubs[0].schemeId || await ensureGrocerySchemeId(clubs[0].groupId)
+  if (!clubs[0].schemeId) {
+    await exec(`UPDATE "GroceryClub" SET "schemeId"=$1,"updatedAt"=NOW() WHERE id=$2`, [schemeId, clubId])
+  }
+
+  await enrolMembers(clubId, schemeId, [userId])
   const user = await prisma.user.findUnique({ where:{ id:userId }, select:{ fullName:true } })
   return NextResponse.json({ success:true, message:`${user?.fullName} added to club` })
 }
 
 async function handleRemoveMember(body: any): Promise<NextResponse> {
-  await exec(`UPDATE "GroceryMember" SET "isActive"=false,"updatedAt"=NOW() WHERE "clubId"=$1 AND "userId"=$2`, [body.clubId, body.userId])
+  const { clubId, userId } = body
+  await exec(`UPDATE "GroceryMember" SET "isActive"=false,"updatedAt"=NOW() WHERE "clubId"=$1 AND "userId"=$2`, [clubId, userId])
+
+  // SchemeMember is scheme-scoped, not club-scoped. A member dropped from
+  // one club may still be active in another under the same scheme, so only
+  // exit them from the scheme when no active club membership remains.
+  // Getting this wrong would erase their passbook for clubs they are still in.
+  await exec(
+    `UPDATE "SchemeMember" sm
+        SET status='EXITED'::"MemberStatus", "exitedAt"=NOW(), "updatedAt"=NOW()
+      WHERE sm."userId" = $2
+        AND sm."schemeId" = (SELECT "schemeId" FROM "GroceryClub" WHERE id=$1)
+        AND NOT EXISTS (
+              SELECT 1
+                FROM "GroceryMember" gm
+                JOIN "GroceryClub"   gc ON gc.id = gm."clubId"
+               WHERE gm."userId"  = $2
+                 AND gm."isActive" = true
+                 AND gc."schemeId" = sm."schemeId"
+            )`,
+    [clubId, userId]
+  )
   return NextResponse.json({ success:true, message:'Member removed from club' })
 }
 
