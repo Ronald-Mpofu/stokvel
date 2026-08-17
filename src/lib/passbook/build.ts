@@ -458,6 +458,157 @@ export function buildAccumulatingView(
   }
 }
 
+// ── GROCERY ───────────────────────────────────────────────────
+// A grocery club is accumulating, but it is NOT saving.
+//
+// In a savings pool the money paid in stays the member's and comes back at
+// maturity, so a closing balance is real. In a grocery club the money is
+// spent on goods and handed over. Once the club distributes, those
+// contributions are gone — converted into a hamper the member has taken
+// home. Reusing the savings hero here would read "Saved so far $240" to
+// someone who has $0 and a food parcel they already ate.
+//
+// So the hero is what they have PAID IN toward their share, and once the
+// club distributes it stops being a balance and becomes a receipt.
+export type GroceryClubInput = {
+  clubId: string
+  clubName: string
+  status: string
+  totalBudget: number
+  myShare: number
+  itemCount: number
+  purchasedCount: number
+  distributedCount: number
+  endDate: string | null
+}
+
+// Where the club is in its life, in the member's words rather than the
+// admin's. SETUP and ACTIVE are the same thing to a member: still paying.
+function groceryGoal(
+  club: GroceryClubInput,
+  target: number,
+  now: Date
+): PassbookRow {
+  const when = d(club.endDate)
+  const status = String(club.status || '').toUpperCase()
+  const allDistributed = club.itemCount > 0 && club.distributedCount >= club.itemCount
+
+  if (allDistributed || status === 'DISTRIBUTED' || status === 'CLOSED') {
+    return {
+      id: 'goal',
+      kind: 'NOTE',
+      label: 'Goods received',
+      detail: when && when <= now
+        ? `Collected · ${dayMonth(when)}`
+        : 'Your share has been handed over',
+      amount: target > 0 ? target : null,
+      amountText: target > 0 ? null : '—',
+    }
+  }
+
+  if (status === 'PURCHASING' || club.purchasedCount > 0) {
+    return {
+      id: 'goal',
+      kind: 'GOAL',
+      label: 'Collection',
+      detail: club.itemCount > 0
+        ? `Buying under way · ${club.purchasedCount} of ${club.itemCount} items bought`
+        : 'Buying under way',
+      amount: target > 0 ? target : null,
+      amountText: target > 0 ? null : '—',
+    }
+  }
+
+  return {
+    id: 'goal',
+    kind: 'GOAL',
+    label: when ? monthYear(when) : 'Collection',
+    detail: 'You collect your groceries once the club has bought them',
+    amount: target > 0 ? target : null,
+    amountText: target > 0 ? null : '—',
+  }
+}
+
+export function buildGroceryView(
+  scheme: SchemeInput,
+  club: GroceryClubInput,
+  contributions: ContributionInput[],
+  me: MeInput,
+  now: Date
+): PassbookView {
+  const rows = contributionRows(contributions, now, scheme.contributionFrequency)
+  const periodsTotal = contributions.length
+
+  // The member's own share of the club budget. Prefer the figure the club
+  // computed (budget ÷ members) over contributionAmount × periods, because
+  // adding an item after activation changes the share but not the number
+  // of periods.
+  const target = club.myShare > 0
+    ? club.myShare
+    : num(scheme.contributionAmount) * periodsTotal
+
+  const nextDue = contributions.find(c => !PAID_STATUSES.has(c.status))
+  const goal = groceryGoal(club, target, now)
+  const settled = goal.kind === 'NOTE'
+
+  const kpis: PassbookKpi[] = [
+    { label: 'Periods paid', value: `${me.monthsPaid} of ${periodsTotal}` },
+    { label: 'Your share', amount: target > 0 ? target : null },
+  ]
+  if (club.itemCount > 0) {
+    kpis.push({
+      label: settled ? 'Items received' : 'Items bought',
+      value: `${settled ? club.distributedCount : club.purchasedCount} of ${club.itemCount}`,
+    })
+  }
+
+  return {
+    scheme: {
+      id: scheme.id,
+      // The CLUB's name, not the scheme's. A member joined "December
+      // Hampers"; "Grocery Club" is a registry label.
+      name: club.clubName || scheme.name,
+      grammar: 'ACCUMULATING',
+      groupName: scheme.groupName,
+      currency: scheme.currency,
+    },
+    terms: ['Grocery club', club.itemCount > 0 ? `${club.itemCount} items` : null]
+      .filter(Boolean).join(' · '),
+    termsAmount: scheme.contributionAmount,
+    termsFrequency: (scheme.contributionFrequency || 'monthly').toLowerCase(),
+    hero: {
+      // Never "Saved". This money buys groceries; it does not come back.
+      label: settled ? 'You paid in' : 'Paid in',
+      amount: me.totalPaid,
+      ofAmount: target > 0 ? target : null,
+      tone: 'CREDIT',
+      progressPct: target > 0 ? (me.totalPaid / target) * 100 : null,
+    },
+    kpis: kpis.slice(0, 3),
+    caption: {
+      left: 'Your hamper book',
+      right: `${me.monthsPaid} of ${periodsTotal} paid`,
+    },
+    rows: [...rows, goal],
+    action: nextDue && !settled
+      ? {
+          kind: 'PAY',
+          verb: 'Pay',
+          amount: num(nextDue.amountDue),
+          hintTop: monthYear(d(nextDue.dueDate)).split(' ')[0],
+          hintBottom: 'due',
+        }
+      : {
+          kind: 'NONE',
+          verb: settled ? 'Club complete' : 'All paid',
+          amount: null,
+          hintTop: 'Nothing',
+          hintBottom: 'due',
+        },
+    queue: null,
+  }
+}
+
 // ── Entry point ───────────────────────────────────────────────
 export function grammarFor(schemeType: string): PassbookGrammar {
   const g = SCHEME_GRAMMAR[schemeType as WindfallSchemeType]

@@ -1,8 +1,21 @@
-// src/app/api/schemes/passbook/route.ts — v2
+// src/app/api/schemes/passbook/route.ts — v3
 //
 // One member's passbook for ONE windfall scheme.
 //
-// GET /api/schemes/passbook?schemeId=xxx[&poolId=yyy]
+// GET /api/schemes/passbook?schemeId=xxx[&poolId=yyy][&clubId=zzz]
+//
+// WHAT CHANGED IN v3
+//
+//   Grocery Club reads its own module — GroceryClub, GroceryContribution,
+//   GroceryMember, GroceryItem — the same way savings reads SavingsPool.
+//   Before v3 every grocery card returned READER_NOT_BUILT.
+//
+//   A scheme holds MANY clubs. WindfallScheme is one row per type per
+//   group, but "another grocery club" creates another GroceryClub beneath
+//   it, so a member may hold several books under one card. Rather than
+//   merging them into one ledger — which would interleave two unrelated
+//   hampers — the route returns the club list and the member picks, the
+//   same shape MULTIPLE_POOLS already uses for savings.
 //
 // WHAT CHANGED IN v2
 //
@@ -41,8 +54,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma/client'
 import { getClaimsFromRequest, unauthorized, forbidden, SUPER_ROLES } from '@/lib/auth'
-import { buildRotatingView, buildAccumulatingView } from '@/lib/passbook/build'
-import type { ContributionInput, RotationInput, SchemeInput } from '@/lib/passbook/build'
+import { buildRotatingView, buildAccumulatingView, buildGroceryView } from '@/lib/passbook/build'
+import type {
+  ContributionInput, RotationInput, SchemeInput, GroceryClubInput,
+} from '@/lib/passbook/build'
 
 export const dynamic = 'force-dynamic'
 
@@ -50,6 +65,11 @@ export const dynamic = 'force-dynamic'
 // Compared against status::text, so this list is the single place to
 // adjust once the SavingsContributionStatus labels are confirmed.
 const SETTLED = ['PAID', 'WAIVED']
+
+// GroceryContribStatus labels are PENDING / PAID / PARTIAL / WAIVED. A
+// PARTIAL payment is deliberately NOT settled — the member still owes the
+// balance and the row must keep catching their eye.
+const GROCERY_SETTLED = ['PAID', 'WAIVED']
 
 type SchemeRow = {
   schemeId: string
@@ -60,6 +80,7 @@ type SchemeRow = {
   currency: string
   isGroupMember: boolean
   poolCount: number
+  clubCount: number
 }
 
 type PoolRow = {
@@ -95,7 +116,9 @@ SELECT
        AND gm.status <> 'EXITED'::"MemberStatus"
   )                        AS "isGroupMember",
   (SELECT count(*)::int FROM "SavingsPool" sp
-    WHERE sp."schemeId" = ws.id)  AS "poolCount"
+    WHERE sp."schemeId" = ws.id)  AS "poolCount",
+  (SELECT count(*)::int FROM "GroceryClub" gc
+    WHERE gc."schemeId" = ws.id)  AS "clubCount"
 FROM "WindfallScheme" ws
 JOIN "Group" g ON g.id = ws."groupId"
 WHERE ws.id = $2::text
@@ -174,6 +197,95 @@ ORDER BY sp."createdAt"
 LIMIT 1
 `
 
+type ClubRow = {
+  clubId: string
+  clubName: string
+  clubStatus: string
+  currency: string
+  contributionAmount: string
+  contributionFrequency: string
+  endDate: string | null
+  totalBudget: string
+  isClubMember: boolean
+  myShare: string
+  totalPaid: string
+  periodsPaid: number
+  itemCount: number
+  purchasedCount: number
+  distributedCount: number
+  contributions: ContributionInput[] | null
+}
+
+// $1 = userId, $2 = schemeId, $3 = clubId or NULL, $4 = settled statuses
+//
+// One round trip. The caller's membership, their aggregate, their ledger
+// and the club's item counts all ride on the same statement.
+//
+// myShare comes from the club's own contributionAmount (budget ÷ members),
+// not from multiplying a period amount, because adding an item after
+// activation changes the share without changing the period count.
+const CLUB_SQL = `
+SELECT
+  gc.id                          AS "clubId",
+  gc.name                        AS "clubName",
+  gc.status::text                AS "clubStatus",
+  gc.currency::text              AS currency,
+  gc."contributionAmount"        AS "contributionAmount",
+  gc."contributionFrequency"     AS "contributionFrequency",
+  gc."endDate"                   AS "endDate",
+  gc."totalBudget"               AS "totalBudget",
+
+  EXISTS (
+    SELECT 1 FROM "GroceryMember" gm
+     WHERE gm."clubId" = gc.id
+       AND gm."userId" = $1::text
+       AND gm."isActive" = true
+  )                              AS "isClubMember",
+
+  COALESCE((SELECT SUM(c."amountDue") FROM "GroceryContribution" c
+             WHERE c."clubId" = gc.id AND c."userId" = $1::text), 0)
+                                 AS "myShare",
+
+  COALESCE((SELECT SUM(c."amountPaid") FROM "GroceryContribution" c
+             WHERE c."clubId" = gc.id AND c."userId" = $1::text), 0)
+                                 AS "totalPaid",
+
+  COALESCE((SELECT count(*)::int FROM "GroceryContribution" c
+             WHERE c."clubId" = gc.id AND c."userId" = $1::text
+               AND c.status::text = ANY($4::text[])), 0)
+                                 AS "periodsPaid",
+
+  (SELECT count(*)::int FROM "GroceryItem" i WHERE i."clubId" = gc.id)
+                                 AS "itemCount",
+  (SELECT count(*)::int FROM "GroceryItem" i
+    WHERE i."clubId" = gc.id
+      AND i.status::text IN ('PURCHASED', 'DISTRIBUTED'))
+                                 AS "purchasedCount",
+  (SELECT count(*)::int FROM "GroceryItem" i
+    WHERE i."clubId" = gc.id AND i.status::text = 'DISTRIBUTED')
+                                 AS "distributedCount",
+
+  (SELECT COALESCE(json_agg(c ORDER BY c."monthNumber"), '[]'::json)
+     FROM (
+       SELECT gcon."periodNumber" AS "monthNumber",
+              gcon."dueDate", gcon."amountDue", gcon."amountPaid",
+              gcon.status::text   AS status,
+              gcon."paidAt",
+              gcon."paymentMethod"
+         FROM "GroceryContribution" gcon
+        WHERE gcon."clubId" = gc.id
+          AND gcon."userId" = $1::text
+        ORDER BY gcon."periodNumber"
+     ) c
+  )                              AS contributions
+
+FROM "GroceryClub" gc
+WHERE gc."schemeId" = $2::text
+  AND ($3::text IS NULL OR gc.id = $3::text)
+ORDER BY gc."createdAt"
+LIMIT 1
+`
+
 function num(v: unknown): number {
   const n = Number(v ?? 0)
   return Number.isFinite(n) ? n : 0
@@ -196,6 +308,7 @@ export async function GET(req: NextRequest) {
     const url = new URL(req.url)
     const schemeId = url.searchParams.get('schemeId')
     const poolId = url.searchParams.get('poolId')
+    const clubId = url.searchParams.get('clubId')
 
     if (!schemeId) {
       return NextResponse.json(
@@ -216,10 +329,114 @@ export async function GET(req: NextRequest) {
       return forbidden('You are not a member of this group')
     }
 
-    // Only savings has a reader today. Grocery and investment modules exist
-    // as tables but hold no rows; property, assets and loans keep their own
-    // ledgers and need their own readers. Saying so is better than
-    // rendering an empty book that looks like lost money.
+    // ── Grocery Club ──────────────────────────────────────────
+    if (scheme.schemeType === 'GROCERY_CLUB') {
+      if (scheme.clubCount === 0) {
+        return unavailable(
+          'NO_CLUB',
+          'No grocery club has been created for this scheme yet.'
+        )
+      }
+
+      // Several clubs and no choice made. Merging them would interleave two
+      // unrelated hampers into one ledger; picking one silently is the
+      // arbitrary-selection bug migration 12 existed to remove. Ask instead.
+      if (scheme.clubCount > 1 && !clubId) {
+        const clubs = await prisma.$queryRawUnsafe<
+          { id: string; name: string; status: string; endDate: string | null; mine: boolean }[]
+        >(
+          `SELECT gc.id, gc.name, gc.status::text AS status, gc."endDate",
+                  EXISTS (SELECT 1 FROM "GroceryMember" gm
+                           WHERE gm."clubId" = gc.id
+                             AND gm."userId" = $2::text
+                             AND gm."isActive" = true) AS mine
+             FROM "GroceryClub" gc
+            WHERE gc."schemeId" = $1::text
+            ORDER BY gc."createdAt" DESC`,
+          schemeId, claims.id
+        )
+        return unavailable(
+          'MULTIPLE_CLUBS',
+          'This group runs more than one grocery club. Choose which one to open.',
+          { clubs }
+        )
+      }
+
+      const clubRows = await prisma.$queryRawUnsafe<ClubRow[]>(
+        CLUB_SQL, claims.id, schemeId, clubId, GROCERY_SETTLED
+      )
+      const club = clubRows[0]
+
+      if (!club) {
+        return unavailable('NO_CLUB', 'That grocery club could not be found.')
+      }
+
+      if (!club.isClubMember) {
+        if (isStaff) {
+          return unavailable(
+            'NOT_ENROLLED_STAFF',
+            'A passbook belongs to a member. You are not in this club, so there is no passbook of yours to show.'
+          )
+        }
+        return unavailable(
+          'NOT_ENROLLED',
+          'You are not in this grocery club yet. Your group admin can add you.'
+        )
+      }
+
+      const groceryContribs = Array.isArray(club.contributions) ? club.contributions : []
+
+      const groceryScheme: SchemeInput = {
+        id: scheme.schemeId,
+        name: club.clubName || scheme.schemeName,
+        schemeType: scheme.schemeType,
+        groupName: scheme.groupName || '',
+        currency: club.currency || scheme.currency || 'USD',
+        isContributory: true,
+        isRotating: false,
+        contributionAmount: num(club.contributionAmount),
+        contributionFrequency: club.contributionFrequency,
+      }
+
+      const clubInput: GroceryClubInput = {
+        clubId: club.clubId,
+        clubName: club.clubName,
+        status: club.clubStatus,
+        totalBudget: num(club.totalBudget),
+        myShare: num(club.myShare),
+        itemCount: num(club.itemCount),
+        purchasedCount: num(club.purchasedCount),
+        distributedCount: num(club.distributedCount),
+        endDate: club.endDate,
+      }
+
+      const groceryView = buildGroceryView(
+        groceryScheme,
+        clubInput,
+        groceryContribs,
+        { position: null, totalPaid: num(club.totalPaid), monthsPaid: num(club.periodsPaid) },
+        new Date()
+      )
+
+      console.log('GET /api/schemes/passbook grocery db_ms=', Date.now() - t0)
+
+      return NextResponse.json(
+        {
+          success: true,
+          data: {
+            view: groceryView,
+            unavailable: null,
+            clubId: club.clubId,
+            hasLedger: groceryContribs.length > 0,
+          },
+        },
+        { headers: { 'Cache-Control': 'private, max-age=60' } }
+      )
+    }
+
+    // Savings has a reader; property, assets and loans keep their own
+    // ledgers and need their own. Saying so is better than rendering an
+    // empty book that looks like lost money.
     if (scheme.schemeType !== 'SAVINGS_POOL') {
       return unavailable(
         'READER_NOT_BUILT',

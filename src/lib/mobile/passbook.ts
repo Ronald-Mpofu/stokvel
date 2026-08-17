@@ -300,7 +300,15 @@ export function safeRows(v: PassbookView | null): PassbookRow[] {
 
 export function safeKpis(v: PassbookView | null): PassbookKpi[] {
   if (!v || !Array.isArray(v.kpis)) return []
+  // A KPI carries EITHER a pre-formatted value or a numeric amount. The
+  // first version of this guard demanded a string value, which silently
+  // dropped every money KPI — the exact case PassbookKpi documents. A KPI
+  // is valid when it has a label and at least one of the two.
   return v.kpis
-    .filter(k => k && typeof k.label === 'string' && typeof k.value === 'string')
+    .filter(k =>
+      k &&
+      typeof k.label === 'string' &&
+      (typeof k.value === 'string' || typeof k.amount === 'number')
+    )
     .slice(0, 3)
 }

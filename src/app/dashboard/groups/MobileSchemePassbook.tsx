@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/groups/MobileSchemePassbook.tsx
+// src/app/dashboard/groups/MobileSchemePassbook.tsx — v2
 //
 // Fetches one scheme's passbook and hands it to PassbookShell.
 //
@@ -17,6 +17,14 @@
 // The admin's "set up first cycle" action carried over from the old
 // NoCycleYet helper. An empty passbook is the state most admins meet first,
 // and it should offer the one thing that fixes it.
+//
+// CHOOSING A BOOK
+//   A scheme can hold several ledgers. WindfallScheme is one row per type,
+//   but a group may run two grocery clubs or two savings pools beneath it.
+//   When the route cannot tell which one the member means it returns the
+//   list rather than picking, and this screen renders it as a chooser. The
+//   choice is local state, so backing out of a book returns to the list
+//   rather than reloading the scheme.
 
 import { useState, useEffect, useCallback } from 'react'
 import { C, S, T, TOUCH, FONT_STACK } from '@/lib/mobile/tokens'
@@ -24,10 +32,34 @@ import { isPassbookView } from '@/lib/mobile/passbook'
 import type { PassbookView } from '@/lib/mobile/passbook'
 import PassbookShell from '@/components/mobile/PassbookShell'
 
+// One ledger the member could open. Grocery clubs and savings pools both
+// arrive in this shape; only the noun in the copy differs.
+type LedgerChoice = {
+  id: string
+  name: string
+  status?: string | null
+  endDate?: string | null
+  mine?: boolean
+}
+
 type Unavailable = {
   reason: string
   grammar?: string
   message: string
+  clubs?: LedgerChoice[]
+  pools?: LedgerChoice[]
+}
+
+// Reasons that mean "pick one", not "nothing to show".
+const CHOOSER_REASONS = new Set(['MULTIPLE_CLUBS', 'MULTIPLE_POOLS'])
+
+const CLUB_STATUS_LABEL: Record<string, string> = {
+  SETUP:       'Being set up',
+  ACTIVE:      'Collecting contributions',
+  PURCHASING:  'Buying under way',
+  DISTRIBUTED: 'Goods handed over',
+  CLOSED:      'Closed',
+  CANCELLED:   'Cancelled',
 }
 
 // Empty-ledger copy per grammar. A savings pool and a grocery club are
@@ -38,8 +70,8 @@ const EMPTY_COPY: Record<string, { admin: string; member: string }> = {
     member: 'Your passbook appears here once the group admin opens the first cycle.',
   },
   ACCUMULATING: {
-    admin: 'A cycle sets the contribution schedule and the collection date. Once it starts, everyone’s passbook fills in here.',
-    member: 'Your passbook appears here once the group admin opens the first cycle.',
+    admin: 'Add the grocery items, then activate the club. That builds the contribution schedule and everyone’s passbook fills in here.',
+    member: 'Your passbook appears here once the club has been activated.',
   },
 }
 
@@ -125,6 +157,132 @@ function Notice({
   )
 }
 
+// Module level, not defined in render — a chooser rebuilt on every state
+// change would remount its rows and lose the tap mid-press.
+function Chooser({
+  title, intro, choices, onPick, onBack,
+}: {
+  title: string
+  intro: string
+  choices: LedgerChoice[]
+  onPick: (id: string) => void
+  onBack: () => void
+}) {
+  return (
+    <div style={{ fontFamily: FONT_STACK, background: C.surfaceAlt, minHeight: '100vh' }}>
+      <div style={{ background: C.navy, padding: `14px ${S.screenX}px 18px` }}>
+        <button
+          onClick={onBack}
+          aria-label="Back"
+          style={{
+            width: TOUCH.icon,
+            height: TOUCH.icon,
+            marginLeft: -12,
+            background: 'transparent',
+            border: 'none',
+            color: 'rgba(255,255,255,0.8)',
+            fontSize: 22,
+            cursor: 'pointer',
+            fontFamily: FONT_STACK,
+          }}
+        >
+          ←
+        </button>
+        <div
+          style={{
+            color: '#fff',
+            fontSize: T.title.fontSize,
+            fontWeight: 500,
+            marginTop: 4,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+        >
+          {title}
+        </div>
+        <div style={{ color: 'rgba(255,255,255,0.55)', fontSize: T.caption.fontSize, marginTop: 4 }}>
+          {intro}
+        </div>
+      </div>
+
+      <div style={{ background: C.surface, marginTop: S.md }}>
+        {choices.map(c => {
+          // A club the member is not in has no passbook of theirs to show.
+          // Greyed and inert rather than hidden, so they can see it exists
+          // and ask to be added — the same rule the scheme hub follows.
+          const mine = c.mine !== false
+          const status = c.status ? CLUB_STATUS_LABEL[c.status] || c.status : ''
+          const detail = mine
+            ? status || 'Open your book'
+            : status ? `${status} · not enrolled` : 'Not enrolled'
+
+          const body = (
+            <>
+              <div style={{ flex: 1, minWidth: 0, textAlign: 'left' }}>
+                <div
+                  style={{
+                    fontSize: T.body.fontSize,
+                    fontWeight: 500,
+                    color: mine ? C.text : C.textMuted,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {c.name}
+                </div>
+                <div
+                  style={{
+                    fontSize: T.caption.fontSize,
+                    color: C.textFaint,
+                    marginTop: 2,
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {detail}
+                </div>
+              </div>
+              {mine ? (
+                <span style={{ fontSize: 18, color: C.textFaint, flexShrink: 0 }}>›</span>
+              ) : null}
+            </>
+          )
+
+          const shared = {
+            display: 'flex' as const,
+            alignItems: 'center' as const,
+            gap: S.md,
+            width: '100%',
+            minHeight: TOUCH.min,
+            padding: `13px ${S.screenX}px`,
+            borderTop: `1px solid ${C.border}`,
+            background: mine ? C.surface : C.surfaceAlt,
+            fontFamily: FONT_STACK,
+          }
+
+          if (!mine) {
+            return <div key={c.id} style={shared}>{body}</div>
+          }
+
+          return (
+            <button
+              key={c.id}
+              onClick={() => onPick(c.id)}
+              aria-label={`Open ${c.name}`}
+              style={{ ...shared, border: 'none', borderTop: `1px solid ${C.border}`, cursor: 'pointer' }}
+            >
+              {body}
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 type Props = {
   schemeId: string
   schemeName: string
@@ -143,14 +301,23 @@ export default function MobileSchemePassbook({
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Which ledger the member picked from a chooser, if any. Local state, so
+  // backing out returns to the list rather than refetching the scheme.
+  const [ledgerId, setLedgerId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     setUnavailable(null)
     try {
+      // The route accepts clubId for grocery and poolId for savings. Both
+      // are sent when a choice has been made; the route reads whichever
+      // matches the scheme type and ignores the other.
+      const pick = ledgerId
+        ? `&clubId=${encodeURIComponent(ledgerId)}&poolId=${encodeURIComponent(ledgerId)}`
+        : ''
       const res = await fetch(
-        `/api/schemes/passbook?schemeId=${encodeURIComponent(schemeId)}`,
+        `/api/schemes/passbook?schemeId=${encodeURIComponent(schemeId)}${pick}`,
         { cache: 'no-store' }
       )
       const json = await res.json()
@@ -173,18 +340,41 @@ export default function MobileSchemePassbook({
     } finally {
       setLoading(false)
     }
-  }, [schemeId])
+  }, [schemeId, ledgerId])
 
   useEffect(() => {
     load()
   }, [load])
 
+  // Backing out of a chosen book returns to the chooser, not to the hub.
+  const backFromBook = useCallback(() => {
+    if (ledgerId) {
+      setLedgerId(null)
+      return
+    }
+    onBack()
+  }, [ledgerId, onBack])
+
   if (error) {
-    return <Notice title={schemeName} body={error} onBack={onBack} />
+    return <Notice title={schemeName} body={error} onBack={backFromBook} />
   }
 
   if (unavailable) {
-    return <Notice title={schemeName} body={unavailable.message} onBack={onBack} />
+    const choices = unavailable.clubs || unavailable.pools || []
+    if (CHOOSER_REASONS.has(unavailable.reason) && choices.length > 0) {
+      return (
+        <Chooser
+          title={schemeName}
+          intro={unavailable.reason === 'MULTIPLE_CLUBS'
+            ? `${choices.length} clubs · choose one to open`
+            : `${choices.length} pools · choose one to open`}
+          choices={choices}
+          onPick={setLedgerId}
+          onBack={onBack}
+        />
+      )
+    }
+    return <Notice title={schemeName} body={unavailable.message} onBack={backFromBook} />
   }
 
   const copy = (view && EMPTY_COPY[view.scheme.grammar]) || EMPTY_FALLBACK
@@ -194,7 +384,7 @@ export default function MobileSchemePassbook({
     <PassbookShell
       view={view}
       loading={loading}
-      onBack={onBack}
+      onBack={backFromBook}
       onAction={() => {
         if (view && onPay) onPay(view)
       }}
