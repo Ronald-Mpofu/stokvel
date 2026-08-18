@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/groups/MobileSchemePassbook.tsx — v2
+// src/app/dashboard/groups/MobileSchemePassbook.tsx — v3
 //
 // Fetches one scheme's passbook and hands it to PassbookShell.
 //
@@ -25,12 +25,18 @@
 //   list rather than picking, and this screen renders it as a chooser. The
 //   choice is local state, so backing out of a book returns to the list
 //   rather than reloading the scheme.
+//
+//   The list is a permanent level, not a tie-breaker — it shows even for a
+//   single ledger, because it is where "add another" lives. An admin
+//   already inside the one club needs somewhere to stand to create a
+//   second, and the scheme card cannot offer that: they are enrolled.
 
 import { useState, useEffect, useCallback } from 'react'
 import { C, S, T, TOUCH, FONT_STACK } from '@/lib/mobile/tokens'
 import { isPassbookView } from '@/lib/mobile/passbook'
 import type { PassbookView } from '@/lib/mobile/passbook'
 import PassbookShell from '@/components/mobile/PassbookShell'
+import MobileGroceryClubSheet from './MobileGroceryClubSheet'
 
 // One ledger the member could open. Grocery clubs and savings pools both
 // arrive in this shape; only the noun in the copy differs.
@@ -48,6 +54,11 @@ type Unavailable = {
   message: string
   clubs?: LedgerChoice[]
   pools?: LedgerChoice[]
+  // Whether the caller may add another ledger under this scheme. Resolved
+  // server-side by the same rule the hub uses.
+  canManage?: boolean
+  schemeType?: string
+  groupId?: string
 }
 
 // Reasons that mean "pick one", not "nothing to show".
@@ -160,13 +171,16 @@ function Notice({
 // Module level, not defined in render — a chooser rebuilt on every state
 // change would remount its rows and lose the tap mid-press.
 function Chooser({
-  title, intro, choices, onPick, onBack,
+  title, intro, choices, onPick, onBack, createLabel, onCreate,
 }: {
   title: string
   intro: string
   choices: LedgerChoice[]
   onPick: (id: string) => void
   onBack: () => void
+  // Absent for members, and for scheme types with no mobile create sheet.
+  createLabel?: string | null
+  onCreate?: () => void
 }) {
   return (
     <div style={{ fontFamily: FONT_STACK, background: C.surfaceAlt, minHeight: '100vh' }}>
@@ -278,9 +292,56 @@ function Chooser({
             </button>
           )
         })}
+
+        {createLabel && onCreate ? (
+          <button
+            onClick={onCreate}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: S.md,
+              width: '100%',
+              minHeight: TOUCH.min,
+              padding: `13px ${S.screenX}px`,
+              background: C.surface,
+              border: 'none',
+              borderTop: `1px solid ${C.border}`,
+              cursor: 'pointer',
+              fontFamily: FONT_STACK,
+              textAlign: 'left',
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 36,
+                height: 36,
+                borderRadius: 9,
+                flexShrink: 0,
+                background: C.tealBg,
+                color: C.teal,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: 20,
+              }}
+            >
+              +
+            </span>
+            <span style={{ flex: 1, fontSize: T.body.fontSize, fontWeight: 500, color: C.teal }}>
+              {createLabel}
+            </span>
+          </button>
+        ) : null}
       </div>
     </div>
   )
+}
+
+// Scheme types with a mobile create sheet. A type absent from here shows
+// its list without a create action rather than a button that opens nothing.
+const CREATE_LABEL: Record<string, string> = {
+  GROCERY_CLUB: 'New grocery club',
 }
 
 type Props = {
@@ -304,6 +365,8 @@ export default function MobileSchemePassbook({
   // Which ledger the member picked from a chooser, if any. Local state, so
   // backing out returns to the list rather than refetching the scheme.
   const [ledgerId, setLedgerId] = useState<string | null>(null)
+  const [showCreate, setShowCreate] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -355,23 +418,50 @@ export default function MobileSchemePassbook({
     onBack()
   }, [ledgerId, onBack])
 
+  const afterCreate = useCallback((message: string) => {
+    setShowCreate(false)
+    setNotice(message)
+    // Reload rather than patch: the new club changes the list, and the
+    // route decides what each row now reads.
+    load()
+  }, [load])
+
   if (error) {
     return <Notice title={schemeName} body={error} onBack={backFromBook} />
   }
 
   if (unavailable) {
     const choices = unavailable.clubs || unavailable.pools || []
-    if (CHOOSER_REASONS.has(unavailable.reason) && choices.length > 0) {
+    const createLabel = unavailable.canManage && unavailable.schemeType
+      ? CREATE_LABEL[unavailable.schemeType] || null
+      : null
+
+    // The list shows whenever the route offered one, or whenever a manager
+    // could start the first ledger — an empty scheme with a create action
+    // is still a list, just an empty one.
+    if (CHOOSER_REASONS.has(unavailable.reason) && (choices.length > 0 || createLabel)) {
+      const noun = unavailable.reason === 'MULTIPLE_CLUBS' ? 'club' : 'pool'
       return (
-        <Chooser
-          title={schemeName}
-          intro={unavailable.reason === 'MULTIPLE_CLUBS'
-            ? `${choices.length} clubs · choose one to open`
-            : `${choices.length} pools · choose one to open`}
-          choices={choices}
-          onPick={setLedgerId}
-          onBack={onBack}
-        />
+        <>
+          {showCreate && unavailable.groupId ? (
+            <MobileGroceryClubSheet
+              groupId={unavailable.groupId}
+              onClose={() => setShowCreate(false)}
+              onCreated={afterCreate}
+            />
+          ) : null}
+          <Chooser
+            title={schemeName}
+            intro={notice || (choices.length === 0
+              ? `No ${noun}s yet`
+              : `${choices.length} ${noun}${choices.length === 1 ? '' : 's'}`)}
+            choices={choices}
+            onPick={setLedgerId}
+            onBack={onBack}
+            createLabel={createLabel}
+            onCreate={() => setShowCreate(true)}
+          />
+        </>
       )
     }
     return <Notice title={schemeName} body={unavailable.message} onBack={backFromBook} />

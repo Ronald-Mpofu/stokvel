@@ -1,10 +1,23 @@
-// src/app/api/schemes/passbook/route.ts — v3
+// src/app/api/schemes/passbook/route.ts — v4
 //
 // One member's passbook for ONE windfall scheme.
 //
 // GET /api/schemes/passbook?schemeId=xxx[&poolId=yyy][&clubId=zzz]
 //
 // WHAT CHANGED IN v3
+//
+// WHAT CHANGED IN v4
+//
+//   The instance list is now a PERMANENT level, not a tie-breaker. v3
+//   returned it only when a scheme held more than one ledger; a group with
+//   a single grocery club went straight to the book, which left an admin
+//   with nowhere to stand to create the second one. The list is where
+//   "add another" lives, so it has to exist even when it holds one row.
+//
+//   It also carries canManage, so that list can offer the create action.
+//   The hub no longer does — an admin already inside December Hampers is
+//   "enrolled", and the old hub gate hid create from exactly the person
+//   most likely to want it.
 //
 //   Grocery Club reads its own module — GroceryClub, GroceryContribution,
 //   GroceryMember, GroceryItem — the same way savings reads SavingsPool.
@@ -79,6 +92,7 @@ type SchemeRow = {
   groupName: string
   currency: string
   isGroupMember: boolean
+  isGroupManager: boolean
   poolCount: number
   clubCount: number
 }
@@ -115,6 +129,16 @@ SELECT
        AND gm."userId"  = $1::text
        AND gm.status <> 'EXITED'::"MemberStatus"
   )                        AS "isGroupMember",
+  (
+    EXISTS (
+      SELECT 1 FROM "GroupMember" gm
+       WHERE gm."groupId" = ws."groupId"
+         AND gm."userId"  = $1::text
+         AND gm.status <> 'EXITED'::"MemberStatus"
+         AND gm.role IN ('GROUP_ADMIN'::"UserRole", 'TREASURER'::"UserRole")
+    )
+    OR g."adminUserId" = $1::text
+  )                        AS "isGroupManager",
   (SELECT count(*)::int FROM "SavingsPool" sp
     WHERE sp."schemeId" = ws.id)  AS "poolCount",
   (SELECT count(*)::int FROM "GroceryClub" gc
@@ -325,23 +349,20 @@ export async function GET(req: NextRequest) {
     }
 
     const isStaff = SUPER_ROLES.includes(claims.role)
+    // Same rule as /api/groups/schemes, so the two screens never disagree
+    // about who may act. Display only — the write endpoints re-authorise.
+    const canManage = Boolean(scheme.isGroupManager) || isStaff
     if (!scheme.isGroupMember && !isStaff) {
       return forbidden('You are not a member of this group')
     }
 
     // ── Grocery Club ──────────────────────────────────────────
     if (scheme.schemeType === 'GROCERY_CLUB') {
-      if (scheme.clubCount === 0) {
-        return unavailable(
-          'NO_CLUB',
-          'No grocery club has been created for this scheme yet.'
-        )
-      }
-
-      // Several clubs and no choice made. Merging them would interleave two
-      // unrelated hampers into one ledger; picking one silently is the
-      // arbitrary-selection bug migration 12 existed to remove. Ask instead.
-      if (scheme.clubCount > 1 && !clubId) {
+      // The list always shows when no club is chosen — even for a single
+      // club, and even for none. It is the level that owns "add another",
+      // so skipping it would strand an admin with nowhere to create from.
+      // An empty list plus a create action is the correct first screen.
+      if (!clubId) {
         const clubs = await prisma.$queryRawUnsafe<
           { id: string; name: string; status: string; endDate: string | null; mine: boolean }[]
         >(
@@ -357,8 +378,17 @@ export async function GET(req: NextRequest) {
         )
         return unavailable(
           'MULTIPLE_CLUBS',
-          'This group runs more than one grocery club. Choose which one to open.',
-          { clubs }
+          clubs.length === 1
+            ? 'Open the club to see your book.'
+            : 'This group runs more than one grocery club. Choose which one to open.',
+          { clubs, canManage, schemeType: scheme.schemeType, groupId: scheme.groupId }
+        )
+      }
+
+      if (scheme.clubCount === 0) {
+        return unavailable(
+          'NO_CLUB',
+          'No grocery club has been created for this scheme yet.'
         )
       }
 
@@ -445,25 +475,36 @@ export async function GET(req: NextRequest) {
       )
     }
 
+    // Same as grocery: the list is a permanent level, shown even when it
+    // holds one pool or none.
+    if (!poolId) {
+      const pools = await prisma.$queryRawUnsafe<
+        { id: string; name: string; status: string; mine: boolean }[]
+      >(
+        `SELECT sp.id, sp.name, sp.status::text AS status,
+                EXISTS (SELECT 1 FROM "SavingsPoolMember" m
+                         WHERE m."poolId" = sp.id
+                           AND m."userId" = $2::text
+                           AND m."isActive" = true
+                           AND m."exitedAt" IS NULL) AS mine
+           FROM "SavingsPool" sp
+          WHERE sp."schemeId" = $1::text
+          ORDER BY sp."createdAt"`,
+        schemeId, claims.id
+      )
+      return unavailable(
+        'MULTIPLE_POOLS',
+        pools.length === 1
+          ? 'Open the pool to see your book.'
+          : 'This group runs more than one savings pool. Choose which one to open.',
+        { pools, canManage, schemeType: scheme.schemeType, groupId: scheme.groupId }
+      )
+    }
+
     if (scheme.poolCount === 0) {
       return unavailable(
         'NO_POOL',
         'No savings pool has been created for this scheme yet.'
-      )
-    }
-
-    // More than one pool and no choice made. Picking one would be the
-    // arbitrary-selection bug this whole migration existed to remove, so
-    // the caller is asked instead.
-    if (scheme.poolCount > 1 && !poolId) {
-      const pools = await prisma.$queryRawUnsafe<{ id: string; name: string }[]>(
-        `SELECT id, name FROM "SavingsPool" WHERE "schemeId" = $1::text ORDER BY "createdAt"`,
-        schemeId
-      )
-      return unavailable(
-        'MULTIPLE_POOLS',
-        'This group runs more than one savings pool. Choose which one to open.',
-        { pools }
       )
     }
 

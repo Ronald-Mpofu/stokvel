@@ -2130,7 +2130,14 @@ export default function GroupsPage() {
         canManage={selectedGroup.adminUserId === currentUserId}
         onBack={() => { setView('list'); setSelectedGroup(null) }}
         onInvite={() => { setInviteGroupId(selectedGroup.id); setShowInviteModal(true) }}
-        onOpenScheme={() => { setDetailTab('schemes') }}
+        // The passbook's Pay button lands here. This used to call
+        // setDetailTab('schemes'), which sets DESKTOP tab state — and the
+        // mobile branch returns above, so that JSX never renders and the
+        // button did nothing at all. Until a mobile payment flow exists,
+        // say so rather than swallowing the tap.
+        onOpenScheme={() => {
+          showToast('Recording a payment from your phone is coming soon.', 'error')
+        }}
       />
     )
   }

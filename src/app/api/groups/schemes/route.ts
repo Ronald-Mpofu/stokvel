@@ -190,11 +190,6 @@ WHERE g.id = $2::text
   AND g."deletedAt" IS NULL
 `
 
-// Scheme types with a mobile create sheet built. A card only offers the
-// create action when its type appears here, so an admin is never shown a
-// button that opens nothing. Add a type as its sheet ships.
-const MOBILE_CREATE_READY = new Set(['GROCERY_CLUB'])
-
 const MONTHS_SHORT = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
@@ -288,13 +283,17 @@ export async function GET(req: NextRequest) {
 
       switch (state) {
         case 'NOT_ENROLLED':
-          subtitle = 'Not enrolled'
+          subtitle = canManage ? 'No ledger yet' : 'Not enrolled'
           // "Ask your admin" is addressed to a member. Shown to the person
           // who IS the admin it is a dead end — they are the one who would
           // be asked. Managers get the action instead.
-          trailing = canManage
-            ? (MOBILE_CREATE_READY.has(s.schemeType) ? 'Set up' : 'Not set up')
-            : 'Ask your admin'
+          // A card now opens the scheme's list of clubs or pools, so a
+          // not-enrolled member is no longer at a dead end: they can see
+          // what exists and ask to be added. "Ask your admin" shown to the
+          // admin was the original bug; managers get the neutral wording
+          // and the create action lives on the list itself, where being
+          // enrolled in one club does not hide it.
+          trailing = canManage ? 'Not set up' : 'Not enrolled'
           break
         case 'NOT_AVAILABLE':
           subtitle = grammar === 'REPAYMENT' ? 'Repayment book' : 'Stake statement'
@@ -331,14 +330,11 @@ export async function GET(req: NextRequest) {
         enrolled: s.enrolled,
         // Only a scheme with a readable book is worth opening. The hub
         // greys the rest rather than letting a member tap into a dead end.
-        openable: state === 'ACTIVE' || state === 'NOT_STARTED',
-        // The admin affordance for this card, or null. CREATE means the
-        // group has no instance of this scheme yet — or the manager is not
-        // in the one it has — and the mobile sheet can make one.
-        adminAction:
-          canManage && !s.enrolled && MOBILE_CREATE_READY.has(s.schemeType)
-            ? 'CREATE'
-            : null,
+        // A card opens the scheme's ledger list, which is a real screen for
+        // every state except a grammar with no reader. NOT_ENROLLED is
+        // openable now: the list shows what exists, greys what is not
+        // theirs, and carries the create action for managers.
+        openable: state !== 'NOT_AVAILABLE',
         subtitle,
         trailing,
         // Terms as numbers, appended to the subtitle by the card. Sent for
