@@ -30,6 +30,10 @@
 //
 // ADMIN SECTIONS (v2)
 //
+// v2.1: the activation block moved out of the footer into the hub's banner
+// slot, so it sits directly above "Your schemes" instead of below the
+// member list.
+//
 // A group admin can now edit the group, invite members and activate the
 // group from a phone. Members see the Members list and the scheme cards;
 // Settings and the activation banner are admin-only.
@@ -333,10 +337,6 @@ export default function MobileGroupDetail({
   // activation are the admin-only parts.
   const adminSection = canManage ? (
     <div>
-      {isDraft && onActivate ? (
-        <ActivateBlock onActivate={onActivate} activating={activating} />
-      ) : null}
-
       <div style={{ background: C.surface, marginTop: S.md }}>
         <SectionHeader
           label="Manage group"
@@ -368,6 +368,14 @@ export default function MobileGroupDetail({
       {adminSection}
     </div>
   )
+
+  // A draft group cannot take contributions, so the instruction that fixes
+  // that belongs ABOVE the scheme cards rather than below the member list.
+  // An admin should not have to scroll past six schemes to discover why
+  // none of them work yet.
+  const banner = canManage && isDraft && onActivate ? (
+    <ActivateBlock onActivate={onActivate} activating={activating} />
+  ) : null
 
   // A group with no id cannot be loaded. Say so rather than rendering a
   // hub that will fail its own fetch.
@@ -418,6 +426,7 @@ export default function MobileGroupDetail({
         onBack={onBack}
         onOpenScheme={setOpenPassbook}
         statusPill={<StatusPill status={group?.status || 'DRAFT'} />}
+        banner={banner}
         footer={footer}
       />
     </>

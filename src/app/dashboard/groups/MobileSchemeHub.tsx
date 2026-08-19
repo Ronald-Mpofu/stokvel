@@ -293,6 +293,12 @@ type Props = {
   // Rendered beside the group name. The caller owns the group's status
   // because status is a group fact, not a scheme fact.
   statusPill?: ReactNode
+  // Rendered between the navy header and the scheme list. For anything the
+  // member must act on BEFORE the schemes make sense — a draft group that
+  // has not been activated, for instance. Deliberately not part of footer:
+  // an instruction sitting below six scheme cards is an instruction nobody
+  // reads on a phone.
+  banner?: ReactNode
   // Rendered below the scheme list. Members, settings, anything else the
   // group screen still carries.
   footer?: ReactNode
@@ -303,7 +309,7 @@ type Props = {
 }
 
 export default function MobileSchemeHub({
-  groupId, onOpenScheme, onBack, statusPill, footer, embedded,
+  groupId, onOpenScheme, onBack, statusPill, banner, footer, embedded,
 }: Props) {
   const [data, setData] = useState<HubData | null>(null)
   const [loading, setLoading] = useState(true)
@@ -441,6 +447,8 @@ export default function MobileSchemeHub({
           </div>
         ) : null}
       </div>
+
+      {banner}
 
       <div style={{ background: C.surface, marginTop: S.md }}>
         <div style={{ display: 'flex', alignItems: 'baseline', padding: `${S.md}px ${S.screenX}px 4px` }}>
