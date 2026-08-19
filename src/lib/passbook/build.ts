@@ -444,7 +444,7 @@ export function buildAccumulatingView(
       left: queue ? 'Your queue book' : 'Your hamper book',
       right: `${me.monthsPaid} of ${monthsTotal} paid`,
     },
-    rows: ledger,
+    rows: [...rows, goal],
     action: nextDue
       ? {
           kind: 'PAY',
