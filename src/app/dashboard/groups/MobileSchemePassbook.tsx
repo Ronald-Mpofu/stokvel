@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/groups/MobileSchemePassbook.tsx — v3
+// src/app/dashboard/groups/MobileSchemePassbook.tsx — v4
 //
 // Fetches one scheme's passbook and hands it to PassbookShell.
 //
@@ -37,6 +37,7 @@ import { isPassbookView } from '@/lib/mobile/passbook'
 import type { PassbookView } from '@/lib/mobile/passbook'
 import PassbookShell from '@/components/mobile/PassbookShell'
 import MobileGroceryClubSheet from './MobileGroceryClubSheet'
+import MobileGroceryClubManage from './MobileGroceryClubManage'
 
 // One ledger the member could open. Grocery clubs and savings pools both
 // arrive in this shape; only the noun in the copy differs.
@@ -171,12 +172,15 @@ function Notice({
 // Module level, not defined in render — a chooser rebuilt on every state
 // change would remount its rows and lose the tap mid-press.
 function Chooser({
-  title, intro, choices, onPick, onBack, createLabel, onCreate,
+  title, intro, choices, onPick, onManage, onBack, createLabel, onCreate,
 }: {
   title: string
   intro: string
   choices: LedgerChoice[]
   onPick: (id: string) => void
+  // Set only for managers. Turns a club the caller is not in from an inert
+  // row into a way to reach its setup screen.
+  onManage?: (id: string) => void
   onBack: () => void
   // Absent for members, and for scheme types with no mobile create sheet.
   createLabel?: string | null
@@ -226,10 +230,13 @@ function Chooser({
           // Greyed and inert rather than hidden, so they can see it exists
           // and ask to be added — the same rule the scheme hub follows.
           const mine = c.mine !== false
+          const manageable = !mine && Boolean(onManage)
           const status = c.status ? CLUB_STATUS_LABEL[c.status] || c.status : ''
           const detail = mine
             ? status || 'Open your book'
-            : status ? `${status} · not enrolled` : 'Not enrolled'
+            : manageable
+              ? status ? `${status} · set up` : 'Set up'
+              : status ? `${status} · not enrolled` : 'Not enrolled'
 
           const body = (
             <>
@@ -259,7 +266,7 @@ function Chooser({
                   {detail}
                 </div>
               </div>
-              {mine ? (
+              {mine || manageable ? (
                 <span style={{ fontSize: 18, color: C.textFaint, flexShrink: 0 }}>›</span>
               ) : null}
             </>
@@ -277,19 +284,62 @@ function Chooser({
             fontFamily: FONT_STACK,
           }
 
-          if (!mine) {
+          if (!mine && !manageable) {
             return <div key={c.id} style={shared}>{body}</div>
           }
 
-          return (
+          // A manager in the club needs BOTH: the row opens their book, the
+          // gear opens setup. Nested buttons are invalid HTML, so the two
+          // sit side by side in a wrapper rather than one inside the other.
+          const rowButton = (
             <button
-              key={c.id}
-              onClick={() => onPick(c.id)}
-              aria-label={`Open ${c.name}`}
-              style={{ ...shared, border: 'none', borderTop: `1px solid ${C.border}`, cursor: 'pointer' }}
+              onClick={() => (mine ? onPick(c.id) : onManage!(c.id))}
+              aria-label={mine ? `Open ${c.name}` : `Set up ${c.name}`}
+              style={{
+                ...shared,
+                borderTop: 'none',
+                border: 'none',
+                cursor: 'pointer',
+                paddingRight: mine && onManage ? S.sm : S.screenX,
+              }}
             >
               {body}
             </button>
+          )
+
+          if (!(mine && onManage)) {
+            return (
+              <div key={c.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                {rowButton}
+              </div>
+            )
+          }
+
+          return (
+            <div
+              key={c.id}
+              style={{ display: 'flex', alignItems: 'center', borderTop: `1px solid ${C.border}` }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>{rowButton}</div>
+              <button
+                onClick={() => onManage(c.id)}
+                aria-label={`Set up ${c.name}`}
+                style={{
+                  width: TOUCH.icon,
+                  height: TOUCH.icon,
+                  marginRight: S.sm,
+                  flexShrink: 0,
+                  background: 'transparent',
+                  border: 'none',
+                  color: C.teal,
+                  fontSize: 17,
+                  cursor: 'pointer',
+                  fontFamily: FONT_STACK,
+                }}
+              >
+                ⚙
+              </button>
+            </div>
           )
         })}
 
@@ -366,6 +416,10 @@ export default function MobileSchemePassbook({
   // backing out returns to the list rather than refetching the scheme.
   const [ledgerId, setLedgerId] = useState<string | null>(null)
   const [showCreate, setShowCreate] = useState(false)
+  // Which ledger is being managed, if any. A manager reaches setup either
+  // from the Manage action on their own book, or straight from the list
+  // when the club is not theirs — there is no passbook of theirs to open.
+  const [manageId, setManageId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
   const load = useCallback(async () => {
@@ -426,6 +480,16 @@ export default function MobileSchemePassbook({
     load()
   }, [load])
 
+  if (manageId) {
+    return (
+      <MobileGroceryClubManage
+        clubId={manageId}
+        onBack={() => { setManageId(null); load() }}
+        onChanged={load}
+      />
+    )
+  }
+
   if (error) {
     return <Notice title={schemeName} body={error} onBack={backFromBook} />
   }
@@ -457,6 +521,13 @@ export default function MobileSchemePassbook({
               : `${choices.length} ${noun}${choices.length === 1 ? '' : 's'}`)}
             choices={choices}
             onPick={setLedgerId}
+            // A manager opening a club they are not in has no passbook of
+            // their own to show, so the row goes to setup instead of a
+            // dead end. Without this the greying rule locks an admin out of
+            // the very club they created for other people.
+            onManage={unavailable.canManage && unavailable.schemeType === 'GROCERY_CLUB'
+              ? setManageId
+              : undefined}
             onBack={onBack}
             createLabel={createLabel}
             onCreate={() => setShowCreate(true)}
