@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.2
+// src/app/api/grocery/route.ts — v1.4
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -9,6 +9,21 @@
 //       member of every group. Run sql/13-grocery-scheme-link.sql first to
 //       repair rows created before this version. Adds enrolAllMembers so the
 //       mobile create sheet does not need a roster fetch.
+// v1.3: handleAssignItem stopped trusting the client's "assignedToName".
+// v1.4: DISBURSEMENT MODEL. The club holds no pooled balance. Contributions
+//       are collected and handed out as purchase advances to named members,
+//       who buy the goods and keep them until distribution.
+//         - "GroceryAssignment" (item x member x qty x advance x spend) is now
+//           the source of truth. "GroceryItem"."assignedToId" is a mirror,
+//           kept only so existing reads keep working; a line item may be split
+//           across several members and that column cannot express it.
+//         - ACQUIT_ASSIGNMENT records actual spend and writes ONE signed
+//           "GroceryCarryForward" row, then applies it to the member's earliest
+//           unpaid contribution. Sign is NEGATIVE in both variance directions
+//           (both reduce the new cash brought); "reason" tells them apart.
+//         - Advances outstanding may never exceed cash actually collected.
+//           Explicit 409, never a silent overdraw.
+//       Requires sql/14-grocery-assignments.sql.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -160,7 +175,16 @@ export async function GET(req: NextRequest) {
     if (clubId) {
       const clubs = await sql(
         `SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
-          u."fullName" as "coordinatorName"
+          u."fullName" as "coordinatorName",
+          COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
+                     WHERE ga."clubId"=gc.id AND ga.status IN ('ASSIGNED','PURCHASED')),0) AS "advancedOut",
+          COALESCE((SELECT SUM(ga2."advanceAmount") FROM "GroceryAssignment" ga2
+                     WHERE ga2."clubId"=gc.id AND ga2.status IN ('ASSIGNED','PURCHASED')
+                       AND ga2."actualSpent" IS NULL),0)                                   AS "unacquitted",
+          COALESCE((SELECT COUNT(*) FROM "GroceryAssignment" ga3
+                     WHERE ga3."clubId"=gc.id AND ga3.status IN ('ASSIGNED','PURCHASED')),0) AS "openAssignments",
+          COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                     WHERE cf."clubId"=gc.id AND cf."appliedPeriod" IS NULL),0)            AS "carryForwardNet"
          FROM "GroceryClub" gc
          JOIN "Group" g ON g.id = gc."groupId"
          LEFT JOIN "User" u ON u.id = gc."coordinatorId"
@@ -169,11 +193,27 @@ export async function GET(req: NextRequest) {
       if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
       const club = clubs[0]
 
-      const [items, members, contribs] = await Promise.all([
-        sql(`SELECT gi.*, u."fullName" as "assignedToName", pu."fullName" as "purchasedByName"
+      const [items, members, contribs, assignments] = await Promise.all([
+        sql(`SELECT gi.*, u."fullName" as "assignedToLive", pu."fullName" as "purchasedByLive",
+                    COALESCE(a."assignmentCount",0)   as "assignmentCount",
+                    COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
+                    COALESCE(a."advanceTotal",0)      as "advanceTotal",
+                    COALESCE(a."spentTotal",0)        as "spentTotal",
+                    COALESCE(a."openCount",0)         as "openAssignments"
              FROM "GroceryItem" gi
              LEFT JOIN "User" u ON u.id = gi."assignedToId"
              LEFT JOIN "User" pu ON pu.id = gi."purchasedById"
+             LEFT JOIN (
+               SELECT "itemId",
+                      COUNT(*)                                              as "assignmentCount",
+                      SUM("qtyAssigned")                                    as "qtyAssigned",
+                      SUM("advanceAmount")                                  as "advanceTotal",
+                      SUM(COALESCE("actualSpent",0))                        as "spentTotal",
+                      COUNT(*) FILTER (WHERE status IN ('ASSIGNED','PURCHASED')) as "openCount"
+                 FROM "GroceryAssignment"
+                WHERE status <> 'CANCELLED'
+                GROUP BY "itemId"
+             ) a ON a."itemId" = gi.id
              WHERE gi."clubId" = $1 ORDER BY gi."createdAt" ASC`, [clubId]),
         sql(`SELECT gm.*, u."fullName", u.email, u.tier
              FROM "GroceryMember" gm
@@ -185,6 +225,12 @@ export async function GET(req: NextRequest) {
              JOIN "User" u ON u.id = gc2."userId"
              WHERE gc2."clubId" = $1
              ORDER BY gc2."periodNumber" ASC, gc2."userId" ASC`, [clubId]),
+        sql(`SELECT ga.*, u."fullName" as "memberName", gi.name as "itemName", gi.unit
+             FROM "GroceryAssignment" ga
+             JOIN "User" u        ON u.id  = ga."userId"
+             JOIN "GroceryItem" gi ON gi.id = ga."itemId"
+             WHERE ga."clubId" = $1 AND ga.status <> 'CANCELLED'
+             ORDER BY gi.name ASC, u."fullName" ASC`, [clubId]),
       ])
 
       const now = new Date()
@@ -196,10 +242,31 @@ export async function GET(req: NextRequest) {
           totalContributed: Number(m.totalContributed), sharePercentage: Number(m.sharePercentage),
           isActive: m.isActive, joinedAt: m.joinedAt,
         })),
+        assignments: assignments.map((a: any) => ({
+          id: a.id, itemId: a.itemId, itemName: a.itemName, unit: a.unit,
+          userId: a.userId, memberName: a.memberName,
+          qtyAssigned:   Number(a.qtyAssigned),
+          advanceAmount: Number(a.advanceAmount),
+          actualSpent:   a.actualSpent != null ? Number(a.actualSpent) : null,
+          // Reported as advance - spent, so a positive figure reads as
+          // "change held" and a negative one as "out of pocket". The ledger
+          // row itself is negative either way; this is the human view.
+          variance:      a.actualSpent != null
+            ? Number((Number(a.advanceAmount) - Number(a.actualSpent)).toFixed(4)) : null,
+          status: a.status, receiptUrl: a.receiptUrl,
+          purchasedAt: a.purchasedAt, acquittedAt: a.acquittedAt, notes: a.notes,
+        })),
         contributions: contribs.map(c => ({
           id: c.id, userId: c.userId, memberName: c.memberName,
           periodNumber: Number(c.periodNumber), dueDate: c.dueDate,
           amountDue: Number(c.amountDue), amountPaid: Number(c.amountPaid),
+          // Base obligation and adjustment are reported separately. Collapsing
+          // them would make a member holding change look like they contributed
+          // less than they actually delivered.
+          carryAdjustment: Number(c.carryAdjustment || 0),
+          amountPayable:   c.amountPayable != null
+            ? Number(c.amountPayable)
+            : Number(c.amountDue) + Number(c.carryAdjustment || 0),
           status: c.status, paidAt: c.paidAt,
           isOverdue: c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now,
         })),
@@ -249,6 +316,8 @@ export async function POST(req: NextRequest) {
     if (body.action === 'UPDATE_ITEM')       return handleUpdateItem(body)
     if (body.action === 'DELETE_ITEM')       return handleDeleteItem(body)
     if (body.action === 'ASSIGN_ITEM')       return handleAssignItem(body)
+    if (body.action === 'CANCEL_ASSIGNMENT') return handleCancelAssignment(body)
+    if (body.action === 'ACQUIT_ASSIGNMENT') return handleAcquitAssignment(body)
     if (body.action === 'MARK_PURCHASED')    return handleMarkPurchased(body)
     if (body.action === 'MARK_DISTRIBUTED')  return handleMarkDistributed(body)
     if (body.action === 'PAY_CONTRIBUTION')  return handlePayContrib(body)
@@ -558,13 +627,340 @@ async function handleDeleteItem(body: any): Promise<NextResponse> {
 }
 
 // ── Item status transitions ───────────────────────────────────
-async function handleAssignItem(body: any): Promise<NextResponse> {
-  const { itemId, assignedToId, assignedToName } = body
-  await exec(
-    `UPDATE "GroceryItem" SET status='ASSIGNED'::"GroceryItemStatus","assignedToId"=$1,"assignedToName"=$2,"updatedAt"=NOW() WHERE id=$3`,
-    [assignedToId||null, assignedToName||null, itemId]
+// ── Assignment helpers ────────────────────────────────────────
+
+// Cash actually collected vs advances already out. The club never holds a
+// balance, so the only money that can be handed out is money members have
+// paid in. `excludeId` lets an existing assignment be re-costed without
+// counting its own current advance twice.
+async function cashPosition(clubId: string, excludeId: string | null) {
+  const rows = await sql(
+    `SELECT
+       (SELECT COALESCE(SUM("amountPaid"),0)
+          FROM "GroceryContribution"
+         WHERE "clubId"=$1 AND status='PAID')                       AS collected,
+       (SELECT COALESCE(SUM("advanceAmount"),0)
+          FROM "GroceryAssignment"
+         WHERE "clubId"=$1
+           AND status IN ('ASSIGNED','PURCHASED')
+           AND ($2::text IS NULL OR id <> $2::text))                AS advanced`,
+    [clubId, excludeId]
   )
-  return NextResponse.json({ success:true, message:`Item assigned to ${assignedToName}` })
+  const collected = Number(rows[0]?.collected || 0)
+  const advanced  = Number(rows[0]?.advanced  || 0)
+  return { collected, advanced, available: collected - advanced }
+}
+
+// "GroceryItem"."assignedToId"/"assignedToName" are a mirror of the
+// assignment rows, not the source of truth. With one live assignee they hold
+// that member; with several they read "3 members" so no single name is
+// presented as the responsible party when it isn't.
+async function syncItemMirror(itemId: string) {
+  await exec(
+    `WITH live AS (
+       SELECT ga."userId", u."fullName"
+         FROM "GroceryAssignment" ga
+         JOIN "User" u ON u.id = ga."userId"
+        WHERE ga."itemId" = $1 AND ga.status <> 'CANCELLED'
+     ), agg AS (
+       SELECT COUNT(*) AS n,
+              MIN("userId")   AS "soleId",
+              MIN("fullName") AS "soleName"
+         FROM live
+     )
+     UPDATE "GroceryItem" gi
+        SET "assignedToId"   = CASE WHEN agg.n = 1 THEN agg."soleId" ELSE NULL END,
+            "assignedToName" = CASE WHEN agg.n = 1 THEN agg."soleName"
+                                    WHEN agg.n > 1 THEN agg.n || ' members'
+                                    ELSE NULL END,
+            status = CASE
+              WHEN gi.status IN ('PURCHASED','DISTRIBUTED') THEN gi.status
+              WHEN agg.n > 0 THEN 'ASSIGNED'::"GroceryItemStatus"
+              ELSE 'PENDING'::"GroceryItemStatus" END,
+            "updatedAt" = NOW()
+       FROM agg
+      WHERE gi.id = $1`,
+    [itemId]
+  )
+}
+
+// Applies every unapplied carry-forward row for a member to their earliest
+// unpaid contribution. Contribution rows for all periods are written up front
+// at activation, so there is no row-creation moment to fold the variance into
+// — it has to land on an existing row.
+//
+// If the credit exceeds what that period can absorb, the remainder is written
+// back as a fresh unapplied ADJUSTMENT row so it lands on the period after.
+// Nothing is discarded and nothing is applied twice: rows are stamped with
+// "appliedPeriod" in the same statement that consumes them.
+async function applyCarryForward(clubId: string, userId: string) {
+  const [pending, target] = await Promise.all([
+    sql(`SELECT id, amount FROM "GroceryCarryForward"
+          WHERE "clubId"=$1 AND "userId"=$2 AND "appliedPeriod" IS NULL
+          ORDER BY "createdAt" ASC`, [clubId, userId]),
+    sql(`SELECT id, "periodNumber", "amountDue", "carryAdjustment"
+           FROM "GroceryContribution"
+          WHERE "clubId"=$1 AND "userId"=$2 AND status <> 'PAID'
+          ORDER BY "periodNumber" ASC
+          LIMIT 1`, [clubId, userId]),
+  ])
+
+  if (!pending.length) return { applied: 0, carried: 0, periodNumber: null as number | null }
+
+  const total = pending.reduce((sum: number, r: any) => sum + Number(r.amount), 0)
+
+  // No unpaid period left to net against — the balance is a cash settlement
+  // between the club and the member. The rows stay unapplied and surface on
+  // close-out rather than being silently dropped.
+  if (!target.length) {
+    return { applied: 0, carried: total, periodNumber: null as number | null, settleInCash: true }
+  }
+
+  const row      = target[0]
+  const payable  = Number(row.amountDue) + Number(row.carryAdjustment)
+  // Credit is negative. This period can absorb at most `payable` of it.
+  const absorb   = total < 0 ? Math.max(total, -payable) : total
+  const leftover = Number((total - absorb).toFixed(4))
+
+  const ids     = pending.map((r: any) => r.id)
+  const holders = ids.map((_: string, i: number) => `$${i + 2}`).join(',')
+
+  await Promise.all([
+    exec(`UPDATE "GroceryContribution"
+             SET "carryAdjustment" = "carryAdjustment" + $1,
+                 "updatedAt" = NOW()
+           WHERE id = $2`, [absorb, row.id]),
+    exec(`UPDATE "GroceryCarryForward"
+             SET "appliedPeriod" = $1, "appliedAt" = NOW()
+           WHERE id IN (${holders}) AND "appliedPeriod" IS NULL`,
+         [Number(row.periodNumber), ...ids]),
+  ])
+
+  if (leftover !== 0) {
+    await exec(
+      `INSERT INTO "GroceryCarryForward" (id,"clubId","userId",amount,reason,notes,"createdAt")
+       VALUES ($1,$2,$3,$4,'ADJUSTMENT',$5,NOW())`,
+      [randomUUID(), clubId, userId, leftover,
+       `Balance carried past period ${row.periodNumber} — credit exceeded that period's contribution`]
+    )
+  }
+
+  return { applied: absorb, carried: leftover, periodNumber: Number(row.periodNumber) }
+}
+
+// ── Item status transitions ───────────────────────────────────
+
+// Assign a quantity of a line item to a member, together with the cash
+// advance they are handed to buy it. Upsert against the plain unique index
+// ("itemId","userId") — re-assigning the same member to the same item revises
+// their advance rather than creating a second row.
+async function handleAssignItem(body: any): Promise<NextResponse> {
+  const itemId = typeof body.itemId === 'string' ? body.itemId : ''
+  const userId = typeof body.assignedToId === 'string' && body.assignedToId ? body.assignedToId : null
+
+  if (!itemId) return NextResponse.json({ success:false, error:'itemId is required' }, { status:400 })
+  if (!userId) return NextResponse.json({ success:false, error:'Select the member responsible for buying this item' }, { status:400 })
+
+  const qty     = Number(body.qtyAssigned)
+  const advance = Number(body.advanceAmount)
+  if (!Number.isFinite(qty) || qty <= 0)
+    return NextResponse.json({ success:false, error:'Quantity must be greater than zero' }, { status:400 })
+  if (!Number.isFinite(advance) || advance < 0)
+    return NextResponse.json({ success:false, error:'Advance cannot be negative' }, { status:400 })
+
+  // Item, club, remaining quantity and the member's standing in one trip.
+  const ctx = await sql(
+    `SELECT gi."clubId", gi.name, gi.unit, gi.status::text AS "itemStatus", gi."totalQty",
+            COALESCE((SELECT SUM(ga."qtyAssigned") FROM "GroceryAssignment" ga
+                       WHERE ga."itemId"=gi.id AND ga.status <> 'CANCELLED'
+                         AND ga."userId" <> $2), 0)                       AS "qtyOthers",
+            (SELECT ga2.id FROM "GroceryAssignment" ga2
+              WHERE ga2."itemId"=gi.id AND ga2."userId"=$2)               AS "existingId",
+            (SELECT ga3.status FROM "GroceryAssignment" ga3
+              WHERE ga3."itemId"=gi.id AND ga3."userId"=$2)               AS "existingStatus",
+            EXISTS (SELECT 1 FROM "GroceryMember" gm
+                     WHERE gm."clubId"=gi."clubId" AND gm."userId"=$2
+                       AND gm."isActive"=true)                            AS "isMember",
+            (SELECT u."fullName" FROM "User" u WHERE u.id=$2)             AS "memberName"
+       FROM "GroceryItem" gi
+      WHERE gi.id = $1`,
+    [itemId, userId]
+  )
+  if (!ctx.length) return NextResponse.json({ success:false, error:'Item not found' }, { status:404 })
+  const c = ctx[0]
+
+  if (!c.isMember)
+    return NextResponse.json({ success:false, error:'That person is not an active member of this grocery club. Add them on the Members tab first.' }, { status:409 })
+  if (['PURCHASED','DISTRIBUTED'].includes(String(c.itemStatus)))
+    return NextResponse.json({ success:false, error:`This item is already ${String(c.itemStatus).toLowerCase()} and can no longer be assigned.` }, { status:409 })
+  if (c.existingId && String(c.existingStatus) === 'ACQUITTED')
+    return NextResponse.json({ success:false, error:`${c.memberName} has already acquitted their assignment on this item. Reverse it before re-assigning.` }, { status:409 })
+
+  const qtyOthers = Number(c.qtyOthers)
+  const totalQty  = Number(c.totalQty)
+  if (qtyOthers + qty > totalQty) {
+    return NextResponse.json({ success:false,
+      error:`Only ${totalQty - qtyOthers} ${c.unit} of ${totalQty} remain unassigned on this item.` }, { status:409 })
+  }
+
+  // The club holds no float — an advance can only come out of cash members
+  // have actually paid in. Fail loudly rather than record an overdraw.
+  const cash = await cashPosition(String(c.clubId), c.existingId ? String(c.existingId) : null)
+  if (advance > cash.available) {
+    return NextResponse.json({ success:false,
+      error:`Advance of $${advance.toFixed(2)} exceeds the $${cash.available.toFixed(2)} still uncommitted. Collected $${cash.collected.toFixed(2)}, already advanced $${cash.advanced.toFixed(2)}.` },
+      { status:409 })
+  }
+
+  await exec(
+    `INSERT INTO "GroceryAssignment"
+       (id,"clubId","itemId","userId","qtyAssigned","advanceAmount",status,notes,"createdAt","updatedAt")
+     VALUES ($1,$2,$3,$4,$5,$6,'ASSIGNED',$7,NOW(),NOW())
+     ON CONFLICT ("itemId","userId") DO UPDATE
+       SET "qtyAssigned"   = EXCLUDED."qtyAssigned",
+           "advanceAmount" = EXCLUDED."advanceAmount",
+           status          = 'ASSIGNED',
+           notes           = EXCLUDED.notes,
+           "actualSpent"   = NULL,
+           "acquittedAt"   = NULL,
+           "updatedAt"     = NOW()`,
+    [randomUUID(), String(c.clubId), itemId, userId, qty, advance,
+     typeof body.notes === 'string' && body.notes ? body.notes : null]
+  )
+
+  await syncItemMirror(itemId)
+
+  return NextResponse.json({ success:true,
+    message:`${c.memberName} assigned ${qty} ${c.unit} of ${c.name} with a $${advance.toFixed(2)} advance` })
+}
+
+// Withdraw an assignment. An acquitted one cannot simply be dropped — its
+// variance is already in the carry-forward ledger.
+async function handleCancelAssignment(body: any): Promise<NextResponse> {
+  const itemId = typeof body.itemId === 'string' ? body.itemId : ''
+  const userId = typeof body.assignedToId === 'string' ? body.assignedToId : ''
+  if (!itemId || !userId)
+    return NextResponse.json({ success:false, error:'itemId and assignedToId are required' }, { status:400 })
+
+  const done = await sql(
+    `UPDATE "GroceryAssignment"
+        SET status='CANCELLED', "updatedAt"=NOW()
+      WHERE "itemId"=$1 AND "userId"=$2 AND status IN ('ASSIGNED','PURCHASED')
+      RETURNING id`,
+    [itemId, userId]
+  )
+  if (!done.length) {
+    return NextResponse.json({ success:false,
+      error:'No open assignment found. An acquitted assignment must be reversed, not cancelled.' }, { status:409 })
+  }
+
+  await syncItemMirror(itemId)
+  return NextResponse.json({ success:true, message:'Assignment withdrawn' })
+}
+
+// Record what the member actually spent, write the signed variance to the
+// carry-forward ledger and apply it to their next unpaid contribution.
+//
+// The variance is NEGATIVE either way, because both directions reduce the new
+// cash the member brings. "reason" is what tells them apart:
+//   CHANGE_HELD    spent < advance — member is holding the club's cash
+//   OUT_OF_POCKET  spent > advance — club owes the member
+async function handleAcquitAssignment(body: any): Promise<NextResponse> {
+  const assignmentId = typeof body.assignmentId === 'string' ? body.assignmentId : ''
+  const actualSpent  = Number(body.actualSpent)
+
+  if (!assignmentId) return NextResponse.json({ success:false, error:'assignmentId is required' }, { status:400 })
+  if (!Number.isFinite(actualSpent) || actualSpent < 0)
+    return NextResponse.json({ success:false, error:'Enter what was actually spent' }, { status:400 })
+
+  const rows = await sql(
+    `SELECT ga.id, ga."clubId", ga."itemId", ga."userId", ga."advanceAmount", ga.status,
+            gi.name AS "itemName", u."fullName" AS "memberName"
+       FROM "GroceryAssignment" ga
+       JOIN "GroceryItem" gi ON gi.id = ga."itemId"
+       JOIN "User" u         ON u.id  = ga."userId"
+      WHERE ga.id = $1`,
+    [assignmentId]
+  )
+  if (!rows.length) return NextResponse.json({ success:false, error:'Assignment not found' }, { status:404 })
+  const a = rows[0]
+
+  if (String(a.status) === 'ACQUITTED')
+    return NextResponse.json({ success:false, error:'This assignment has already been acquitted' }, { status:409 })
+  if (String(a.status) === 'CANCELLED')
+    return NextResponse.json({ success:false, error:'This assignment was withdrawn' }, { status:409 })
+
+  const advance  = Number(a.advanceAmount)
+  const variance = Number((advance - actualSpent).toFixed(4))
+
+  await exec(
+    `UPDATE "GroceryAssignment"
+        SET "actualSpent"=$1, status='ACQUITTED',
+            "purchasedAt"=COALESCE("purchasedAt",NOW()),
+            "acquittedAt"=NOW(),
+            "receiptUrl"=COALESCE($2,"receiptUrl"),
+            "updatedAt"=NOW()
+      WHERE id=$3`,
+    [actualSpent, typeof body.receiptUrl === 'string' && body.receiptUrl ? body.receiptUrl : null, assignmentId]
+  )
+
+  let applied: any = { applied: 0, carried: 0, periodNumber: null }
+  if (variance !== 0) {
+    await exec(
+      `INSERT INTO "GroceryCarryForward"
+         (id,"clubId","userId","assignmentId",amount,reason,notes,"createdAt")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+       ON CONFLICT DO NOTHING`,
+      [randomUUID(), String(a.clubId), String(a.userId), assignmentId,
+       -Math.abs(variance),
+       variance > 0 ? 'CHANGE_HELD' : 'OUT_OF_POCKET',
+       variance > 0
+         ? `Holding $${variance.toFixed(2)} change from ${a.itemName}`
+         : `Out of pocket $${Math.abs(variance).toFixed(2)} on ${a.itemName}`]
+    )
+    applied = await applyCarryForward(String(a.clubId), String(a.userId))
+  }
+
+  // Roll the item's actual cost up from its assignments, and close the item
+  // once nothing is still open on it.
+  await exec(
+    `UPDATE "GroceryItem" gi
+        SET "actualTotalPrice" = (SELECT SUM(COALESCE(ga."actualSpent",0))
+                                    FROM "GroceryAssignment" ga
+                                   WHERE ga."itemId"=gi.id AND ga.status='ACQUITTED'),
+            status = CASE WHEN NOT EXISTS (
+                            SELECT 1 FROM "GroceryAssignment" ga2
+                             WHERE ga2."itemId"=gi.id
+                               AND ga2.status IN ('ASSIGNED','PURCHASED'))
+                          THEN 'PURCHASED'::"GroceryItemStatus" ELSE gi.status END,
+            "purchasedAt" = COALESCE(gi."purchasedAt", NOW()),
+            "updatedAt" = NOW()
+      WHERE gi.id = $1`,
+    [String(a.itemId)]
+  )
+  await exec(
+    `UPDATE "GroceryClub"
+        SET "totalSpent" = (SELECT COALESCE(SUM("actualSpent"),0)
+                              FROM "GroceryAssignment"
+                             WHERE "clubId"=$1 AND status='ACQUITTED'),
+            "updatedAt" = NOW()
+      WHERE id = $1`,
+    [String(a.clubId)]
+  )
+
+  const tail = variance === 0
+    ? 'Advance matched the spend exactly.'
+    : applied.settleInCash
+      ? (variance > 0
+          ? `${a.memberName} holds $${variance.toFixed(2)} — no unpaid period left, settle in cash.`
+          : `Club owes ${a.memberName} $${Math.abs(variance).toFixed(2)} — no unpaid period left, settle in cash.`)
+      : (variance > 0
+          ? `${a.memberName} holds $${variance.toFixed(2)} change — credited against period ${applied.periodNumber}.`
+          : `${a.memberName} was $${Math.abs(variance).toFixed(2)} out of pocket — credited against period ${applied.periodNumber}.`)
+
+  return NextResponse.json({ success:true,
+    data:{ variance, appliedToPeriod: applied.periodNumber, carriedFurther: applied.carried },
+    message:`${a.itemName} acquitted. ${tail}` })
 }
 
 async function handleMarkPurchased(body: any): Promise<NextResponse> {
@@ -713,9 +1109,14 @@ function formatClub(c: any) {
   const start  = new Date(c.startDate)
   const end    = new Date(c.endDate)
   const now    = new Date()
-  const budget = Number(c.totalBudget || 0)
-  const spent  = Number(c.totalSpent  || 0)
+  const budget    = Number(c.totalBudget || 0)
+  const spent     = Number(c.totalSpent  || 0)
   const collected = Number(c.totalContributed || 0)
+  // Disbursement position. The club holds no pool: cash collected is either
+  // still uncommitted, or already out with a member as a purchase advance.
+  const advanced    = Number(c.advancedOut  || 0)   // ASSIGNED + PURCHASED
+  const unacquitted = Number(c.unacquitted  || 0)   // advances with no spend recorded yet
+  const uncommitted = collected - advanced
 
   return {
     id:                   c.id,
@@ -734,6 +1135,13 @@ function formatClub(c: any) {
     totalContributed:     collected,
     totalSpent:           spent,
     remainingBudget:      budget - spent,
+    // Disbursement view — what the money is actually doing right now.
+    advancedOut:          advanced,
+    unacquitted:          unacquitted,
+    uncommittedCash:      uncommitted,
+    openAssignments:      Number(c.openAssignments || 0),
+    listValue:            budget,
+    carryForwardNet:      Number(c.carryForwardNet || 0),
     fundingPct:           budget > 0 ? Math.min(100, Math.round(collected / budget * 100)) : 0,
     spentPct:             budget > 0 ? Math.min(100, Math.round(spent    / budget * 100)) : 0,
     coordinatorId:        c.coordinatorId,
@@ -766,10 +1174,16 @@ function formatItem(i: any) {
     supplierContact:     i.supplierContact,
     status:              i.status,
     assignedToId:        i.assignedToId,
-    assignedToName:      i.assignedToName,
+    assignedToName:      i.assignedToLive ?? i.assignedToName ?? null,
+    assignmentCount:     Number(i.assignmentCount || 0),
+    qtyAssignedTotal:    Number(i.qtyAssignedTotal || 0),
+    qtyUnassigned:       Number(i.totalQty) - Number(i.qtyAssignedTotal || 0),
+    advanceTotal:        Number(i.advanceTotal || 0),
+    spentTotal:          Number(i.spentTotal || 0),
+    openAssignments:     Number(i.openAssignments || 0),
     purchasedAt:         i.purchasedAt,
     purchasedById:       i.purchasedById,
-    purchasedByName:     i.purchasedByName,
+    purchasedByName:     i.purchasedByLive ?? i.purchasedByName ?? null,
     receiptUrl:          i.receiptUrl,
     distributedAt:       i.distributedAt,
     notes:               i.notes,
