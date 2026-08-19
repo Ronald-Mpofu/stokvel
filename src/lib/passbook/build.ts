@@ -444,7 +444,7 @@ export function buildAccumulatingView(
       left: queue ? 'Your queue book' : 'Your hamper book',
       right: `${me.monthsPaid} of ${monthsTotal} paid`,
     },
-    rows: [...rows, goal],
+    rows: ledger,
     action: nextDue
       ? {
           kind: 'PAY',
@@ -551,6 +551,12 @@ export function buildGroceryView(
   const goal = groceryGoal(club, target, now)
   const settled = goal.kind === 'NOTE'
 
+  // A club with no contribution schedule has no book yet — it has not been
+  // activated. The shell shows its empty state on rows.length === 0, so
+  // appending the goal row here would replace "add items and activate"
+  // with a lone Collection row and hide the one instruction that matters.
+  const ledger = periodsTotal > 0 ? [...rows, goal] : []
+
   const kpis: PassbookKpi[] = [
     { label: 'Periods paid', value: `${me.monthsPaid} of ${periodsTotal}` },
     { label: 'Your share', amount: target > 0 ? target : null },
@@ -589,7 +595,7 @@ export function buildGroceryView(
       left: 'Your hamper book',
       right: `${me.monthsPaid} of ${periodsTotal} paid`,
     },
-    rows: [...rows, goal],
+    rows: ledger,
     action: nextDue && !settled
       ? {
           kind: 'PAY',

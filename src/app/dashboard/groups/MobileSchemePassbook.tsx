@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/groups/MobileSchemePassbook.tsx — v4
+// src/app/dashboard/groups/MobileSchemePassbook.tsx — v5
 //
 // Fetches one scheme's passbook and hands it to PassbookShell.
 //
@@ -541,6 +541,29 @@ export default function MobileSchemePassbook({
   const copy = (view && EMPTY_COPY[view.scheme.grammar]) || EMPTY_FALLBACK
   const canStart = Boolean(canManage && onStartCycle)
 
+  // Manage sits in the passbook header for an admin looking at their own
+  // book. The list carries the same action for clubs they are not in.
+  const manageAction = canManage && ledgerId ? (
+    <button
+      onClick={() => setManageId(ledgerId)}
+      aria-label="Manage this club"
+      style={{
+        minHeight: TOUCH.icon,
+        padding: `0 ${S.md}px`,
+        flexShrink: 0,
+        background: 'rgba(255,255,255,0.14)',
+        border: 'none',
+        borderRadius: 8,
+        color: '#fff',
+        fontSize: T.caption.fontSize,
+        fontFamily: FONT_STACK,
+        cursor: 'pointer',
+      }}
+    >
+      Manage
+    </button>
+  ) : null
+
   return (
     <PassbookShell
       view={view}
@@ -553,6 +576,7 @@ export default function MobileSchemePassbook({
       emptyBody={canStart ? copy.admin : copy.member}
       emptyActionLabel={canStart ? 'Set up first cycle' : undefined}
       onEmptyAction={canStart ? onStartCycle : undefined}
+      headerAction={manageAction}
     />
   )
 }

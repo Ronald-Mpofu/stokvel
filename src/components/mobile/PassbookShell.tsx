@@ -1,5 +1,5 @@
 'use client'
-// src/components/mobile/PassbookShell.tsx
+// src/components/mobile/PassbookShell.tsx — v2
 //
 // The one screen every windfall scheme's passbook is rendered in.
 //
@@ -264,11 +264,16 @@ type Props = {
   emptyBody: string
   emptyActionLabel?: string
   onEmptyAction?: () => void
+  // Optional trailing control in the dark header, beside the group name.
+  // Used for the admin's Manage action. A node rather than a label plus a
+  // callback, so the shell stays ignorant of what the action does — the
+  // same reason onAction exists rather than a payment import.
+  headerAction?: React.ReactNode
 }
 
 export default function PassbookShell({
   view, loading, onBack, onAction,
-  emptyTitle, emptyBody, emptyActionLabel, onEmptyAction,
+  emptyTitle, emptyBody, emptyActionLabel, onEmptyAction, headerAction,
 }: Props) {
   const rows = safeRows(view)
   const kpis = safeKpis(view)
@@ -323,6 +328,7 @@ export default function PassbookShell({
           >
             {view?.scheme.groupName || ''}
           </span>
+          {headerAction}
         </div>
 
         <div
