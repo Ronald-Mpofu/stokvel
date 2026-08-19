@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/groups/MobileGroupDetail.tsx
+// src/app/dashboard/groups/MobileGroupDetail.tsx — v2
 //
 // Phone layout for a single group. Rendered by groups/page.tsx when
 // useIsMobile() is true — the desktop detail view is untouched.
@@ -28,6 +28,20 @@
 // Accordion sections rather than tabs. Four tab labels do not fit at 360px
 // without truncating, and truncated labels are unusable.
 //
+// ADMIN SECTIONS (v2)
+//
+// A group admin can now edit the group, invite members and activate the
+// group from a phone. Members see the Members list and the scheme cards;
+// Settings and the activation banner are admin-only.
+//
+// WHAT THIS FILE DOES NOT DO
+//   It does not perform the activation. Activating a group is a PAID
+//   action — page.tsx posts to /api/payments/group-checkout and redirects
+//   to Stripe, with the webhook flipping the group to ACTIVE, and a 409
+//   falling through to a plain status update. That logic stays in one
+//   place and arrives here as onActivate. A second copy of a payment flow
+//   is the last thing this codebase needs.
+//
 // All helper components are at module level. Defined inside render they
 // remount on every keystroke and steal input focus.
 
@@ -38,6 +52,7 @@ import {
 import MobileSchemeHub from './MobileSchemeHub'
 import type { HubScheme } from './MobileSchemeHub'
 import MobileSchemePassbook from './MobileSchemePassbook'
+import MobileGroupSettingsSheet from './MobileGroupSettingsSheet'
 
 type Props = {
   group: any
@@ -49,6 +64,12 @@ type Props = {
   onInvite: () => void
   onOpenScheme: (schemeId: string) => void
   onStartCycle?: () => void
+  // Owned by page.tsx because activation is a paid action with a Stripe
+  // redirect. Absent for non-admins.
+  onActivate?: () => void
+  activating?: boolean
+  // Called after a successful settings save so the parent can refetch.
+  onGroupUpdated?: (message: string) => void
 }
 
 // ── Small pieces ──────────────────────────────────────────────
@@ -153,16 +174,88 @@ function EmptyMembers({ canManage, onInvite }: { canManage: boolean; onInvite: (
   )
 }
 
+function ActionRow({
+  label, hint, onClick, disabled, tone,
+}: {
+  label: string
+  hint?: string
+  onClick: () => void
+  disabled?: boolean
+  tone?: 'teal' | 'plain'
+}) {
+  const colour = tone === 'teal' ? C.teal : C.text
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      style={{
+        width: '100%', minHeight: TOUCH.min, display: 'flex', alignItems: 'center',
+        gap: S.sm, padding: `${S.md}px ${S.screenX}px`, background: C.surface,
+        border: 'none', borderTop: `1px solid ${C.border}`,
+        cursor: disabled ? 'default' : 'pointer',
+        fontFamily: FONT_STACK, textAlign: 'left', opacity: disabled ? 0.6 : 1,
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{
+          display: 'block', fontSize: T.heading.fontSize, fontWeight: 500, color: colour,
+        }}>{label}</span>
+        {hint ? (
+          <span style={{ display: 'block', fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 2 }}>
+            {hint}
+          </span>
+        ) : null}
+      </span>
+      <span style={{ fontSize: 18, color: C.textFaint, flexShrink: 0 }}>›</span>
+    </button>
+  )
+}
+
+// Activation is the one thing standing between a DRAFT group and a working
+// one, so it gets a block rather than a row. The Stripe warning is not
+// decoration: the tap leaves the app for a checkout page, and an admin who
+// does not expect that reads it as a crash.
+function ActivateBlock({
+  onActivate, activating,
+}: { onActivate: () => void; activating?: boolean }) {
+  return (
+    <div style={{ background: C.surface, marginTop: S.md, padding: `${S.lg}px ${S.screenX}px` }}>
+      <div style={{ fontSize: T.heading.fontSize, fontWeight: 500, color: C.text, marginBottom: 6 }}>
+        This group is a draft
+      </div>
+      <p style={{ fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.55, margin: `0 0 ${S.lg}px` }}>
+        Members cannot contribute until the group is active. Activating starts
+        the group subscription, so you will be taken to a secure payment page
+        and brought back when it is done.
+      </p>
+      <button
+        onClick={onActivate}
+        disabled={activating}
+        style={{
+          width: '100%', minHeight: TOUCH.primary,
+          background: activating ? C.textFaint : C.teal, color: '#fff',
+          border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 500,
+          fontFamily: FONT_STACK, cursor: activating ? 'default' : 'pointer',
+        }}
+      >
+        {activating ? 'Opening payment page…' : 'Activate group'}
+      </button>
+    </div>
+  )
+}
+
 // ── Main ──────────────────────────────────────────────────────
 export default function MobileGroupDetail({
   group, members, membersLoading, currentUserId, canManage,
-  onBack, onInvite, onOpenScheme, onStartCycle,
+  onBack, onInvite, onOpenScheme, onStartCycle, onActivate, activating,
+  onGroupUpdated,
 }: Props) {
   // Which scheme's passbook is open, if any. Local state rather than a
   // route: returning to the hub must not refetch it or lose scroll.
   const [openPassbook, setOpenPassbook] = useState<HubScheme | null>(null)
   const [open, setOpen] = useState<string[]>(['members'])
   const [showAllMembers, setShowAllMembers] = useState(false)
+  const [showSettings, setShowSettings] = useState(false)
 
   const toggle = useCallback((key: string) => {
     setOpen(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])
@@ -189,6 +282,8 @@ export default function MobileGroupDetail({
   }
 
   const visibleMembers = showAllMembers ? members : members.slice(0, 5)
+
+  const isDraft = String(group?.status || '').toUpperCase() === 'DRAFT'
 
   // Passed to the hub as its footer. Plain JSX, not a component defined in
   // render — nothing here holds input focus, so there is no remount cost.
@@ -233,6 +328,47 @@ export default function MobileGroupDetail({
     </div>
   )
 
+  // Members stays visible to everyone: the list shows each person's role,
+  // so a member can see who their admin is and who to ask. Settings and
+  // activation are the admin-only parts.
+  const adminSection = canManage ? (
+    <div>
+      {isDraft && onActivate ? (
+        <ActivateBlock onActivate={onActivate} activating={activating} />
+      ) : null}
+
+      <div style={{ background: C.surface, marginTop: S.md }}>
+        <SectionHeader
+          label="Manage group"
+          open={open.includes('manage')}
+          onToggle={() => toggle('manage')}
+        />
+        {open.includes('manage') ? (
+          <div>
+            <ActionRow
+              label="Invite members"
+              hint="Send an invitation by email or SMS"
+              tone="teal"
+              onClick={onInvite}
+            />
+            <ActionRow
+              label="Group settings"
+              hint="Name, description, contribution terms"
+              onClick={() => setShowSettings(true)}
+            />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  ) : null
+
+  const footer = (
+    <div>
+      {membersSection}
+      {adminSection}
+    </div>
+  )
+
   // A group with no id cannot be loaded. Say so rather than rendering a
   // hub that will fail its own fetch.
   if (!group?.id) {
@@ -265,12 +401,25 @@ export default function MobileGroupDetail({
   // holdings and what is owed. The status pill and the members list are
   // still this screen's, so they go in through slots.
   return (
-    <MobileSchemeHub
-      groupId={group.id}
-      onBack={onBack}
-      onOpenScheme={setOpenPassbook}
-      statusPill={<StatusPill status={group?.status || 'DRAFT'} />}
-      footer={membersSection}
-    />
+    <>
+      {showSettings && canManage ? (
+        <MobileGroupSettingsSheet
+          group={group}
+          onClose={() => setShowSettings(false)}
+          onSaved={(message) => {
+            setShowSettings(false)
+            if (onGroupUpdated) onGroupUpdated(message)
+          }}
+        />
+      ) : null}
+
+      <MobileSchemeHub
+        groupId={group.id}
+        onBack={onBack}
+        onOpenScheme={setOpenPassbook}
+        statusPill={<StatusPill status={group?.status || 'DRAFT'} />}
+        footer={footer}
+      />
+    </>
   )
 }

@@ -2122,23 +2122,53 @@ export default function GroupsPage() {
   // on a phone falls straight back to the list.
   if (isMobile && view === 'detail' && selectedGroup) {
     return (
-      <MobileGroupDetail
-        group={selectedGroup}
-        members={groupMembers}
-        membersLoading={membersLoading}
-        currentUserId={currentUserId}
-        canManage={selectedGroup.adminUserId === currentUserId}
-        onBack={() => { setView('list'); setSelectedGroup(null) }}
-        onInvite={() => { setInviteGroupId(selectedGroup.id); setShowInviteModal(true) }}
-        // The passbook's Pay button lands here. This used to call
-        // setDetailTab('schemes'), which sets DESKTOP tab state — and the
-        // mobile branch returns above, so that JSX never renders and the
-        // button did nothing at all. Until a mobile payment flow exists,
-        // say so rather than swallowing the tap.
-        onOpenScheme={() => {
-          showToast('Recording a payment from your phone is coming soon.', 'error')
-        }}
-      />
+      <>
+        {/* SendInviteModal also renders far below, inside the DESKTOP
+            return — which this branch never reaches. Without this copy the
+            mobile Invite button set state that nothing was listening to,
+            so it silently did nothing. */}
+        {showInviteModal && inviteGroupId && (
+          <SendInviteModal
+            groups={groups}
+            preselectedGroupId={inviteGroupId}
+            currentUserId={currentUserId}
+            onClose={() => { setShowInviteModal(false); setInviteGroupId(null) }}
+            onSuccess={() => {
+              showToast('Invitation sent successfully!')
+              setShowInviteModal(false)
+              setInviteGroupId(null)
+              fetchGroupMembers(selectedGroup.id)
+            }}
+          />
+        )}
+
+        <MobileGroupDetail
+          group={selectedGroup}
+          members={groupMembers}
+          membersLoading={membersLoading}
+          currentUserId={currentUserId}
+          canManage={selectedGroup.adminUserId === currentUserId}
+          onBack={() => { setView('list'); setSelectedGroup(null) }}
+          onInvite={() => { setInviteGroupId(selectedGroup.id); setShowInviteModal(true) }}
+          // Activation is a PAID action — group-checkout, Stripe redirect,
+          // webhook. handleStatusChange owns all of it; the mobile screen
+          // must not carry a second copy of a payment flow.
+          onActivate={() => handleStatusChange(selectedGroup.id, 'ACTIVE', selectedGroup.name)}
+          activating={statusChangingId === selectedGroup.id}
+          onGroupUpdated={(message: string) => {
+            showToast(message)
+            fetchGroups()
+          }}
+          // The passbook's Pay button lands here. This used to call
+          // setDetailTab('schemes'), which sets DESKTOP tab state — and the
+          // mobile branch returns above, so that JSX never renders and the
+          // button did nothing at all. Until a mobile payment flow exists,
+          // say so rather than swallowing the tap.
+          onOpenScheme={() => {
+            showToast('Recording a payment from your phone is coming soon.', 'error')
+          }}
+        />
+      </>
     )
   }
 
