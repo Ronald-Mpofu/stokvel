@@ -244,41 +244,41 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
 
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1010,padding:'20px'}}>
-      <div style={{background:'white',borderRadius:'14px',width:'100%',maxWidth:'480px',boxShadow:'0 25px 50px rgba(0,0,0,0.25)',overflow:'hidden'}}>
+      <div style={{background:'white',borderRadius:'14px',width:'100%',maxWidth:'640px',maxHeight:'92vh',overflowY:'auto',boxShadow:'0 25px 50px rgba(0,0,0,0.25)'}}>
         <div style={{background:NAVY,padding:'16px 20px',display:'flex',justifyContent:'space-between',alignItems:'center'}}>
           <h3 style={{fontSize:'15px',fontWeight:'700',color:'white',margin:0}}>{editing?'✏️ Edit':'+ Add'} Grocery Item</h3>
           <button onClick={onClose} style={{background:'rgba(255,255,255,0.15)',border:'none',borderRadius:'6px',width:'28px',height:'28px',cursor:'pointer',fontSize:'16px',color:'white'}}>×</button>
         </div>
         <form onSubmit={handleSubmit} style={{padding:'18px 20px'}}>
-          <div style={{display:'grid',gridTemplateColumns:'2fr 1fr',gap:'10px',marginBottom:'10px'}}>
+          <div style={{display:'grid',gridTemplateColumns:'3fr 1fr',gap:'12px',marginBottom:'12px'}}>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Item Name *</label>
               <input type="text" value={form.name} onChange={e=>set('name')(e.target.value)} required placeholder="e.g. Rice 5kg"
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit</label>
               <select value={form.unit} onChange={e=>set('unit')(e.target.value)}
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
                 {['units','kg','g','litres','ml','bags','boxes','cans','packs','bottles','dozen'].map(u=><option key={u} value={u}>{u}</option>)}
               </select>
             </div>
           </div>
 
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'10px',marginBottom:'10px'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'12px'}}>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Qty / Member *</label>
               <input type="number" step="0.5" min="0.5" value={form.qtyPerMember} onChange={e=>set('qtyPerMember')(e.target.value)} required
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Total Qty</label>
-              <div style={{padding:'8px 10px',background:'#F8FAFC',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',color:'#64748B'}}>{totalQty} {form.unit}</div>
+              <div style={{padding:'10px 12px',background:'#F8FAFC',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',color:'#64748B'}}>{totalQty} {form.unit}</div>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit Price ($) *</label>
               <input type="number" step="0.01" min="0" value={form.estimatedUnitPrice} onChange={e=>set('estimatedUnitPrice')(e.target.value)} required placeholder="0.00"
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
             </div>
           </div>
 
@@ -287,26 +287,26 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
             <strong style={{color:TEAL}}>${fmt(estTotal)}</strong>
           </div>}
 
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'10px',marginBottom:'10px'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px',marginBottom:'12px'}}>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Supplier Name</label>
               <input type="text" value={form.supplierName} onChange={e=>set('supplierName')(e.target.value)} placeholder="e.g. FoodCorp Wholesale"
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Supplier Contact</label>
               <input type="text" value={form.supplierContact} onChange={e=>set('supplierContact')(e.target.value)} placeholder="+263 77..."
-                style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
           </div>
 
           <div style={{marginBottom:'14px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Notes</label>
             <input type="text" value={form.notes} onChange={e=>set('notes')(e.target.value)} placeholder="Brand preference, quality notes..."
-              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}/>
+              style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
           </div>
 
-          {error&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',borderRadius:'7px',padding:'8px 10px',color:'#991B1B',fontSize:'12px',marginBottom:'10px'}}>❌ {error}</div>}
+          {error&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',borderRadius:'7px',padding:'10px 12px',color:'#991B1B',fontSize:'12px',marginBottom:'10px'}}>❌ {error}</div>}
           <div style={{display:'flex',gap:'8px'}}>
             <button type="button" onClick={onClose} style={{flex:1,padding:'9px',background:'#F1F5F9',border:'none',borderRadius:'7px',fontSize:'13px',cursor:'pointer',color:'#475569'}}>Cancel</button>
             <button type="submit" disabled={saving} style={{flex:2,padding:'9px',border:'none',borderRadius:'7px',fontSize:'13px',fontWeight:'600',cursor:saving?'not-allowed':'pointer',background:saving?'#94A3B8':TEAL,color:'white'}}>
