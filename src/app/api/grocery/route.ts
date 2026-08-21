@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.4
+// src/app/api/grocery/route.ts — v1.6.1
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -24,6 +24,47 @@
 //         - Advances outstanding may never exceed cash actually collected.
 //           Explicit 409, never a silent overdraw.
 //       Requires sql/14-grocery-assignments.sql.
+// v1.5: SMART SETTLEMENT. Contributions derive from the ASSIGNED total for
+//       the cycle, and a cycle must be LOCKED before contributions issue.
+//         - LOCK_CYCLE snapshots assignments, derives the per-member
+//           contribution in INTEGER CENTS (620/6 in float does not reconcile)
+//           and rotates the rounding remainder by period so the same members
+//           do not always carry the extra cent.
+//         - SOLVE_SETTLEMENT computes B(i) = assigned - contribution and
+//           greedily matches payers to receivers on MIN(owes, needs), giving
+//           at most n-1 transfers. Supplier accounts are receiver nodes, so
+//           SUPPLIER_DIRECT lines are funded without any member holding cash.
+//         - CLAIM / CONFIRM / DISPUTE. Only CONFIRMED counts toward funding a
+//           buyer's basket: a payer's claim is not money in the buyer's hand.
+//         - Re-solving preserves CONFIRMED transfers and re-matches only the
+//           unpaid remainder.
+//       Requires sql/15-grocery-settlement.sql.
+// v1.6: FUNDS CONFIRMATION GATE. Corrected cycle sequence —
+//         day 1   budget, pick items, set the target contribution
+//         last day each member ticks that they HAVE their money
+//         then    confirmations lock; the pot is known
+//         then    items are assigned, capped at the confirmed pot
+//         then    contributions re-derive from the assigned total across
+//                 CONFIRMED members only, and the settlement is solved
+//       A decliner is out of the cycle: no groceries, no node in the
+//       settlement graph, and their contribution carries as ARREARS.
+//
+//       CHANGE HELD vs OUT OF POCKET are asymmetric for settlement and this
+//       is the one thing in the module most likely to be "simplified" wrongly:
+//         CHANGE_HELD   the member is holding the club's cash. They can hand
+//                       it to whoever the settlement names, so it does NOT
+//                       reduce their contribution — only the new money they
+//                       must find. It stays in the pot.
+//         OUT_OF_POCKET the club owes the member. It DOES reduce what they
+//                       hand over, and the pot is smaller by that much.
+//       Both are stored as negative "carryAdjustment" (correct for "new cash
+//       to bring"), so the solver uses amountPayable MINUS change held.
+//       Using amountPayable for both makes any club with change held fail
+//       the reconciliation guard.
+//       Requires sql/16-grocery-confirmation.sql.
+// v1.6.1: serialise the confirmation state to the client. v1.6 added the
+//       columns but the GET never returned them, so no roll-call UI could be
+//       built against it.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -193,7 +234,7 @@ export async function GET(req: NextRequest) {
       if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
       const club = clubs[0]
 
-      const [items, members, contribs, assignments] = await Promise.all([
+      const [items, members, contribs, assignments, cycles, transfers, suppliers] = await Promise.all([
         sql(`SELECT gi.*, u."fullName" as "assignedToLive", pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
@@ -231,6 +272,17 @@ export async function GET(req: NextRequest) {
              JOIN "GroceryItem" gi ON gi.id = ga."itemId"
              WHERE ga."clubId" = $1 AND ga.status <> 'CANCELLED'
              ORDER BY gi.name ASC, u."fullName" ASC`, [clubId]),
+        sql(`SELECT * FROM "GroceryCycle" WHERE "clubId" = $1 ORDER BY "periodNumber" ASC`, [clubId]),
+        sql(`SELECT st.*, pu."fullName" as "payerName", ru."fullName" as "payeeName",
+                    sa."supplierName", sa."bankName", sa."accountNumber", sa."referenceFormat"
+             FROM "GrocerySettlementTransfer" st
+             JOIN "User" pu ON pu.id = st."payerId"
+             LEFT JOIN "User" ru ON ru.id = st."payeeUserId"
+             LEFT JOIN "GrocerySupplierAccount" sa ON sa.id = st."payeeSupplierId"
+             WHERE st."clubId" = $1 AND st.status <> 'CANCELLED'
+             ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId]),
+        sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
+             ORDER BY "supplierName" ASC`, [clubId]),
       ])
 
       const now = new Date()
@@ -241,6 +293,32 @@ export async function GET(req: NextRequest) {
           userId: m.userId, fullName: m.fullName, email: m.email, tier: m.tier,
           totalContributed: Number(m.totalContributed), sharePercentage: Number(m.sharePercentage),
           isActive: m.isActive, joinedAt: m.joinedAt,
+        })),
+        cycles: cycles.map((c: any) => ({
+          id: c.id, periodNumber: Number(c.periodNumber), status: c.status,
+          assignedTotal: Number(c.assignedTotal), memberCount: Number(c.memberCount),
+          baseContribution: Number(c.baseContribution), roundingCents: Number(c.roundingCents),
+          confirmedPot: Number(c.confirmedPot || 0),
+          confirmedMemberCount: Number(c.confirmedMemberCount || 0),
+          declinedMemberCount: Number(c.declinedMemberCount || 0),
+          fundedAt: c.fundedAt,
+          lockedAt: c.lockedAt, settledAt: c.settledAt, closedAt: c.closedAt,
+        })),
+        settlementTransfers: transfers.map((t: any) => ({
+          id: t.id, periodNumber: Number(t.periodNumber),
+          payerId: t.payerId, payerName: t.payerName,
+          payeeType: t.payeeType,
+          payeeName: t.payeeType === 'SUPPLIER' ? t.supplierName : t.payeeName,
+          payeeUserId: t.payeeUserId, payeeSupplierId: t.payeeSupplierId,
+          bankName: t.bankName, accountNumber: t.accountNumber, reference: t.referenceFormat,
+          amount: Number(t.amount), currency: t.currency, status: t.status,
+          paymentReference: t.paymentReference,
+          claimedAt: t.claimedAt, confirmedAt: t.confirmedAt, disputedAt: t.disputedAt,
+        })),
+        supplierAccounts: suppliers.map((x: any) => ({
+          id: x.id, supplierName: x.supplierName, bankName: x.bankName,
+          accountName: x.accountName, accountNumber: x.accountNumber,
+          referenceFormat: x.referenceFormat, currency: x.currency,
         })),
         assignments: assignments.map((a: any) => ({
           id: a.id, itemId: a.itemId, itemName: a.itemName, unit: a.unit,
@@ -254,6 +332,9 @@ export async function GET(req: NextRequest) {
           variance:      a.actualSpent != null
             ? Number((Number(a.advanceAmount) - Number(a.actualSpent)).toFixed(4)) : null,
           status: a.status, receiptUrl: a.receiptUrl,
+          periodNumber: Number(a.periodNumber || 1),
+          fundingMode: a.fundingMode || 'MEMBER_CASH',
+          supplierAccountId: a.supplierAccountId,
           purchasedAt: a.purchasedAt, acquittedAt: a.acquittedAt, notes: a.notes,
         })),
         contributions: contribs.map(c => ({
@@ -268,6 +349,10 @@ export async function GET(req: NextRequest) {
             ? Number(c.amountPayable)
             : Number(c.amountDue) + Number(c.carryAdjustment || 0),
           status: c.status, paidAt: c.paidAt,
+          fundsConfirmedAt: c.fundsConfirmedAt,
+          fundsDeclinedAt:  c.fundsDeclinedAt,
+          declineReason:    c.declineReason,
+          arrearsCarriedAt: c.arrearsCarriedAt,
           isOverdue: c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now,
         })),
       }})
@@ -318,6 +403,14 @@ export async function POST(req: NextRequest) {
     if (body.action === 'ASSIGN_ITEM')       return handleAssignItem(body)
     if (body.action === 'CANCEL_ASSIGNMENT') return handleCancelAssignment(body)
     if (body.action === 'ACQUIT_ASSIGNMENT') return handleAcquitAssignment(body)
+    if (body.action === 'CONFIRM_FUNDS')     return handleFundsResponse(body, true)
+    if (body.action === 'DECLINE_FUNDS')     return handleFundsResponse(body, false)
+    if (body.action === 'LOCK_CONTRIBUTIONS')return handleLockContributions(body)
+    if (body.action === 'LOCK_CYCLE')        return handleLockCycle(body)
+    if (body.action === 'SOLVE_SETTLEMENT')  return handleSolveSettlement(body)
+    if (body.action === 'CLAIM_TRANSFER')    return handleTransferState(body, 'CLAIMED')
+    if (body.action === 'CONFIRM_TRANSFER')  return handleTransferState(body, 'CONFIRMED')
+    if (body.action === 'DISPUTE_TRANSFER')  return handleTransferState(body, 'DISPUTED')
     if (body.action === 'MARK_PURCHASED')    return handleMarkPurchased(body)
     if (body.action === 'MARK_DISTRIBUTED')  return handleMarkDistributed(body)
     if (body.action === 'PAY_CONTRIBUTION')  return handlePayContrib(body)
@@ -627,29 +720,458 @@ async function handleDeleteItem(body: any): Promise<NextResponse> {
 }
 
 // ── Item status transitions ───────────────────────────────────
+// ══════════════════════════════════════════════════════════════
+// SMART SETTLEMENT
+// ══════════════════════════════════════════════════════════════
+// All settlement arithmetic runs in integer minor units. $620/6 in floating
+// point is 103.33333333333333 and six of those do not sum to $620.00.
+const cents = (v: any) => Math.round(Number(v || 0) * 100)
+const money = (c: number) => (c / 100).toFixed(2)
+
+type SettleNode = { key: string; type: 'MEMBER' | 'SUPPLIER'; bal: number }
+
+// Greedy min-cash-flow. Sorted by amount desc then key, so the same inputs
+// always produce the same instructions — a member must never be told to pay
+// a different person just because a page was refreshed.
+function solveSettlement(nodes: SettleNode[]) {
+  const payers = nodes.filter(n => n.bal < 0)
+    .map(n => ({ ...n, rem: -n.bal }))
+    .sort((a, b) => b.rem - a.rem || a.key.localeCompare(b.key))
+  const recvs = nodes.filter(n => n.bal > 0)
+    .map(n => ({ ...n, rem: n.bal }))
+    .sort((a, b) => b.rem - a.rem || a.key.localeCompare(b.key))
+
+  const out: { payer: string; payee: string; payeeType: 'MEMBER'|'SUPPLIER'; cents: number }[] = []
+  let i = 0, j = 0
+  while (i < payers.length && j < recvs.length) {
+    const amt = Math.min(payers[i].rem, recvs[j].rem)
+    if (amt > 0) out.push({ payer: payers[i].key, payee: recvs[j].key, payeeType: recvs[j].type, cents: amt })
+    payers[i].rem -= amt; recvs[j].rem -= amt
+    if (payers[i].rem === 0) i++
+    if (recvs[j].rem === 0) j++
+  }
+  return out
+}
+
+// Split a total across n members to the cent. The remainder cents rotate by
+// period so the same two members do not carry the extra cent every cycle.
+function splitContribution(totalCents: number, userIds: string[], periodNumber: number) {
+  const n = userIds.length
+  const base = Math.floor(totalCents / n)
+  const rem  = totalCents - base * n
+  const ordered = [...userIds].sort()
+  const offset  = n > 0 ? (periodNumber - 1) % n : 0
+  const out = new Map<string, number>(ordered.map(u => [u, base]))
+  for (let k = 0; k < rem; k++) {
+    const u = ordered[(offset + k) % n]
+    out.set(u, (out.get(u) as number) + 1)
+  }
+  return out
+}
+
+// ── Funds confirmation ────────────────────────────────────────
+// A tick is not a payment. The member is holding cash they have not handed
+// to anyone — they will not know who to pay until the settlement is solved.
+async function handleFundsResponse(body: any, hasFunds: boolean): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const userId = typeof body.userId === 'string' ? body.userId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !userId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId, userId and periodNumber are required' }, { status:400 })
+
+  const cyc = await sql(`SELECT status FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period])
+  if (!cyc.length) return NextResponse.json({ success:false, error:'Cycle not found' }, { status:404 })
+  if (!['OPEN','REOPENED'].includes(String(cyc[0].status)))
+    return NextResponse.json({ success:false, error:`Cycle ${period} is ${String(cyc[0].status).toLowerCase()} — the roll-call is closed. Reopen it to change a response.` }, { status:409 })
+
+  const done = await sql(
+    `UPDATE "GroceryContribution"
+        SET "fundsConfirmedAt"   = ${hasFunds ? 'NOW()' : 'NULL'},
+            "fundsConfirmedById" = ${hasFunds ? '$4' : 'NULL'},
+            "fundsDeclinedAt"    = ${hasFunds ? 'NULL' : 'NOW()'},
+            "declineReason"      = ${hasFunds ? 'NULL' : '$4'},
+            "updatedAt"          = NOW()
+      WHERE "clubId"=$1 AND "userId"=$2 AND "periodNumber"=$3
+      RETURNING "amountPayable"`,
+    [clubId, userId, period,
+     hasFunds ? (typeof body.confirmedById === 'string' ? body.confirmedById : null)
+              : (typeof body.reason === 'string' ? body.reason : null)]
+  )
+  if (!done.length)
+    return NextResponse.json({ success:false, error:'No contribution row for that member in this period' }, { status:404 })
+
+  return NextResponse.json({ success:true,
+    message: hasFunds
+      ? `Confirmed — $${fmtAmt(done[0].amountPayable)} available for this cycle`
+      : `Recorded as not available. This contribution will carry forward as arrears.` })
+}
+
+// ── Lock the roll-call: OPEN -> FUNDED ────────────────────────
+// Fixes who is in the cycle and how much money is in the room. Decliners are
+// out entirely and their contribution is raised as arrears.
+async function handleLockContributions(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId and periodNumber are required' }, { status:400 })
+
+  const [cyc, rows] = await Promise.all([
+    sql(`SELECT status FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period]),
+    sql(`SELECT gc.id, gc."userId", gc."amountDue", gc."carryAdjustment", gc."amountPayable",
+                gc."fundsConfirmedAt", gc."fundsDeclinedAt", gc."arrearsCarriedAt",
+                u."fullName" AS "memberName",
+                COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                           WHERE cf."clubId"=gc."clubId" AND cf."userId"=gc."userId"
+                             AND cf."appliedPeriod"=gc."periodNumber"
+                             AND cf.reason='OUT_OF_POCKET'),0)              AS "oop"
+           FROM "GroceryContribution" gc
+           JOIN "User" u ON u.id = gc."userId"
+           JOIN "GroceryMember" gm ON gm."clubId"=gc."clubId" AND gm."userId"=gc."userId" AND gm."isActive"=true
+          WHERE gc."clubId"=$1 AND gc."periodNumber"=$2`, [clubId, period]),
+  ])
+
+  if (!cyc.length) return NextResponse.json({ success:false, error:'Cycle not found' }, { status:404 })
+  if (!['OPEN','REOPENED'].includes(String(cyc[0].status)))
+    return NextResponse.json({ success:false, error:`Cycle ${period} is already ${String(cyc[0].status).toLowerCase()}` }, { status:409 })
+  if (!rows.length) return NextResponse.json({ success:false, error:'No contribution rows for this period' }, { status:409 })
+
+  // Everyone must have answered. Treating silence as a decline would quietly
+  // drop a member from the cycle and raise arrears they never agreed to.
+  const silent = rows.filter((r: any) => !r.fundsConfirmedAt && !r.fundsDeclinedAt)
+  if (silent.length) {
+    return NextResponse.json({ success:false,
+      error:`${silent.length} member${silent.length===1?' has':'s have'} not answered yet: ${silent.map((r:any)=>r.memberName).join(', ')}` },
+      { status:409 })
+  }
+
+  const confirmed = rows.filter((r: any) => r.fundsConfirmedAt)
+  const declined  = rows.filter((r: any) => r.fundsDeclinedAt)
+  if (!confirmed.length)
+    return NextResponse.json({ success:false, error:'Nobody has funds available — there is nothing to assign this cycle.' }, { status:409 })
+
+  // Pot = what confirmed members will actually hand over. Change they are
+  // holding stays IN the pot (it is cash in the room); money the club owes
+  // them comes OUT of it.
+  const potCents = confirmed.reduce((t: number, r: any) => t + cents(r.amountDue) + cents(r.oop), 0)
+
+  // Arrears for decliners, once only — "arrearsCarriedAt" makes a re-run a
+  // no-op rather than doubling the debt.
+  const toCarry = declined.filter((r: any) => !r.arrearsCarriedAt && cents(r.amountPayable) > 0)
+  if (toCarry.length) {
+    const params: any[] = [clubId]
+    const tuples = toCarry.map((r: any) => {
+      const b = params.length
+      params.push(randomUUID(), String(r.userId), Number(r.amountPayable), String(r.id),
+        `Contribution for period ${period} — funds not available`)
+      return `($${b+1},$1,$${b+2},$${b+3},'ARREARS',$${b+4},$${b+5},NOW())`
+    }).join(',')
+    await exec(
+      `INSERT INTO "GroceryCarryForward"
+         (id,"clubId","userId",amount,reason,"sourceContributionId",notes,"createdAt")
+       VALUES ${tuples}`, params)
+    await exec(
+      `UPDATE "GroceryContribution" SET "arrearsCarriedAt"=NOW(), "updatedAt"=NOW()
+        WHERE id IN (${toCarry.map((_: any, i: number) => `$${i+1}`).join(',')})`,
+      toCarry.map((r: any) => String(r.id)))
+  }
+
+  await exec(
+    `UPDATE "GroceryCycle"
+        SET status='FUNDED', "confirmedPot"=$1, "confirmedMemberCount"=$2,
+            "declinedMemberCount"=$3, "fundedAt"=NOW(), "updatedAt"=NOW()
+      WHERE "clubId"=$4 AND "periodNumber"=$5`,
+    [Number(money(potCents)), confirmed.length, declined.length, clubId, period])
+
+  return NextResponse.json({ success:true,
+    data:{ confirmedPot: Number(money(potCents)), confirmed: confirmed.length,
+           declined: declined.length, arrearsRaised: toCarry.length },
+    message:`${confirmed.length} member${confirmed.length===1?'':'s'} confirmed — $${money(potCents)} available to assign.` +
+            (declined.length ? ` ${declined.length} declined; their contributions carry as arrears.` : '') })
+}
+
+// ── Lock a cycle ──────────────────────────────────────────────
+// Snapshots the assignment position, derives contributions from it and
+// writes them onto the pre-generated rows for that period.
+async function handleLockCycle(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId and periodNumber are required' }, { status:400 })
+
+  const [cycles, members, sums] = await Promise.all([
+    sql(`SELECT * FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period]),
+    sql(`SELECT gc."userId",
+                COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                           WHERE cf."clubId"=gc."clubId" AND cf."userId"=gc."userId"
+                             AND cf."appliedPeriod"=gc."periodNumber"
+                             AND cf.reason='OUT_OF_POCKET'),0) AS "oop",
+                COALESCE(gc."carryAdjustment",0)               AS "carry"
+           FROM "GroceryContribution" gc
+          WHERE gc."clubId"=$1 AND gc."periodNumber"=$2
+            AND gc."fundsConfirmedAt" IS NOT NULL
+          ORDER BY gc."userId"`, [clubId, period]),
+    sql(`SELECT COALESCE(SUM("advanceAmount"),0) AS total, COUNT(*) AS n
+           FROM "GroceryAssignment"
+          WHERE "clubId"=$1 AND "periodNumber"=$2 AND status <> 'CANCELLED'`, [clubId, period]),
+  ])
+
+  if (!cycles.length)
+    return NextResponse.json({ success:false, error:`Cycle ${period} does not exist for this club` }, { status:404 })
+  if (cycles[0].status !== 'FUNDED')
+    return NextResponse.json({ success:false,
+      error: cycles[0].status === 'OPEN'
+        ? 'Close the funds roll-call first — contributions cannot be derived until you know who has money.'
+        : `Cycle ${period} is already ${String(cycles[0].status).toLowerCase()}.` }, { status:409 })
+  if (!members.length)
+    return NextResponse.json({ success:false, error:'No members confirmed funds for this cycle' }, { status:400 })
+  if (Number(sums[0].n) === 0)
+    return NextResponse.json({ success:false, error:'Assign at least one item before locking — contributions are derived from what is assigned.' }, { status:400 })
+
+  const totalCents = cents(sums[0].total)
+  if (totalCents <= 0)
+    return NextResponse.json({ success:false, error:'Assigned total is zero. Set the cash advances before locking.' }, { status:400 })
+
+  const userIds = members.map((m: any) => String(m.userId))
+
+  // Assignments cannot exceed what confirmed members are handing over.
+  const potCents = cents(cycles[0].confirmedPot)
+  if (totalCents > potCents) {
+    return NextResponse.json({ success:false,
+      error:`Assigned $${money(totalCents)} exceeds the $${money(potCents)} confirmed pot. Trim the list or reduce the advances.` },
+      { status:409 })
+  }
+
+  // Money the club owes members comes out of the pot before it is shared, so
+  // the base share is the assignable total net of those debts. Change a member
+  // is HOLDING is not netted off — that cash is in the room and they can pay
+  // it out; it only reduces the new money they must find.
+  const oopCents  = members.reduce((t: number, m: any) => t + cents(m.oop), 0)
+  const baseTotal = totalCents - oopCents
+  const split     = splitContribution(baseTotal, userIds, period)
+
+  // Reconciliation guard: base shares plus what the club owes must equal the
+  // assigned total exactly, or the settlement cannot balance.
+  const check = [...split.values()].reduce((a, b) => a + b, 0) + oopCents
+  if (check !== totalCents)
+    return NextResponse.json({ success:false, error:`Contribution split did not reconcile (${check} vs ${totalCents} cents). Nothing was written.` }, { status:500 })
+
+  // One statement for every member's amountDue, joined against a VALUES list.
+  const params: any[] = [clubId, period]
+  const tuples = userIds.map(u => {
+    const b = params.length
+    params.push(u, Number(money(split.get(u) as number)))
+    return `($${b+1}::text,$${b+2}::numeric)`
+  }).join(',')
+
+  await exec(
+    `UPDATE "GroceryContribution" gc
+        SET "amountDue" = v.amt, "updatedAt" = NOW()
+       FROM (VALUES ${tuples}) AS v("userId", amt)
+      WHERE gc."clubId" = $1 AND gc."periodNumber" = $2 AND gc."userId" = v."userId"`,
+    params
+  )
+
+  const baseCents = Math.floor(baseTotal / userIds.length)
+  await exec(
+    `UPDATE "GroceryCycle"
+        SET status='LOCKED', "assignedTotal"=$1, "memberCount"=$2,
+            "baseContribution"=$3, "roundingCents"=$4,
+            "lockedAt"=NOW(), "lockedById"=$5, "updatedAt"=NOW()
+      WHERE "clubId"=$6 AND "periodNumber"=$7`,
+    [Number(money(totalCents)), userIds.length, Number(money(baseCents)),
+     totalCents - baseCents * userIds.length,
+     typeof body.lockedById === 'string' ? body.lockedById : null, clubId, period]
+  )
+
+  return NextResponse.json({ success:true,
+    data:{ assignedTotal: Number(money(totalCents)), memberCount: userIds.length,
+           baseContribution: Number(money(baseCents)),
+           roundingCents: totalCents - baseCents * userIds.length },
+    message:`Cycle ${period} locked. $${money(totalCents)} assigned across ${userIds.length} confirmed member${userIds.length===1?'':'s'} — $${money(baseCents)} each.` })
+}
+
+// ── Solve the settlement ──────────────────────────────────────
+async function handleSolveSettlement(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId and periodNumber are required' }, { status:400 })
+
+  const [cycles, contribs, assigns, confirmed, clubs] = await Promise.all([
+    sql(`SELECT * FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period]),
+    sql(`SELECT gc."userId", gc."amountDue", gc."carryAdjustment", gc."amountPayable",
+                COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                           WHERE cf."clubId"=gc."clubId" AND cf."userId"=gc."userId"
+                             AND cf."appliedPeriod"=gc."periodNumber"
+                             AND cf.reason='CHANGE_HELD'),0) AS "held"
+           FROM "GroceryContribution" gc
+          WHERE gc."clubId"=$1 AND gc."periodNumber"=$2
+            AND gc."fundsConfirmedAt" IS NOT NULL`, [clubId, period]),
+    sql(`SELECT "userId","advanceAmount","fundingMode","supplierAccountId"
+           FROM "GroceryAssignment"
+          WHERE "clubId"=$1 AND "periodNumber"=$2 AND status <> 'CANCELLED'`, [clubId, period]),
+    sql(`SELECT "payerId","payeeType","payeeUserId","payeeSupplierId","amountCents"
+           FROM "GrocerySettlementTransfer"
+          WHERE "clubId"=$1 AND "periodNumber"=$2 AND status='CONFIRMED'`, [clubId, period]),
+    sql(`SELECT currency FROM "GroceryClub" WHERE id=$1`, [clubId]),
+  ])
+
+  if (!cycles.length)
+    return NextResponse.json({ success:false, error:'Cycle not found' }, { status:404 })
+  if (!['LOCKED','SETTLED'].includes(String(cycles[0].status)))
+    return NextResponse.json({ success:false, error:'Lock the cycle before solving the settlement — contributions are not issued until it is locked.' }, { status:409 })
+  if (!contribs.length)
+    return NextResponse.json({ success:false, error:'No confirmed members for this period — nobody has funds available.' }, { status:409 })
+
+  // B(i) = purchases assigned to the member − their contribution.
+  // SUPPLIER_DIRECT lines do not put cash in a member's hands, so they do
+  // not raise that member's requirement; the supplier account becomes its
+  // own receiver node instead.
+  const bal = new Map<string, number>()
+  for (const c of contribs) {
+    const payable = c.amountPayable != null
+      ? cents(c.amountPayable)
+      : cents(c.amountDue) + cents(c.carryAdjustment)
+    // Change held is negative in "carryAdjustment" because it reduces the NEW
+    // cash the member brings — but they are holding that cash and can pay it
+    // out, so it must not reduce what they put into the settlement.
+    const contribution = payable - cents(c.held)
+    bal.set(String(c.userId), -contribution)
+  }
+  const supplier = new Map<string, number>()
+  for (const a of assigns) {
+    const amt = cents(a.advanceAmount)
+    if (String(a.fundingMode) === 'SUPPLIER_DIRECT' && a.supplierAccountId) {
+      supplier.set(String(a.supplierAccountId), (supplier.get(String(a.supplierAccountId)) || 0) + amt)
+    } else {
+      const k = String(a.userId)
+      // A decliner has no node. Adding their assignment here would unbalance
+      // the graph against a contribution that is never coming.
+      if (!bal.has(k)) continue
+      bal.set(k, (bal.get(k) as number) + amt)
+    }
+  }
+
+  // Money already CONFIRMED is settled and must not be re-instructed.
+  for (const t of confirmed) {
+    const amt = Number(t.amountCents)
+    bal.set(String(t.payerId), (bal.get(String(t.payerId)) || 0) + amt)
+    if (String(t.payeeType) === 'MEMBER' && t.payeeUserId) {
+      bal.set(String(t.payeeUserId), (bal.get(String(t.payeeUserId)) || 0) - amt)
+    } else if (t.payeeSupplierId) {
+      supplier.set(String(t.payeeSupplierId), (supplier.get(String(t.payeeSupplierId)) || 0) - amt)
+    }
+  }
+
+  const nodes: SettleNode[] = [
+    ...[...bal.entries()].map(([key, b]) => ({ key, type:'MEMBER' as const, bal:b })),
+    ...[...supplier.entries()].map(([key, need]) => ({ key, type:'SUPPLIER' as const, bal:need })),
+  ]
+
+  // Explicit failure over a set of instructions that cannot reconcile. If
+  // payers and receivers do not offset, the underlying figures are wrong and
+  // issuing instructions would move the wrong money.
+  const owed = nodes.filter(n => n.bal < 0).reduce((t, n) => t - n.bal, 0)
+  const need = nodes.filter(n => n.bal > 0).reduce((t, n) => t + n.bal, 0)
+  if (owed !== need) {
+    return NextResponse.json({ success:false,
+      error:`Settlement does not reconcile: $${money(owed)} payable against $${money(need)} receivable (difference $${money(Math.abs(owed-need))}). This usually means carry-forward credits have changed the contributions since the cycle was locked. Re-lock the cycle, then solve.` },
+      { status:409 })
+  }
+
+  const transfers = solveSettlement(nodes)
+  const batchId   = randomUUID()
+  const currency  = String(clubs[0]?.currency || 'USD')
+
+  // Supersede the previous instruction set. CONFIRMED rows are left alone —
+  // they are already netted out of the balances above.
+  await exec(
+    `UPDATE "GrocerySettlementTransfer"
+        SET status='CANCELLED', "cancelledAt"=NOW(), "updatedAt"=NOW()
+      WHERE "clubId"=$1 AND "periodNumber"=$2 AND status IN ('INSTRUCTED','CLAIMED')`,
+    [clubId, period]
+  )
+
+  if (transfers.length) {
+    const params: any[] = [clubId, period, batchId, currency]
+    const tuples = transfers.map(t => {
+      const b = params.length
+      params.push(randomUUID(), t.payer,
+        t.payeeType === 'MEMBER' ? t.payee : null,
+        t.payeeType === 'SUPPLIER' ? t.payee : null,
+        t.cents, Number(money(t.cents)), t.payeeType)
+      return `($${b+1},$1,$2,$${b+2},$${b+7},$${b+3},$${b+4},$${b+5},$${b+6},$4,'INSTRUCTED',$3,NOW(),NOW())`
+    }).join(',')
+
+    await exec(
+      `INSERT INTO "GrocerySettlementTransfer"
+         (id,"clubId","periodNumber","payerId","payeeType","payeeUserId","payeeSupplierId",
+          "amountCents",amount,currency,status,"solveBatchId","createdAt","updatedAt")
+       VALUES ${tuples}`,
+      params
+    )
+  }
+
+  await exec(
+    `UPDATE "GroceryCycle" SET status='SETTLED', "settledAt"=NOW(), "updatedAt"=NOW()
+      WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period]
+  )
+
+  return NextResponse.json({ success:true,
+    data:{ transfers: transfers.length, totalCents: transfers.reduce((t, x) => t + x.cents, 0), batchId },
+    message:`Settlement solved: ${transfers.length} payment${transfers.length===1?'':'s'} moving $${money(transfers.reduce((t,x)=>t+x.cents,0))}.` })
+}
+
+// ── Attestation ───────────────────────────────────────────────
+// The platform moves no money. It records that the payer says they paid and
+// that the payee agrees. Only CONFIRMED funds a buyer's basket.
+async function handleTransferState(body: any, next: 'CLAIMED'|'CONFIRMED'|'DISPUTED'): Promise<NextResponse> {
+  const id = typeof body.transferId === 'string' ? body.transferId : ''
+  if (!id) return NextResponse.json({ success:false, error:'transferId is required' }, { status:400 })
+
+  const allowedFrom: Record<string, string[]> = {
+    CLAIMED:   ['INSTRUCTED','DISPUTED'],
+    CONFIRMED: ['INSTRUCTED','CLAIMED','DISPUTED'],
+    DISPUTED:  ['CLAIMED','CONFIRMED'],
+  }
+  const from = allowedFrom[next].map(x => `'${x}'`).join(',')
+
+  const stamp =
+    next === 'CLAIMED'   ? `"claimedAt"=NOW(), "paymentReference"=COALESCE($2,"paymentReference")`
+  : next === 'CONFIRMED' ? `"confirmedAt"=NOW(), "confirmedById"=$2`
+  :                        `"disputedAt"=NOW(), "disputeReason"=$2`
+
+  const arg = typeof body.reference === 'string' ? body.reference
+            : typeof body.confirmedById === 'string' ? body.confirmedById
+            : typeof body.reason === 'string' ? body.reason : null
+
+  const done = await sql(
+    `UPDATE "GrocerySettlementTransfer"
+        SET status=$3, ${stamp}, "updatedAt"=NOW()
+      WHERE id=$1 AND status IN (${from})
+      RETURNING id, amount, status`,
+    [id, arg, next]
+  )
+  if (!done.length) {
+    return NextResponse.json({ success:false,
+      error:`This payment cannot move to ${next.toLowerCase()} from its current state.` }, { status:409 })
+  }
+
+  const label = next === 'CLAIMED' ? 'marked as sent'
+              : next === 'CONFIRMED' ? 'confirmed as received' : 'flagged as disputed'
+  return NextResponse.json({ success:true, message:`Payment of $${fmtAmt(done[0].amount)} ${label}` })
+}
+
+function fmtAmt(v: any) { return Number(v || 0).toFixed(2) }
+
 // ── Assignment helpers ────────────────────────────────────────
 
-// Cash actually collected vs advances already out. The club never holds a
-// balance, so the only money that can be handed out is money members have
-// paid in. `excludeId` lets an existing assignment be re-costed without
-// counting its own current advance twice.
-async function cashPosition(clubId: string, excludeId: string | null) {
-  const rows = await sql(
-    `SELECT
-       (SELECT COALESCE(SUM("amountPaid"),0)
-          FROM "GroceryContribution"
-         WHERE "clubId"=$1 AND status='PAID')                       AS collected,
-       (SELECT COALESCE(SUM("advanceAmount"),0)
-          FROM "GroceryAssignment"
-         WHERE "clubId"=$1
-           AND status IN ('ASSIGNED','PURCHASED')
-           AND ($2::text IS NULL OR id <> $2::text))                AS advanced`,
-    [clubId, excludeId]
-  )
-  const collected = Number(rows[0]?.collected || 0)
-  const advanced  = Number(rows[0]?.advanced  || 0)
-  return { collected, advanced, available: collected - advanced }
-}
+// NOTE — v1.4 had a cashPosition() guard refusing advances that exceeded cash
+// collected. That is wrong under the confirmed model: contributions are
+// DERIVED from the assigned total, so nothing is collected until the cycle is
+// locked, and the guard would refuse the very first assignment of every cycle.
+// The ceiling is now structural — assigned total defines what members owe —
+// and the reconciliation check lives in handleSolveSettlement.
 
 // "GroceryItem"."assignedToId"/"assignedToName" are a mirror of the
 // assignment rows, not the source of truth. With one live assignee they hold
@@ -763,6 +1285,12 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
 
   const qty     = Number(body.qtyAssigned)
   const advance = Number(body.advanceAmount)
+  const period  = Number.isInteger(Number(body.periodNumber)) ? Number(body.periodNumber) : 1
+  const mode    = body.fundingMode === 'SUPPLIER_DIRECT' ? 'SUPPLIER_DIRECT' : 'MEMBER_CASH'
+  const supplierId = mode === 'SUPPLIER_DIRECT' && typeof body.supplierAccountId === 'string' && body.supplierAccountId
+    ? body.supplierAccountId : null
+  if (mode === 'SUPPLIER_DIRECT' && !supplierId)
+    return NextResponse.json({ success:false, error:'Choose the supplier account this purchase will be paid into' }, { status:400 })
   if (!Number.isFinite(qty) || qty <= 0)
     return NextResponse.json({ success:false, error:'Quantity must be greater than zero' }, { status:400 })
   if (!Number.isFinite(advance) || advance < 0)
@@ -781,10 +1309,21 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
             EXISTS (SELECT 1 FROM "GroceryMember" gm
                      WHERE gm."clubId"=gi."clubId" AND gm."userId"=$2
                        AND gm."isActive"=true)                            AS "isMember",
+            (SELECT cy.status FROM "GroceryCycle" cy
+              WHERE cy."clubId"=gi."clubId" AND cy."periodNumber"=$3)     AS "cycleStatus",
+            (SELECT cy2."confirmedPot" FROM "GroceryCycle" cy2
+              WHERE cy2."clubId"=gi."clubId" AND cy2."periodNumber"=$3)   AS "confirmedPot",
+            (SELECT gc2."fundsConfirmedAt" IS NOT NULL FROM "GroceryContribution" gc2
+              WHERE gc2."clubId"=gi."clubId" AND gc2."userId"=$2
+                AND gc2."periodNumber"=$3)                                AS "hasFunds",
+            COALESCE((SELECT SUM(ga4."advanceAmount") FROM "GroceryAssignment" ga4
+                       WHERE ga4."clubId"=gi."clubId" AND ga4."periodNumber"=$3
+                         AND ga4.status <> 'CANCELLED'
+                         AND NOT (ga4."itemId"=gi.id AND ga4."userId"=$2)),0) AS "advancedOther",
             (SELECT u."fullName" FROM "User" u WHERE u.id=$2)             AS "memberName"
        FROM "GroceryItem" gi
       WHERE gi.id = $1`,
-    [itemId, userId]
+    [itemId, userId, period]
   )
   if (!ctx.length) return NextResponse.json({ success:false, error:'Item not found' }, { status:404 })
   const c = ctx[0]
@@ -803,29 +1342,54 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
       error:`Only ${totalQty - qtyOthers} ${c.unit} of ${totalQty} remain unassigned on this item.` }, { status:409 })
   }
 
-  // The club holds no float — an advance can only come out of cash members
-  // have actually paid in. Fail loudly rather than record an overdraw.
-  const cash = await cashPosition(String(c.clubId), c.existingId ? String(c.existingId) : null)
-  if (advance > cash.available) {
+  // Contributions for a locked cycle have already been derived from the
+  // assignments and, once solved, members are holding payment instructions
+  // based on them. Changing an assignment now would invalidate those.
+  if (String(c.cycleStatus) === 'OPEN' || String(c.cycleStatus) === 'REOPENED') {
     return NextResponse.json({ success:false,
-      error:`Advance of $${advance.toFixed(2)} exceeds the $${cash.available.toFixed(2)} still uncommitted. Collected $${cash.collected.toFixed(2)}, already advanced $${cash.advanced.toFixed(2)}.` },
+      error:'Close the funds roll-call first. Items are assigned against money members have confirmed they hold, so the pot must be known before anything can be allocated.' },
+      { status:409 })
+  }
+  if (c.cycleStatus && String(c.cycleStatus) !== 'FUNDED') {
+    return NextResponse.json({ success:false,
+      error:`Cycle ${period} is ${String(c.cycleStatus).toLowerCase()}. Reopen it to change assignments — contributions and payment instructions are derived from them.` },
+      { status:409 })
+  }
+  if (c.hasFunds === false) {
+    return NextResponse.json({ success:false,
+      error:`${c.memberName} did not confirm funds for this cycle, so they cannot be given a purchase to make.` },
+      { status:409 })
+  }
+
+  // The room only holds what members confirmed. Advancing beyond it would
+  // instruct payments that cannot be funded.
+  const potCents  = cents(c.confirmedPot)
+  const otherCents = cents(c.advancedOther)
+  if (cents(advance) + otherCents > potCents) {
+    return NextResponse.json({ success:false,
+      error:`Advance of $${advance.toFixed(2)} would take total assignments to $${money(otherCents + cents(advance))}, above the $${money(potCents)} confirmed pot.` },
       { status:409 })
   }
 
   await exec(
     `INSERT INTO "GroceryAssignment"
-       (id,"clubId","itemId","userId","qtyAssigned","advanceAmount",status,notes,"createdAt","updatedAt")
-     VALUES ($1,$2,$3,$4,$5,$6,'ASSIGNED',$7,NOW(),NOW())
+       (id,"clubId","itemId","userId","qtyAssigned","advanceAmount",status,notes,
+        "periodNumber","fundingMode","supplierAccountId","createdAt","updatedAt")
+     VALUES ($1,$2,$3,$4,$5,$6,'ASSIGNED',$7,$8,$9,$10,NOW(),NOW())
      ON CONFLICT ("itemId","userId") DO UPDATE
-       SET "qtyAssigned"   = EXCLUDED."qtyAssigned",
-           "advanceAmount" = EXCLUDED."advanceAmount",
-           status          = 'ASSIGNED',
-           notes           = EXCLUDED.notes,
+       SET "qtyAssigned"       = EXCLUDED."qtyAssigned",
+           "advanceAmount"     = EXCLUDED."advanceAmount",
+           status              = 'ASSIGNED',
+           notes               = EXCLUDED.notes,
+           "periodNumber"      = EXCLUDED."periodNumber",
+           "fundingMode"       = EXCLUDED."fundingMode",
+           "supplierAccountId" = EXCLUDED."supplierAccountId",
            "actualSpent"   = NULL,
            "acquittedAt"   = NULL,
            "updatedAt"     = NOW()`,
     [randomUUID(), String(c.clubId), itemId, userId, qty, advance,
-     typeof body.notes === 'string' && body.notes ? body.notes : null]
+     typeof body.notes === 'string' && body.notes ? body.notes : null,
+     period, mode, supplierId]
   )
 
   await syncItemMirror(itemId)

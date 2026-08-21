@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.3
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.4
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -17,6 +17,17 @@
 //         - KPI strip reworded from pool language (Budget/Collected/Spent/
 //           Remaining) to the disbursement position.
 //       Requires api/grocery route v1.4 and sql/14-grocery-assignments.sql.
+// v1.4: CYCLE STAGES + ROLL-CALL + SETTLEMENT. Matches the real meeting flow:
+//         day 1    budget, pick items, set the target contribution
+//         last day each member ticks that they HAVE their money (roll-call)
+//         then     lock the roll-call — the pot is now known
+//         then     assign items within the pot
+//         then     lock the cycle and solve who pays whom
+//       CycleBar drives the stage. RollCallPanel is the last-day screen.
+//       SettlementPanel shows each payment with Mark Sent / Confirm Received,
+//       and a buyer's funded bar counts ONLY confirmed money — a payer's
+//       claim is not cash in the buyer's hand.
+//       Requires api/grocery route v1.6.1 and sql/16-grocery-confirmation.sql.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -385,7 +396,7 @@ function PurchaseModal({ item, members, clubId, onClose, onSuccess }: any) {
 // cursor focus. An assignment is a member + a quantity + the cash they are
 // handed to buy it. Only club members are offered; the server re-checks
 // membership, the remaining quantity and the uncommitted cash ceiling.
-function AssignItemModal({ item, members, clubId, available, existing, onClose, onSuccess, onError }: any) {
+function AssignItemModal({ item, members, clubId, available, existing, periodNumber, suppliers, onClose, onSuccess, onError }: any) {
   const mine       = existing || null
   const remaining  = Number(item.qtyUnassigned ?? item.totalQty) + Number(mine?.qtyAssigned || 0)
   const [search, setSearch] = useState('')
@@ -394,6 +405,8 @@ function AssignItemModal({ item, members, clubId, available, existing, onClose, 
   const [advance, setAdv]   = useState<string>(String(mine?.advanceAmount || ''))
   const [touched, setTouched] = useState(!!mine)
   const [saving, setSaving] = useState(false)
+  const [mode, setMode]     = useState<string>(mine?.fundingMode || 'MEMBER_CASH')
+  const [supplier, setSup]  = useState<string>(mine?.supplierAccountId || '')
 
   const qtyNum = parseFloat(qty || '0')
   const advNum = parseFloat(advance || '0')
@@ -411,7 +424,8 @@ function AssignItemModal({ item, members, clubId, available, existing, onClose, 
 
   const qtyBad  = !(qtyNum > 0) || qtyNum > remaining + 0.0001
   const advBad  = !(effAdv >= 0) || effAdv > headroom + 0.0001
-  const blocked = saving || !picked || qtyBad || advBad
+  const supBad  = mode==='SUPPLIER_DIRECT' && !supplier
+  const blocked = saving || !picked || qtyBad || advBad || supBad
 
   async function submit() {
     setSaving(true)
@@ -419,7 +433,9 @@ function AssignItemModal({ item, members, clubId, available, existing, onClose, 
       const res = await fetch('/api/grocery', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action:'ASSIGN_ITEM', clubId, itemId:item.id,
-          assignedToId: picked, qtyAssigned: qtyNum, advanceAmount: effAdv }),
+          assignedToId: picked, qtyAssigned: qtyNum, advanceAmount: effAdv,
+          periodNumber: periodNumber || 1, fundingMode: mode,
+          supplierAccountId: mode==='SUPPLIER_DIRECT' ? supplier : null }),
       })
       const data = await res.json()
       if (data.success) { onSuccess(data.message); onClose() }
@@ -491,6 +507,24 @@ function AssignItemModal({ item, members, clubId, available, existing, onClose, 
                       onChange={e=>{ setTouched(true); setAdv(e.target.value) }}
                       style={{width:'100%',padding:'9px 10px',border:`1.5px solid ${advBad?'#FECACA':'#E2E8F0'}`,borderRadius:'8px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
                   </div>
+                </div>
+
+                <div style={{marginBottom:'10px'}}>
+                  <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>How is it paid for?</label>
+                  <div style={{display:'flex',gap:'6px',marginBottom:'6px'}}>
+                    {[['MEMBER_CASH','Cash to member'],['SUPPLIER_DIRECT','Straight to supplier']].map(([v,l])=>(
+                      <button key={v} type="button" onClick={()=>setMode(v)}
+                        style={{flex:1,padding:'9px 6px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${mode===v?PURPLE:'#E2E8F0'}`,background:mode===v?'#F5F3FF':'white',color:mode===v?PURPLE:'#64748B'}}>{l}</button>
+                    ))}
+                  </div>
+                  {mode==='SUPPLIER_DIRECT'&&(suppliers&&suppliers.length
+                    ? <select value={supplier} onChange={e=>setSup(e.target.value)}
+                        style={{width:'100%',padding:'9px 10px',border:`1.5px solid ${supBad?'#FECACA':'#E2E8F0'}`,borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box',background:'white'}}>
+                        <option value="">Choose supplier account...</option>
+                        {suppliers.map((x:any)=><option key={x.id} value={x.id}>{x.supplierName}{x.bankName?` — ${x.bankName}`:''}</option>)}
+                      </select>
+                    : <div style={{fontSize:'11px',color:RED}}>No supplier accounts set up for this club yet.</div>)}
+                  {mode==='SUPPLIER_DIRECT'&&<div style={{fontSize:'10px',color:'#94A3B8',marginTop:'4px'}}>Members pay the supplier directly — nobody holds the club's cash.</div>}
                 </div>
 
                 {qtyBad && <div style={{fontSize:'11px',color:RED,marginBottom:'6px'}}>Quantity must be above 0 and no more than {remaining} {item.unit}.</div>}
@@ -603,11 +637,220 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
   )
 }
 
+// ── Cycle stage bar ───────────────────────────────────────────
+// OPEN -> FUNDED -> LOCKED -> SETTLED. Each stage exposes only the action
+// that legitimately comes next, so the sequence cannot be run out of order
+// from the UI.
+const CYCLE_META: Record<string, any> = {
+  OPEN:     { label:'Roll-call open',  hint:'Members tick that they have their money', bg:'#EEF2FF', color:'#3730A3' },
+  REOPENED: { label:'Reopened',        hint:'Members tick that they have their money', bg:'#EEF2FF', color:'#3730A3' },
+  FUNDED:   { label:'Funded',          hint:'Assign items within the confirmed pot',   bg:'#FEF9C3', color:GOLD },
+  LOCKED:   { label:'Assignments locked', hint:'Solve the settlement to issue payment instructions', bg:'#E1F5EE', color:TEAL },
+  SETTLED:  { label:'Settled',         hint:'Members pay each other, then buy',        bg:'#DCFCE7', color:GREEN },
+  CLOSED:   { label:'Closed',          hint:'Cycle complete',                          bg:'#F1F5F9', color:'#475569' },
+}
+
+function CycleBar({ cycle, busy, onLockRollCall, onLockCycle, onSolve }: any) {
+  if (!cycle) return null
+  const meta = CYCLE_META[cycle.status] || CYCLE_META.OPEN
+  return (
+    <div style={{background:meta.bg,border:`1px solid ${meta.color}33`,borderRadius:'10px',padding:'12px 14px',display:'flex',flexWrap:'wrap',gap:'12px',alignItems:'center',justifyContent:'space-between'}}>
+      <div style={{minWidth:0}}>
+        <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}}>
+          <span style={{fontSize:'13px',fontWeight:'700',color:meta.color}}>Cycle {cycle.periodNumber} · {meta.label}</span>
+          {cycle.confirmedMemberCount>0&&<span style={{fontSize:'11px',color:'#475569'}}>
+            {cycle.confirmedMemberCount} confirmed{cycle.declinedMemberCount>0?` · ${cycle.declinedMemberCount} declined`:''} · pot ${fmt(cycle.confirmedPot)}
+          </span>}
+        </div>
+        <div style={{fontSize:'11px',color:'#64748B',marginTop:'2px'}}>{meta.hint}</div>
+      </div>
+      <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+        {['OPEN','REOPENED'].includes(cycle.status)&&<button onClick={onLockRollCall} disabled={busy}
+          style={{padding:'8px 14px',minHeight:'44px',background:'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          {busy?'⏳ Working...':'🔒 Close roll-call'}</button>}
+        {cycle.status==='FUNDED'&&<button onClick={onLockCycle} disabled={busy}
+          style={{padding:'8px 14px',minHeight:'44px',background:GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          {busy?'⏳ Working...':'🔒 Lock assignments'}</button>}
+        {cycle.status==='LOCKED'&&<button onClick={onSolve} disabled={busy}
+          style={{padding:'8px 14px',minHeight:'44px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          {busy?'⏳ Solving...':'⚡ Solve settlement'}</button>}
+        {cycle.status==='SETTLED'&&<button onClick={onSolve} disabled={busy}
+          style={{padding:'8px 14px',minHeight:'44px',background:'white',color:TEAL,border:`1px solid ${TEAL}`,borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          ↻ Re-solve</button>}
+      </div>
+    </div>
+  )
+}
+
+// ── Roll-call ─────────────────────────────────────────────────
+// The last-day screen. A tick is NOT a payment — the member is holding cash
+// they have not handed to anyone, and will not know who to pay until the
+// settlement is solved.
+function RollCallPanel({ rows, cycle, busy, onRespond }: any) {
+  const open      = ['OPEN','REOPENED'].includes(cycle?.status)
+  const confirmed = rows.filter((r: any) => r.fundsConfirmedAt)
+  const declined  = rows.filter((r: any) => r.fundsDeclinedAt)
+  const silent    = rows.filter((r: any) => !r.fundsConfirmedAt && !r.fundsDeclinedAt)
+  const pot       = confirmed.reduce((t: number, r: any) => t + Number(r.amountPayable ?? r.amountDue), 0)
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+        {[
+          {l:'Has money', v:String(confirmed.length), c:GREEN},
+          {l:'No money',  v:String(declined.length),  c:declined.length?RED:'#94A3B8'},
+          {l:'Money in the room', v:`$${fmt(pot)}`,   c:TEAL},
+        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+          <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
+          <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
+        </div>)}
+      </div>
+
+      {open&&silent.length>0&&<div style={{background:'#FEF9C3',border:'1px solid #FCD34D',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:GOLD}}>
+        Waiting on {silent.length} member{silent.length===1?'':'s'}. The roll-call cannot close until everyone answers — silence is not counted as a decline.
+      </div>}
+      {!open&&<div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
+        Roll-call is closed for this cycle. Reopen the cycle to change a response.
+      </div>}
+
+      <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
+        {rows.map((r: any, idx: number) => {
+          const yes = !!r.fundsConfirmedAt, no = !!r.fundsDeclinedAt
+          return (
+            <div key={r.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9'}}>
+              <div style={{width:'32px',height:'32px',borderRadius:'50%',flexShrink:0,background:'#E1F5EE',color:TEAL,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'700'}}>
+                {(r.memberName||'?').split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
+              </div>
+              <div style={{flex:1,minWidth:'120px'}}>
+                <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.memberName}</div>
+                <div style={{fontSize:'11px',color:'#64748B'}}>
+                  ${fmt(r.amountPayable ?? r.amountDue)} to bring
+                  {!!r.carryAdjustment&&<span style={{color:r.carryAdjustment<0?'#3730A3':GOLD}}> · ${fmt(r.amountDue)} base {r.carryAdjustment<0?'−':'+'} ${fmt(Math.abs(r.carryAdjustment))} carried</span>}
+                </div>
+                {no&&r.declineReason&&<div style={{fontSize:'10px',color:RED,marginTop:'2px'}}>{r.declineReason}</div>}
+                {no&&r.arrearsCarriedAt&&<div style={{fontSize:'10px',color:GOLD,marginTop:'2px'}}>Carried as arrears</div>}
+              </div>
+              {open
+                ? <div style={{display:'flex',gap:'6px'}}>
+                    <button onClick={()=>onRespond(r.userId,true)} disabled={busy}
+                      style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',border:`1.5px solid ${yes?GREEN:'#E2E8F0'}`,background:yes?'#DCFCE7':'white',color:yes?GREEN:'#64748B'}}>✓ Has money</button>
+                    <button onClick={()=>onRespond(r.userId,false)} disabled={busy}
+                      style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',border:`1.5px solid ${no?RED:'#E2E8F0'}`,background:no?'#FEF2F2':'white',color:no?RED:'#64748B'}}>✗ Not yet</button>
+                  </div>
+                : <Pill bg={yes?'#DCFCE7':no?'#FEF2F2':'#F1F5F9'} color={yes?GREEN:no?RED:'#64748B'}>
+                    {yes?'✓ Confirmed':no?'✗ Declined':'— No answer'}
+                  </Pill>}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+// ── Settlement ────────────────────────────────────────────────
+// Only CONFIRMED money counts toward a buyer's funded bar. A payer marking
+// their own transfer as sent is a claim, not cash in the buyer's hand.
+function SettlementPanel({ transfers, assigns, busy, onState }: any) {
+  if (!transfers.length) return (
+    <div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
+      <div style={{fontSize:'32px',marginBottom:'8px'}}>⚡</div>
+      <p style={{margin:'0 0 4px',color:'#475569'}}>No settlement yet.</p>
+      <p style={{fontSize:'12px',margin:0}}>Close the roll-call, assign the items, then lock and solve.</p>
+    </div>
+  )
+
+  const confirmedIn: Record<string, number> = {}
+  for (const t of transfers) {
+    if (t.status === 'CONFIRMED' && t.payeeUserId)
+      confirmedIn[t.payeeUserId] = (confirmedIn[t.payeeUserId] || 0) + Number(t.amount)
+  }
+  const buyers: Record<string, any> = {}
+  for (const a of assigns) {
+    if (!buyers[a.userId]) buyers[a.userId] = { name:a.memberName, needs:0 }
+    buyers[a.userId].needs += Number(a.advanceAmount)
+  }
+  const totalMoved = transfers.reduce((t: number, x: any) => t + Number(x.amount), 0)
+  const settled    = transfers.filter((t: any) => t.status === 'CONFIRMED')
+    .reduce((t: number, x: any) => t + Number(x.amount), 0)
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+        {[
+          {l:'Payments',      v:String(transfers.length),   c:NAVY},
+          {l:'Total to move', v:`$${fmt(totalMoved)}`,      c:GOLD},
+          {l:'Confirmed',     v:`$${fmt(settled)}`,         c:settled>=totalMoved?GREEN:TEAL},
+        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+          <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
+          <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
+        </div>)}
+      </div>
+
+      {Object.keys(buyers).length>0&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px 14px'}}>
+        <div style={{fontSize:'11px',fontWeight:'700',color:NAVY,textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:'9px'}}>Buyer funding</div>
+        {Object.entries(buyers).map(([uid,b]: any)=>{
+          const have = Number(confirmedIn[uid]||0)
+          const pct  = b.needs>0 ? Math.min(100, Math.round(have/b.needs*100)) : 100
+          return (
+            <div key={uid} style={{marginBottom:'9px'}}>
+              <div style={{display:'flex',justifyContent:'space-between',fontSize:'12px',marginBottom:'3px'}}>
+                <span style={{color:NAVY,fontWeight:'600'}}>{b.name}</span>
+                <span style={{color:pct>=100?GREEN:GOLD}}>${fmt(have)} of ${fmt(b.needs)} received</span>
+              </div>
+              <div style={{height:'6px',background:'#F1F5F9',borderRadius:'3px',overflow:'hidden'}}>
+                <div style={{width:`${pct}%`,height:'100%',background:pct>=100?GREEN:GOLD}}/>
+              </div>
+            </div>
+          )
+        })}
+      </div>}
+
+      <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
+        {transfers.map((t: any, idx: number)=>{
+          const done = t.status==='CONFIRMED'
+          const meta: Record<string,any> = {
+            INSTRUCTED:{bg:'#F1F5F9',color:'#475569',label:'To pay'},
+            CLAIMED:   {bg:'#FEF9C3',color:GOLD,     label:'Sent — awaiting confirmation'},
+            CONFIRMED: {bg:'#DCFCE7',color:GREEN,    label:'Received'},
+            DISPUTED:  {bg:'#FEF2F2',color:RED,      label:'Disputed'},
+          }
+          const m = meta[t.status] || meta.INSTRUCTED
+          return (
+            <div key={t.id} style={{padding:'11px 13px',borderTop:idx===0?'none':'1px solid #F1F5F9',display:'flex',gap:'10px',flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{flex:1,minWidth:'180px'}}>
+                <div style={{fontSize:'13px',color:NAVY}}>
+                  <strong>{t.payerName}</strong> pays <strong>{t.payeeName}</strong>
+                  {t.payeeType==='SUPPLIER'&&<span style={{fontSize:'10px',color:PURPLE,marginLeft:'5px'}}>SUPPLIER</span>}
+                </div>
+                <div style={{fontSize:'11px',color:'#64748B',marginTop:'2px'}}>
+                  ${fmt(t.amount)}
+                  {t.payeeType==='SUPPLIER'&&t.accountNumber&&<span> · {t.bankName} {t.accountNumber}</span>}
+                  {t.reference&&<span> · ref {t.reference}</span>}
+                </div>
+              </div>
+              <Pill bg={m.bg} color={m.color}>{m.label}</Pill>
+              <div style={{display:'flex',gap:'5px'}}>
+                {t.status==='INSTRUCTED'&&<button onClick={()=>onState('CLAIM_TRANSFER',t.id)} disabled={busy}
+                  style={{padding:'6px 10px',minHeight:'44px',background:'#FEF9C3',color:GOLD,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Mark sent</button>}
+                {!done&&<button onClick={()=>onState('CONFIRM_TRANSFER',t.id)} disabled={busy}
+                  style={{padding:'6px 10px',minHeight:'44px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Confirm received</button>}
+                {done&&<button onClick={()=>onState('DISPUTE_TRANSFER',t.id)} disabled={busy}
+                  style={{padding:'6px 10px',minHeight:'44px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>Dispute</button>}
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── Club Detail ───────────────────────────────────────────────
 function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [club, setClub]   = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab]     = useState<'dashboard'|'items'|'assignments'|'members'|'contributions'|'settings'>('dashboard')
+  const [tab, setTab]     = useState<'dashboard'|'items'|'assignments'|'rollcall'|'settlement'|'members'|'contributions'|'settings'>('dashboard')
   const [showItemModal, setShowItemModal] = useState(false)
   const [editItem, setEditItem]           = useState<any>(null)
   const [purchaseItem, setPurchaseItem]   = useState<any>(null)
@@ -658,6 +901,13 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const items     = club.items   || []
   const contribs  = club.contributions || []
   const assigns   = club.assignments   || []
+  const cycles    = club.cycles        || []
+  const transfers = club.settlementTransfers || []
+  // The cycle currently being worked: the first not yet closed.
+  const cycle     = cycles.find((c:any)=>c.status!=='CLOSED') || cycles[0] || null
+  const period    = cycle?.periodNumber ?? 1
+  const rollCall  = contribs.filter((c:any)=>c.periodNumber===period)
+  const cycleTx   = transfers.filter((t:any)=>t.periodNumber===period)
   const openAssigns = assigns.filter((a:any)=>['ASSIGNED','PURCHASED'].includes(a.status))
   const nonMembers = groupMembers.filter((m:any) => !members.find((cm:any)=>cm.userId===(m.userId||m.id)))
 
@@ -680,7 +930,12 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           onClose={()=>setPurchaseItem(null)}
           onSuccess={(msg:string)=>{ onAction(msg); fetchClub(); setPurchaseItem(null) }}/>}
         {assignItem&&<AssignItemModal item={assignItem} members={members} clubId={clubId}
-          available={club.uncommittedCash}
+          available={cycle?.confirmedPot!=null
+            ? Number(cycle.confirmedPot) - assigns.filter((a:any)=>a.periodNumber===period)
+                .reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0)
+            : club.uncommittedCash}
+          periodNumber={period}
+          suppliers={club.supplierAccounts||[]}
           existing={assigns.find((a:any)=>a.itemId===assignItem.id&&a.status!=='ACQUITTED')}
           onClose={()=>setAssignItem(null)}
           onSuccess={(msg:string)=>{ onAction(msg); fetchClub() }}
@@ -750,7 +1005,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
         {/* Tabs */}
         <div style={{display:'flex',borderBottom:'1px solid #E2E8F0',flexShrink:0,overflowX:'auto'}}>
-          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['assignments','🧾 Assignments'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
+          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['rollcall','🙋 Roll-call'],['assignments','🧾 Assignments'],['settlement','⚡ Settlement'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id as any)}
               style={{padding:'10px 16px',background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap'}}>{label}</button>
           ))}
@@ -901,6 +1156,22 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
               </div>
             )}
           </div>}
+
+          {/* CYCLE STAGE */}
+          {cycle&&tab!=='settings'&&<CycleBar cycle={cycle} busy={busy}
+            onLockRollCall={()=>doAction('LOCK_CONTRIBUTIONS',{periodNumber:period})}
+            onLockCycle={()=>doAction('LOCK_CYCLE',{periodNumber:period})}
+            onSolve={()=>doAction('SOLVE_SETTLEMENT',{periodNumber:period})}/>}
+
+          {/* ROLL-CALL */}
+          {tab==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
+            onRespond={(userId:string,hasFunds:boolean)=>
+              doAction(hasFunds?'CONFIRM_FUNDS':'DECLINE_FUNDS',{userId,periodNumber:period})}/>}
+
+          {/* SETTLEMENT */}
+          {tab==='settlement'&&<SettlementPanel transfers={cycleTx}
+            assigns={assigns.filter((a:any)=>a.periodNumber===period)} busy={busy}
+            onState={(action:string,transferId:string)=>doAction(action,{transferId})}/>}
 
           {/* ASSIGNMENTS */}
           {tab==='assignments'&&<div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
