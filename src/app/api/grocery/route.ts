@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.6.1
+// src/app/api/grocery/route.ts — v1.7
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -65,6 +65,18 @@
 // v1.6.1: serialise the confirmation state to the client. v1.6 added the
 //       columns but the GET never returned them, so no roll-call UI could be
 //       built against it.
+// v1.7: PERIOD PURCHASES. The group agrees what to buy with this period's
+//       money BEFORE the roll-call, and that plan sets the contribution.
+//       Previously the contribution was only derived at LOCK_CYCLE from the
+//       assignments — too late to tell members what to bring.
+//         - "GroceryItem" is the CATALOGUE. "GroceryPeriodPurchase" is this
+//           period's selection from it, with its own qty and its own price
+//           copied at selection time.
+//         - SET_PERIOD_BUDGET sums the plan and writes the target
+//           contribution to every member's "amountDue" for the period.
+//         - An item cannot be assigned beyond what the period plan contains,
+//           and an item absent from the plan cannot be assigned at all.
+//       Requires sql/17-grocery-period-purchases.sql.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -234,7 +246,7 @@ export async function GET(req: NextRequest) {
       if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
       const club = clubs[0]
 
-      const [items, members, contribs, assignments, cycles, transfers, suppliers] = await Promise.all([
+      const [items, members, contribs, assignments, cycles, transfers, suppliers, plan] = await Promise.all([
         sql(`SELECT gi.*, u."fullName" as "assignedToLive", pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
@@ -283,6 +295,14 @@ export async function GET(req: NextRequest) {
              ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId]),
         sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
              ORDER BY "supplierName" ASC`, [clubId]),
+        sql(`SELECT pp.*, gi.name AS "itemName", gi.unit, gi."estimatedUnitPrice",
+                    COALESCE((SELECT SUM(ga."qtyAssigned") FROM "GroceryAssignment" ga
+                               WHERE ga."itemId"=pp."itemId" AND ga."periodNumber"=pp."periodNumber"
+                                 AND ga.status <> 'CANCELLED'),0) AS "qtyAssigned"
+             FROM "GroceryPeriodPurchase" pp
+             JOIN "GroceryItem" gi ON gi.id = pp."itemId"
+             WHERE pp."clubId" = $1
+             ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId]),
       ])
 
       const now = new Date()
@@ -294,10 +314,23 @@ export async function GET(req: NextRequest) {
           totalContributed: Number(m.totalContributed), sharePercentage: Number(m.sharePercentage),
           isActive: m.isActive, joinedAt: m.joinedAt,
         })),
+        periodPurchases: plan.map((r: any) => ({
+          id: r.id, periodNumber: Number(r.periodNumber), itemId: r.itemId,
+          itemName: r.itemName, unit: r.unit,
+          qty: Number(r.qty), unitPrice: Number(r.unitPrice),
+          lineTotal: Number(r.lineTotal),
+          estimatedUnitPrice: Number(r.estimatedUnitPrice || 0),
+          qtyAssigned: Number(r.qtyAssigned || 0),
+          qtyUnassigned: Number(r.qty) - Number(r.qtyAssigned || 0),
+          notes: r.notes,
+        })),
         cycles: cycles.map((c: any) => ({
           id: c.id, periodNumber: Number(c.periodNumber), status: c.status,
           assignedTotal: Number(c.assignedTotal), memberCount: Number(c.memberCount),
           baseContribution: Number(c.baseContribution), roundingCents: Number(c.roundingCents),
+          plannedTotal: Number(c.plannedTotal || 0),
+          targetContribution: Number(c.targetContribution || 0),
+          budgetSetAt: c.budgetSetAt,
           confirmedPot: Number(c.confirmedPot || 0),
           confirmedMemberCount: Number(c.confirmedMemberCount || 0),
           declinedMemberCount: Number(c.declinedMemberCount || 0),
@@ -403,6 +436,9 @@ export async function POST(req: NextRequest) {
     if (body.action === 'ASSIGN_ITEM')       return handleAssignItem(body)
     if (body.action === 'CANCEL_ASSIGNMENT') return handleCancelAssignment(body)
     if (body.action === 'ACQUIT_ASSIGNMENT') return handleAcquitAssignment(body)
+    if (body.action === 'SAVE_PERIOD_PURCHASE')   return handleSavePeriodPurchase(body)
+    if (body.action === 'REMOVE_PERIOD_PURCHASE') return handleRemovePeriodPurchase(body)
+    if (body.action === 'SET_PERIOD_BUDGET')      return handleSetPeriodBudget(body)
     if (body.action === 'CONFIRM_FUNDS')     return handleFundsResponse(body, true)
     if (body.action === 'DECLINE_FUNDS')     return handleFundsResponse(body, false)
     if (body.action === 'LOCK_CONTRIBUTIONS')return handleLockContributions(body)
@@ -767,6 +803,155 @@ function splitContribution(totalCents: number, userIds: string[], periodNumber: 
     out.set(u, (out.get(u) as number) + 1)
   }
   return out
+}
+
+// ── Period purchases ──────────────────────────────────────────
+// "GroceryItem" is the catalogue — the full hamper the club works from.
+// This is the subset the group agrees to buy with THIS period's money, and
+// it is what sets the contribution. Prices are copied onto the line rather
+// than read through to the catalogue, so editing a catalogue price next
+// month cannot restate a cycle that has already settled.
+
+// Period purchases may only change while the roll-call is still open. Once
+// members have been told what to bring, the plan behind that figure is fixed.
+async function periodEditable(clubId: string, period: number) {
+  const cy = await sql(`SELECT status FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period])
+  if (!cy.length) return { ok:false, error:`Cycle ${period} does not exist for this club`, status:404 }
+  if (!['OPEN','REOPENED'].includes(String(cy[0].status)))
+    return { ok:false, status:409,
+      error:`Cycle ${period} is ${String(cy[0].status).toLowerCase()}. Reopen it to change what the group is buying — contributions are derived from this plan.` }
+  return { ok:true }
+}
+
+async function handleSavePeriodPurchase(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const itemId = typeof body.itemId === 'string' ? body.itemId : ''
+  const period = Number(body.periodNumber)
+  const qty    = Number(body.qty)
+  if (!clubId || !itemId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId, itemId and periodNumber are required' }, { status:400 })
+  if (!Number.isFinite(qty) || qty <= 0)
+    return NextResponse.json({ success:false, error:'Quantity must be greater than zero' }, { status:400 })
+
+  const gate = await periodEditable(clubId, period)
+  if (!gate.ok) return NextResponse.json({ success:false, error:gate.error }, { status:gate.status })
+
+  // Default the price from the catalogue estimate, but let the group override
+  // it — the point of a period plan is that prices move between cycles.
+  const item = await sql(
+    `SELECT name, unit, "estimatedUnitPrice" FROM "GroceryItem" WHERE id=$1 AND "clubId"=$2`, [itemId, clubId])
+  if (!item.length) return NextResponse.json({ success:false, error:'Item not found in this club' }, { status:404 })
+  const price = Number.isFinite(Number(body.unitPrice)) && Number(body.unitPrice) >= 0
+    ? Number(body.unitPrice) : Number(item[0].estimatedUnitPrice || 0)
+
+  await exec(
+    `INSERT INTO "GroceryPeriodPurchase"
+       (id,"clubId","periodNumber","itemId",qty,"unitPrice",notes,"createdAt","updatedAt")
+     VALUES ($1,$2,$3,$4,$5,$6,$7,NOW(),NOW())
+     ON CONFLICT ("clubId","periodNumber","itemId") DO UPDATE
+       SET qty=EXCLUDED.qty, "unitPrice"=EXCLUDED."unitPrice",
+           notes=EXCLUDED.notes, "updatedAt"=NOW()`,
+    [randomUUID(), clubId, period, itemId, qty, price,
+     typeof body.notes === 'string' && body.notes ? body.notes : null])
+
+  await refreshPlannedTotal(clubId, period)
+  return NextResponse.json({ success:true,
+    message:`${qty} ${item[0].unit} of ${item[0].name} at $${price.toFixed(2)} added to period ${period}` })
+}
+
+async function handleRemovePeriodPurchase(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const itemId = typeof body.itemId === 'string' ? body.itemId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !itemId || !Number.isInteger(period))
+    return NextResponse.json({ success:false, error:'clubId, itemId and periodNumber are required' }, { status:400 })
+
+  const gate = await periodEditable(clubId, period)
+  if (!gate.ok) return NextResponse.json({ success:false, error:gate.error }, { status:gate.status })
+
+  // Refuse if the line is already carrying assignments — removing it would
+  // orphan a member's purchase obligation.
+  const held = await sql(
+    `SELECT COUNT(*)::int AS n FROM "GroceryAssignment"
+      WHERE "clubId"=$1 AND "periodNumber"=$2 AND "itemId"=$3 AND status <> 'CANCELLED'`,
+    [clubId, period, itemId])
+  if (Number(held[0]?.n || 0) > 0)
+    return NextResponse.json({ success:false,
+      error:'This item is already assigned to a member for this period. Withdraw the assignment first.' }, { status:409 })
+
+  await exec(`DELETE FROM "GroceryPeriodPurchase" WHERE "clubId"=$1 AND "periodNumber"=$2 AND "itemId"=$3`,
+    [clubId, period, itemId])
+  await refreshPlannedTotal(clubId, period)
+  return NextResponse.json({ success:true, message:'Removed from this period' })
+}
+
+async function refreshPlannedTotal(clubId: string, period: number) {
+  await exec(
+    `UPDATE "GroceryCycle" cy
+        SET "plannedTotal" = COALESCE((SELECT SUM(pp."lineTotal") FROM "GroceryPeriodPurchase" pp
+                                        WHERE pp."clubId"=cy."clubId" AND pp."periodNumber"=cy."periodNumber"),0),
+            "updatedAt" = NOW()
+      WHERE cy."clubId"=$1 AND cy."periodNumber"=$2`, [clubId, period])
+}
+
+// ── Set the period contribution from the plan ─────────────────
+// This is the figure members are told to bring to the last-day meeting. It
+// is a TARGET: the final contribution re-derives at LOCK_CYCLE from what was
+// actually assigned, across confirmed members only.
+async function handleSetPeriodBudget(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const period = Number(body.periodNumber)
+  if (!clubId || !Number.isInteger(period) || period < 1)
+    return NextResponse.json({ success:false, error:'clubId and periodNumber are required' }, { status:400 })
+
+  const gate = await periodEditable(clubId, period)
+  if (!gate.ok) return NextResponse.json({ success:false, error:gate.error }, { status:gate.status })
+
+  const [plan, members] = await Promise.all([
+    sql(`SELECT COALESCE(SUM("lineTotal"),0) AS total, COUNT(*)::int AS lines
+           FROM "GroceryPeriodPurchase" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period]),
+    sql(`SELECT "userId" FROM "GroceryMember" WHERE "clubId"=$1 AND "isActive"=true ORDER BY "userId"`, [clubId]),
+  ])
+
+  const lines = Number(plan[0]?.lines || 0)
+  if (!lines)
+    return NextResponse.json({ success:false, error:'Nothing selected for this period yet — add what the group is buying first.' }, { status:400 })
+  if (!members.length)
+    return NextResponse.json({ success:false, error:'Add members before setting the period contribution' }, { status:400 })
+
+  const totalCents = cents(plan[0].total)
+  if (totalCents <= 0)
+    return NextResponse.json({ success:false, error:'The period plan totals zero. Set quantities and prices first.' }, { status:400 })
+
+  const userIds = members.map((m: any) => String(m.userId))
+  const split   = splitContribution(totalCents, userIds, period)
+  const check   = [...split.values()].reduce((a, b) => a + b, 0)
+  if (check !== totalCents)
+    return NextResponse.json({ success:false, error:`Contribution split did not reconcile (${check} vs ${totalCents} cents). Nothing was written.` }, { status:500 })
+
+  const params: any[] = [clubId, period]
+  const tuples = userIds.map(u => {
+    const b = params.length
+    params.push(u, Number(money(split.get(u) as number)))
+    return `($${b+1}::text,$${b+2}::numeric)`
+  }).join(',')
+
+  const baseCents = Math.floor(totalCents / userIds.length)
+  await Promise.all([
+    exec(`UPDATE "GroceryContribution" gc
+             SET "amountDue" = v.amt, "updatedAt" = NOW()
+            FROM (VALUES ${tuples}) AS v("userId", amt)
+           WHERE gc."clubId"=$1 AND gc."periodNumber"=$2 AND gc."userId"=v."userId"`, params),
+    exec(`UPDATE "GroceryCycle"
+             SET "plannedTotal"=$1, "targetContribution"=$2, "budgetSetAt"=NOW(), "updatedAt"=NOW()
+           WHERE "clubId"=$3 AND "periodNumber"=$4`,
+         [Number(money(totalCents)), Number(money(baseCents)), clubId, period]),
+  ])
+
+  return NextResponse.json({ success:true,
+    data:{ plannedTotal: Number(money(totalCents)), targetContribution: Number(money(baseCents)),
+           memberCount: userIds.length, lines },
+    message:`Period ${period}: $${money(totalCents)} of groceries across ${userIds.length} members — $${money(baseCents)} each.` })
 }
 
 // ── Funds confirmation ────────────────────────────────────────
@@ -1301,7 +1486,11 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
     `SELECT gi."clubId", gi.name, gi.unit, gi.status::text AS "itemStatus", gi."totalQty",
             COALESCE((SELECT SUM(ga."qtyAssigned") FROM "GroceryAssignment" ga
                        WHERE ga."itemId"=gi.id AND ga.status <> 'CANCELLED'
+                         AND ga."periodNumber"=$3
                          AND ga."userId" <> $2), 0)                       AS "qtyOthers",
+            (SELECT pp.qty FROM "GroceryPeriodPurchase" pp
+              WHERE pp."clubId"=gi."clubId" AND pp."periodNumber"=$3
+                AND pp."itemId"=gi.id)                                    AS "planQty",
             (SELECT ga2.id FROM "GroceryAssignment" ga2
               WHERE ga2."itemId"=gi.id AND ga2."userId"=$2)               AS "existingId",
             (SELECT ga3.status FROM "GroceryAssignment" ga3
@@ -1335,11 +1524,18 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
   if (c.existingId && String(c.existingStatus) === 'ACQUITTED')
     return NextResponse.json({ success:false, error:`${c.memberName} has already acquitted their assignment on this item. Reverse it before re-assigning.` }, { status:409 })
 
-  const qtyOthers = Number(c.qtyOthers)
-  const totalQty  = Number(c.totalQty)
-  if (qtyOthers + qty > totalQty) {
+  // The ceiling is what the group agreed to buy this period, not what the
+  // catalogue says the full hamper contains. An item absent from the period
+  // plan cannot be assigned at all — nobody agreed to fund it.
+  if (c.planQty == null) {
     return NextResponse.json({ success:false,
-      error:`Only ${totalQty - qtyOthers} ${c.unit} of ${totalQty} remain unassigned on this item.` }, { status:409 })
+      error:`${c.name} is not in the period ${period} purchase list. Add it on Period Purchases first.` }, { status:409 })
+  }
+  const qtyOthers = Number(c.qtyOthers)
+  const planQty   = Number(c.planQty)
+  if (qtyOthers + qty > planQty) {
+    return NextResponse.json({ success:false,
+      error:`Only ${planQty - qtyOthers} ${c.unit} of the ${planQty} planned for this period remain unassigned.` }, { status:409 })
   }
 
   // Contributions for a locked cycle have already been derived from the

@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.4
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.5
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -28,6 +28,13 @@
 //       and a buyer's funded bar counts ONLY confirmed money — a payer's
 //       claim is not cash in the buyer's hand.
 //       Requires api/grocery route v1.6.1 and sql/16-grocery-confirmation.sql.
+// v1.5: PERIOD PURCHASES tab, sitting between Grocery List and Roll-call.
+//       Grocery List is the CATALOGUE (the full hamper). Period Purchases is
+//       what the group agrees to buy with this period's money, and that plan
+//       sets the contribution members are told to bring.
+//       Contributions tab now shows the current and previous cycle only —
+//       a club running monthly for two years would otherwise render 24
+//       periods x every member on one screen.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -637,6 +644,138 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
   )
 }
 
+// ── Period Purchases ──────────────────────────────────────────
+// The group picks from the catalogue what this period's money will buy. The
+// running total drives the contribution, so the figure updates as they argue
+// it out rather than being revealed afterwards.
+function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSave, onRemove, onSetBudget }: any) {
+  const [adding, setAdding] = useState(false)
+  const [pick, setPick]     = useState('')
+  const [qty, setQty]       = useState('')
+  const [price, setPrice]   = useState('')
+
+  const open      = ['OPEN','REOPENED'].includes(cycle?.status)
+  const planned   = plan.reduce((t: number, r: any) => t + Number(r.lineTotal), 0)
+  const perMember = members.length ? planned / members.length : 0
+  const inPlan    = new Set(plan.map((r: any) => r.itemId))
+  const available = items.filter((i: any) => !inPlan.has(i.id))
+  const chosen    = items.find((i: any) => i.id === pick)
+  const qtyNum    = parseFloat(qty || '0')
+  const priceNum  = price !== '' ? parseFloat(price) : Number(chosen?.estimatedUnitPrice || 0)
+  const canAdd    = !!pick && qtyNum > 0 && priceNum >= 0 && !busy
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+        {[
+          {l:'Buying this period', v:`$${fmt(planned)}`,   c:NAVY},
+          {l:'Members',            v:String(members.length), c:'#475569'},
+          {l:'Contribution each',  v:`$${fmt(perMember)}`, c:TEAL},
+        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+          <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
+          <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
+        </div>)}
+      </div>
+
+      {!open
+        ? <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
+            The roll-call has closed for this cycle, so the purchase plan is fixed. Members were told what to bring based on it.
+          </div>
+        : <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3'}}>
+            Pick what this period's money will buy. The contribution updates as you go — publish it when the group agrees.
+          </div>}
+
+      {open&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px 14px'}}>
+        {!adding
+          ? <button onClick={()=>setAdding(true)} disabled={!available.length}
+              style={{padding:'9px 14px',minHeight:'44px',background:available.length?TEAL:'#CBD5E1',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:available.length?'pointer':'not-allowed'}}>
+              {available.length?'+ Add from catalogue':'Every catalogue item is already in this period'}
+            </button>
+          : <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr auto',gap:'10px',alignItems:'end'}}>
+              <div>
+                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Item</label>
+                <select value={pick} onChange={e=>{ setPick(e.target.value)
+                    const it=items.find((x:any)=>x.id===e.target.value)
+                    setPrice(it?String(it.estimatedUnitPrice||''):'') }}
+                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                  <option value="">Choose...</option>
+                  {available.map((i:any)=><option key={i.id} value={i.id}>{i.name}</option>)}
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Qty{chosen?` (${chosen.unit})`:''}</label>
+                <input type="number" step="0.5" min="0" value={qty} onChange={e=>setQty(e.target.value)} placeholder="0"
+                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit price ($)</label>
+                <input type="number" step="0.01" min="0" value={price} onChange={e=>setPrice(e.target.value)} placeholder="0.00"
+                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
+              </div>
+              <div style={{display:'flex',gap:'6px'}}>
+                <button onClick={()=>{ onSave(pick,qtyNum,priceNum); setPick(''); setQty(''); setPrice(''); setAdding(false) }} disabled={!canAdd}
+                  style={{padding:'10px 14px',minHeight:'44px',background:canAdd?TEAL:'#CBD5E1',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:canAdd?'pointer':'not-allowed'}}>Add</button>
+                <button onClick={()=>{ setAdding(false); setPick(''); setQty(''); setPrice('') }}
+                  style={{padding:'10px 12px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'12px',cursor:'pointer'}}>Cancel</button>
+              </div>
+            </div>}
+        {chosen&&adding&&<div style={{fontSize:'11px',color:'#94A3B8',marginTop:'8px'}}>
+          Catalogue estimate ${fmt(chosen.estimatedUnitPrice)} — override it if the price has moved.
+        </div>}
+      </div>}
+
+      {plan.length===0
+        ? <div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
+            <div style={{fontSize:'32px',marginBottom:'8px'}}>🧺</div>
+            <p style={{margin:'0 0 4px',color:'#475569'}}>Nothing selected for this period yet.</p>
+            <p style={{fontSize:'12px',margin:0}}>Add items from the catalogue to work out the contribution.</p>
+          </div>
+        : <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
+            <table style={{width:'100%',borderCollapse:'collapse'}}>
+              <thead><tr style={{background:'#F8FAFC'}}>
+                {['Item','Qty','Unit price','Line total','Assigned',''].map(h=>(
+                  <th key={h} style={{padding:'9px 10px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>
+                ))}
+              </tr></thead>
+              <tbody>
+                {plan.map((r:any,idx:number)=>(
+                  <tr key={r.id} style={{borderBottom:'1px solid #F8FAFC',background:idx%2===0?'white':'#FAFAFA'}}>
+                    <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.itemName}</td>
+                    <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>{r.qty} {r.unit}</td>
+                    <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>${fmt(r.unitPrice)}</td>
+                    <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>${fmt(r.lineTotal)}</td>
+                    <td style={{padding:'9px 10px',fontSize:'12px',color:r.qtyUnassigned>0?GOLD:GREEN}}>
+                      {r.qtyAssigned}/{r.qty}
+                    </td>
+                    <td style={{padding:'9px 10px'}}>
+                      {open&&<button onClick={()=>onRemove(r.itemId)} disabled={busy}
+                        style={{padding:'4px 8px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Remove</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot><tr style={{background:'#F8FAFC',borderTop:'2px solid #E2E8F0'}}>
+                <td colSpan={3} style={{padding:'10px',fontSize:'12px',fontWeight:'600',color:NAVY}}>Period total</td>
+                <td style={{padding:'10px',fontSize:'14px',fontWeight:'700',color:TEAL}}>${fmt(planned)}</td>
+                <td colSpan={2}/>
+              </tr></tfoot>
+            </table>
+          </div>}
+
+      {open&&plan.length>0&&<div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={onSetBudget} disabled={busy}
+          style={{padding:'10px 16px',minHeight:'44px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          {busy?'⏳ Working...':`📢 Publish — $${fmt(perMember)} each`}
+        </button>
+        {cycle?.budgetSetAt&&<span style={{fontSize:'11px',color:'#64748B'}}>
+          Currently published at ${fmt(cycle.targetContribution)} each
+          {Math.abs(Number(cycle.plannedTotal)-planned)>0.005&&<strong style={{color:GOLD}}> — plan has changed since</strong>}
+        </span>}
+      </div>}
+    </div>
+  )
+}
+
 // ── Cycle stage bar ───────────────────────────────────────────
 // OPEN -> FUNDED -> LOCKED -> SETTLED. Each stage exposes only the action
 // that legitimately comes next, so the sequence cannot be run out of order
@@ -850,7 +989,7 @@ function SettlementPanel({ transfers, assigns, busy, onState }: any) {
 function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [club, setClub]   = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab]     = useState<'dashboard'|'items'|'assignments'|'rollcall'|'settlement'|'members'|'contributions'|'settings'>('dashboard')
+  const [tab, setTab]     = useState<'dashboard'|'items'|'periodplan'|'assignments'|'rollcall'|'settlement'|'members'|'contributions'|'settings'>('dashboard')
   const [showItemModal, setShowItemModal] = useState(false)
   const [editItem, setEditItem]           = useState<any>(null)
   const [purchaseItem, setPurchaseItem]   = useState<any>(null)
@@ -908,6 +1047,10 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const period    = cycle?.periodNumber ?? 1
   const rollCall  = contribs.filter((c:any)=>c.periodNumber===period)
   const cycleTx   = transfers.filter((t:any)=>t.periodNumber===period)
+  const plan      = (club.periodPurchases||[]).filter((r:any)=>r.periodNumber===period)
+  // Contributions: current and previous cycle only. A club two years into a
+  // monthly run would otherwise render 24 periods x every member at once.
+  const visibleContribs = contribs.filter((c:any)=>c.periodNumber>=period-1)
   const openAssigns = assigns.filter((a:any)=>['ASSIGNED','PURCHASED'].includes(a.status))
   const nonMembers = groupMembers.filter((m:any) => !members.find((cm:any)=>cm.userId===(m.userId||m.id)))
 
@@ -1005,7 +1148,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
         {/* Tabs */}
         <div style={{display:'flex',borderBottom:'1px solid #E2E8F0',flexShrink:0,overflowX:'auto'}}>
-          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['rollcall','🙋 Roll-call'],['assignments','🧾 Assignments'],['settlement','⚡ Settlement'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
+          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['periodplan','🧺 Period Purchases'],['rollcall','🙋 Roll-call'],['assignments','🧾 Assignments'],['settlement','⚡ Settlement'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
             <button key={id} onClick={()=>setTab(id as any)}
               style={{padding:'10px 16px',background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap'}}>{label}</button>
           ))}
@@ -1163,6 +1306,13 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
             onLockCycle={()=>doAction('LOCK_CYCLE',{periodNumber:period})}
             onSolve={()=>doAction('SOLVE_SETTLEMENT',{periodNumber:period})}/>}
 
+          {/* PERIOD PURCHASES */}
+          {tab==='periodplan'&&<PeriodPurchasePanel plan={plan} items={items} cycle={cycle}
+            members={members} busy={busy}
+            onSave={(itemId:string,qty:number,unitPrice:number)=>doAction('SAVE_PERIOD_PURCHASE',{itemId,qty,unitPrice,periodNumber:period})}
+            onRemove={(itemId:string)=>doAction('REMOVE_PERIOD_PURCHASE',{itemId,periodNumber:period})}
+            onSetBudget={()=>doAction('SET_PERIOD_BUDGET',{periodNumber:period})}/>}
+
           {/* ROLL-CALL */}
           {tab==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
             onRespond={(userId:string,hasFunds:boolean)=>
@@ -1298,9 +1448,9 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           {tab==='contributions'&&<div>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'12px',flexWrap:'wrap',gap:'8px'}}>
               <div style={{display:'flex',gap:'12px',flexWrap:'wrap',fontSize:'12px'}}>
-                {[['Total',contribs.length,'#64748B'],['Paid',contribs.filter((c:any)=>c.status==='PAID').length,GREEN],
-                  ['Pending',contribs.filter((c:any)=>c.status==='PENDING').length,'#1A5EA8'],
-                  ['Overdue',contribs.filter((c:any)=>c.isOverdue).length,RED]].map(([l,v,c])=>(
+                {[['Total',visibleContribs.length,'#64748B'],['Paid',visibleContribs.filter((c:any)=>c.status==='PAID').length,GREEN],
+                  ['Pending',visibleContribs.filter((c:any)=>c.status==='PENDING').length,'#1A5EA8'],
+                  ['Overdue',visibleContribs.filter((c:any)=>c.isOverdue).length,RED]].map(([l,v,c])=>(
                   <span key={l as string} style={{color:c as string,fontWeight:'600'}}>{l}: {v}</span>
                 ))}
               </div>
