@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.6
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.7
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -41,6 +41,11 @@
 //       seeded every catalogue item into period 1 — there was nothing left
 //       in the dropdown to pick. The group now works down the catalogue
 //       ticking items on and off with qty and price inline.
+// v1.7: NO HORIZONTAL SCROLL. Nine top-level tabs needed ~1180px and
+//       scrolled on any 1280 or 1440 laptop. The four cycle stages collapse
+//       into one Cycle tab with a stepper, taking the bar to six tabs at
+//       ~730px. The bar also wraps rather than scrolling, so it cannot
+//       overflow at any width no matter what is added later.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -650,6 +655,62 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
   )
 }
 
+// ── Cycle stage nav ───────────────────────────────────────────
+// Period Purchases, Roll-call, Assignments and Settlement are stages of one
+// sequence, not peer destinations — each is already gated by cycle status.
+// Presenting them as nine top-level tabs both misread the flow and pushed
+// the bar past 1180px, which scrolled horizontally on any 1280 or 1440
+// laptop. As a stepper they take one slot and show progress for free.
+const STAGES: [string, string, string][] = [
+  ['periodplan',  '🧺', 'Period Purchases'],
+  ['rollcall',    '🙋', 'Roll-call'],
+  ['assignments', '🧾', 'Assignments'],
+  ['settlement',  '⚡', 'Settlement'],
+]
+
+// Which stages the cycle has already passed, derived from its own status so
+// the stepper cannot disagree with what the API will actually allow.
+function stageProgress(cycle: any) {
+  const st = cycle?.status
+  return {
+    periodplan:  !!cycle?.budgetSetAt,
+    rollcall:    !!st && !['OPEN','REOPENED'].includes(st),
+    assignments: ['LOCKED','SETTLED','CLOSED'].includes(st),
+    settlement:  ['SETTLED','CLOSED'].includes(st),
+  } as Record<string, boolean>
+}
+
+// Where the group actually is right now — used when the Cycle tab is opened
+// so it lands on the stage that needs attention rather than always the first.
+function currentStage(cycle: any) {
+  const st = cycle?.status
+  if (['LOCKED','SETTLED','CLOSED'].includes(st)) return 'settlement'
+  if (st === 'FUNDED') return 'assignments'
+  if (cycle?.budgetSetAt) return 'rollcall'
+  return 'periodplan'
+}
+
+function StageNav({ stage, setStage, cycle }: any) {
+  const done = stageProgress(cycle)
+  return (
+    <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'12px'}}>
+      {STAGES.map(([id, icon, label], i) => {
+        const active = stage === id
+        const ok     = done[id]
+        return (
+          <button key={id} onClick={()=>setStage(id)}
+            style={{display:'flex',alignItems:'center',gap:'7px',padding:'8px 13px',minHeight:'44px',borderRadius:'8px',cursor:'pointer',fontSize:'12px',fontWeight:active?'700':'500',border:`1.5px solid ${active?TEAL:ok?'#BBF7D0':'#E2E8F0'}`,background:active?'#E1F5EE':ok?'#F6FFFB':'white',color:active?TEAL:ok?GREEN:'#64748B'}}>
+            <span style={{width:'20px',height:'20px',minWidth:'20px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'700',background:ok?GREEN:active?TEAL:'#E2E8F0',color:ok||active?'white':'#94A3B8'}}>
+              {ok?'✓':i+1}
+            </span>
+            <span>{icon} {label}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 // ── Period Purchases ──────────────────────────────────────────
 // The catalogue with a tick against each item the group is buying THIS
 // period, with its own quantity and its own price. An earlier version added
@@ -1008,7 +1069,8 @@ function SettlementPanel({ transfers, assigns, busy, onState }: any) {
 function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [club, setClub]   = useState<any>(null)
   const [loading, setLoading] = useState(true)
-  const [tab, setTab]     = useState<'dashboard'|'items'|'periodplan'|'assignments'|'rollcall'|'settlement'|'members'|'contributions'|'settings'>('dashboard')
+  const [tab, setTab]     = useState<'dashboard'|'items'|'cycle'|'members'|'contributions'|'settings'>('dashboard')
+  const [stage, setStage] = useState<'periodplan'|'rollcall'|'assignments'|'settlement'>('periodplan')
   const [showItemModal, setShowItemModal] = useState(false)
   const [editItem, setEditItem]           = useState<any>(null)
   const [purchaseItem, setPurchaseItem]   = useState<any>(null)
@@ -1166,9 +1228,11 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
         </div>
 
         {/* Tabs */}
-        <div style={{display:'flex',borderBottom:'1px solid #E2E8F0',flexShrink:0,overflowX:'auto'}}>
-          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['periodplan','🧺 Period Purchases'],['rollcall','🙋 Roll-call'],['assignments','🧾 Assignments'],['settlement','⚡ Settlement'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
-            <button key={id} onClick={()=>setTab(id as any)}
+        {/* Wraps rather than scrolls: a tab bar that runs off the edge hides
+            destinations with no affordance that they exist. */}
+        <div style={{display:'flex',flexWrap:'wrap',borderBottom:'1px solid #E2E8F0',flexShrink:0}}>
+          {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['cycle','🔄 Cycle'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
+            <button key={id} onClick={()=>{ setTab(id as any); if(id==='cycle') setStage(currentStage(cycle) as any) }}
               style={{padding:'10px 16px',background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap'}}>{label}</button>
           ))}
         </div>
@@ -1320,30 +1384,29 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           </div>}
 
           {/* CYCLE STAGE */}
-          {cycle&&tab!=='settings'&&<CycleBar cycle={cycle} busy={busy}
+          {cycle&&['dashboard','cycle'].includes(tab)&&<CycleBar cycle={cycle} busy={busy}
             onLockRollCall={()=>doAction('LOCK_CONTRIBUTIONS',{periodNumber:period})}
             onLockCycle={()=>doAction('LOCK_CYCLE',{periodNumber:period})}
             onSolve={()=>doAction('SOLVE_SETTLEMENT',{periodNumber:period})}/>}
 
-          {/* PERIOD PURCHASES */}
-          {tab==='periodplan'&&<PeriodPurchasePanel plan={plan} items={items} cycle={cycle}
+          {/* CYCLE — four stages of one sequence */}
+          {tab==='cycle'&&<StageNav stage={stage} setStage={setStage} cycle={cycle}/>}
+
+          {tab==='cycle'&&stage==='periodplan'&&<PeriodPurchasePanel plan={plan} items={items} cycle={cycle}
             members={members} busy={busy}
             onSave={(itemId:string,qty:number,unitPrice:number)=>doAction('SAVE_PERIOD_PURCHASE',{itemId,qty,unitPrice,periodNumber:period})}
             onRemove={(itemId:string)=>doAction('REMOVE_PERIOD_PURCHASE',{itemId,periodNumber:period})}
             onSetBudget={()=>doAction('SET_PERIOD_BUDGET',{periodNumber:period})}/>}
 
-          {/* ROLL-CALL */}
-          {tab==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
+          {tab==='cycle'&&stage==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
             onRespond={(userId:string,hasFunds:boolean)=>
               doAction(hasFunds?'CONFIRM_FUNDS':'DECLINE_FUNDS',{userId,periodNumber:period})}/>}
 
-          {/* SETTLEMENT */}
-          {tab==='settlement'&&<SettlementPanel transfers={cycleTx}
+          {tab==='cycle'&&stage==='settlement'&&<SettlementPanel transfers={cycleTx}
             assigns={assigns.filter((a:any)=>a.periodNumber===period)} busy={busy}
             onState={(action:string,transferId:string)=>doAction(action,{transferId})}/>}
 
-          {/* ASSIGNMENTS */}
-          {tab==='assignments'&&<div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+          {tab==='cycle'&&stage==='assignments'&&<div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
             <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
               {[
                 {l:'Advanced out',    v:`$${fmt(club.advancedOut||0)}`,     c:GOLD},
