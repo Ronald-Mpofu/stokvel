@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.5
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.6
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -35,6 +35,12 @@
 //       Contributions tab now shows the current and previous cycle only —
 //       a club running monthly for two years would otherwise render 24
 //       periods x every member on one screen.
+// v1.6: Period Purchases rebuilt as a catalogue SELECTION list. v1.5 added
+//       items one at a time from a dropdown of whatever was not yet chosen,
+//       which read as a dead screen once migration 17's backfill had already
+//       seeded every catalogue item into period 1 — there was nothing left
+//       in the dropdown to pick. The group now works down the catalogue
+//       ticking items on and off with qty and price inline.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -645,130 +651,143 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
 }
 
 // ── Period Purchases ──────────────────────────────────────────
-// The group picks from the catalogue what this period's money will buy. The
-// running total drives the contribution, so the figure updates as they argue
-// it out rather than being revealed afterwards.
+// The catalogue with a tick against each item the group is buying THIS
+// period, with its own quantity and its own price. An earlier version added
+// items one at a time from a dropdown of whatever was left over, which is
+// the wrong shape: the group works down the list deciding yes or no, and
+// needs to see the running contribution move as they do it.
+//
+// Quantity and price commit on blur rather than on every keystroke — each
+// save is a round trip to Tokyo, and per-character writes would make the
+// field feel dead while typing.
 function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSave, onRemove, onSetBudget }: any) {
-  const [adding, setAdding] = useState(false)
-  const [pick, setPick]     = useState('')
-  const [qty, setQty]       = useState('')
-  const [price, setPrice]   = useState('')
+  const [draft, setDraft] = useState<Record<string, { qty: string; price: string }>>({})
+  const [search, setSearch] = useState('')
 
-  const open      = ['OPEN','REOPENED'].includes(cycle?.status)
+  const open    = ['OPEN','REOPENED'].includes(cycle?.status)
+  const planBy: Record<string, any> = {}
+  for (const r of plan) planBy[r.itemId] = r
+
   const planned   = plan.reduce((t: number, r: any) => t + Number(r.lineTotal), 0)
   const perMember = members.length ? planned / members.length : 0
-  const inPlan    = new Set(plan.map((r: any) => r.itemId))
-  const available = items.filter((i: any) => !inPlan.has(i.id))
-  const chosen    = items.find((i: any) => i.id === pick)
-  const qtyNum    = parseFloat(qty || '0')
-  const priceNum  = price !== '' ? parseFloat(price) : Number(chosen?.estimatedUnitPrice || 0)
-  const canAdd    = !!pick && qtyNum > 0 && priceNum >= 0 && !busy
+  const term      = search.trim().toLowerCase()
+  const visible   = term ? items.filter((i: any) => (i.name||'').toLowerCase().includes(term)) : items
+
+  const valueOf = (i: any, field: 'qty'|'price') => {
+    const d = draft[i.id]
+    if (d && d[field] !== undefined) return d[field]
+    const line = planBy[i.id]
+    if (field === 'qty')   return line ? String(line.qty) : String(i.totalQty ?? '')
+    return line ? String(line.unitPrice) : String(i.estimatedUnitPrice ?? '')
+  }
+  const setDraftField = (id: string, field: 'qty'|'price', v: string) =>
+    setDraft(d => ({ ...d, [id]: { qty: d[id]?.qty ?? '', price: d[id]?.price ?? '', [field]: v } }))
+
+  function commit(i: any) {
+    const q = parseFloat(valueOf(i,'qty') || '0')
+    const p = parseFloat(valueOf(i,'price') || '0')
+    if (!(q > 0) || !(p >= 0)) return
+    const line = planBy[i.id]
+    if (line && Number(line.qty) === q && Number(line.unitPrice) === p) return
+    onSave(i.id, q, p)
+  }
+
+  function toggle(i: any) {
+    if (planBy[i.id]) { onRemove(i.id); return }
+    const q = parseFloat(valueOf(i,'qty') || '0')
+    const p = parseFloat(valueOf(i,'price') || '0')
+    onSave(i.id, q > 0 ? q : 1, p >= 0 ? p : 0)
+  }
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
         {[
-          {l:'Buying this period', v:`$${fmt(planned)}`,   c:NAVY},
-          {l:'Members',            v:String(members.length), c:'#475569'},
-          {l:'Contribution each',  v:`$${fmt(perMember)}`, c:TEAL},
+          {l:'Items chosen',      v:`${plan.length}/${items.length}`, c:NAVY},
+          {l:'Buying this period',v:`$${fmt(planned)}`,               c:GOLD},
+          {l:'Members',           v:String(members.length),           c:'#475569'},
+          {l:'Contribution each', v:`$${fmt(perMember)}`,             c:TEAL},
         ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
           <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
           <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
         </div>)}
       </div>
 
-      {!open
-        ? <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
-            The roll-call has closed for this cycle, so the purchase plan is fixed. Members were told what to bring based on it.
+      {open
+        ? <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3'}}>
+            Tick what this period&apos;s money will buy, and adjust quantity or price where it has moved. The contribution updates as you go — publish it when the group agrees.
           </div>
-        : <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3'}}>
-            Pick what this period's money will buy. The contribution updates as you go — publish it when the group agrees.
+        : <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
+            The roll-call has closed, so this plan is fixed. Members were told what to bring based on it.
           </div>}
 
-      {open&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px 14px'}}>
-        {!adding
-          ? <button onClick={()=>setAdding(true)} disabled={!available.length}
-              style={{padding:'9px 14px',minHeight:'44px',background:available.length?TEAL:'#CBD5E1',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:available.length?'pointer':'not-allowed'}}>
-              {available.length?'+ Add from catalogue':'Every catalogue item is already in this period'}
-            </button>
-          : <div style={{display:'grid',gridTemplateColumns:'2fr 1fr 1fr auto',gap:'10px',alignItems:'end'}}>
-              <div>
-                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Item</label>
-                <select value={pick} onChange={e=>{ setPick(e.target.value)
-                    const it=items.find((x:any)=>x.id===e.target.value)
-                    setPrice(it?String(it.estimatedUnitPrice||''):'') }}
-                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',background:'white',boxSizing:'border-box'}}>
-                  <option value="">Choose...</option>
-                  {available.map((i:any)=><option key={i.id} value={i.id}>{i.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Qty{chosen?` (${chosen.unit})`:''}</label>
-                <input type="number" step="0.5" min="0" value={qty} onChange={e=>setQty(e.target.value)} placeholder="0"
-                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
-              </div>
-              <div>
-                <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit price ($)</label>
-                <input type="number" step="0.01" min="0" value={price} onChange={e=>setPrice(e.target.value)} placeholder="0.00"
-                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
-              </div>
-              <div style={{display:'flex',gap:'6px'}}>
-                <button onClick={()=>{ onSave(pick,qtyNum,priceNum); setPick(''); setQty(''); setPrice(''); setAdding(false) }} disabled={!canAdd}
-                  style={{padding:'10px 14px',minHeight:'44px',background:canAdd?TEAL:'#CBD5E1',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:canAdd?'pointer':'not-allowed'}}>Add</button>
-                <button onClick={()=>{ setAdding(false); setPick(''); setQty(''); setPrice('') }}
-                  style={{padding:'10px 12px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'12px',cursor:'pointer'}}>Cancel</button>
-              </div>
-            </div>}
-        {chosen&&adding&&<div style={{fontSize:'11px',color:'#94A3B8',marginTop:'8px'}}>
-          Catalogue estimate ${fmt(chosen.estimatedUnitPrice)} — override it if the price has moved.
-        </div>}
-      </div>}
+      {items.length>3&&<input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search the catalogue..."
+        style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>}
 
-      {plan.length===0
+      {items.length===0
         ? <div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
             <div style={{fontSize:'32px',marginBottom:'8px'}}>🧺</div>
-            <p style={{margin:'0 0 4px',color:'#475569'}}>Nothing selected for this period yet.</p>
-            <p style={{fontSize:'12px',margin:0}}>Add items from the catalogue to work out the contribution.</p>
+            <p style={{margin:'0 0 4px',color:'#475569'}}>The catalogue is empty.</p>
+            <p style={{fontSize:'12px',margin:0}}>Add grocery items on the Grocery List tab first.</p>
           </div>
         : <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
-            <table style={{width:'100%',borderCollapse:'collapse'}}>
-              <thead><tr style={{background:'#F8FAFC'}}>
-                {['Item','Qty','Unit price','Line total','Assigned',''].map(h=>(
-                  <th key={h} style={{padding:'9px 10px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',textTransform:'uppercase',whiteSpace:'nowrap'}}>{h}</th>
-                ))}
-              </tr></thead>
-              <tbody>
-                {plan.map((r:any,idx:number)=>(
-                  <tr key={r.id} style={{borderBottom:'1px solid #F8FAFC',background:idx%2===0?'white':'#FAFAFA'}}>
-                    <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.itemName}</td>
-                    <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>{r.qty} {r.unit}</td>
-                    <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>${fmt(r.unitPrice)}</td>
-                    <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>${fmt(r.lineTotal)}</td>
-                    <td style={{padding:'9px 10px',fontSize:'12px',color:r.qtyUnassigned>0?GOLD:GREEN}}>
-                      {r.qtyAssigned}/{r.qty}
-                    </td>
-                    <td style={{padding:'9px 10px'}}>
-                      {open&&<button onClick={()=>onRemove(r.itemId)} disabled={busy}
-                        style={{padding:'4px 8px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Remove</button>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-              <tfoot><tr style={{background:'#F8FAFC',borderTop:'2px solid #E2E8F0'}}>
-                <td colSpan={3} style={{padding:'10px',fontSize:'12px',fontWeight:'600',color:NAVY}}>Period total</td>
-                <td style={{padding:'10px',fontSize:'14px',fontWeight:'700',color:TEAL}}>${fmt(planned)}</td>
-                <td colSpan={2}/>
-              </tr></tfoot>
-            </table>
+            {visible.map((i:any,idx:number)=>{
+              const line = planBy[i.id]
+              const on   = !!line
+              return (
+                <div key={i.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9',background:on?'#F6FFFB':'white'}}>
+                  <button onClick={()=>toggle(i)} disabled={busy||!open}
+                    style={{width:'24px',height:'24px',minWidth:'24px',borderRadius:'6px',flexShrink:0,cursor:(busy||!open)?'not-allowed':'pointer',border:`2px solid ${on?TEAL:'#CBD5E1'}`,background:on?TEAL:'white',color:'white',fontSize:'13px',fontWeight:'700',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
+                    {on?'✓':''}
+                  </button>
+
+                  <div style={{flex:1,minWidth:'130px'}}>
+                    <div style={{fontSize:'13px',fontWeight:'600',color:on?NAVY:'#64748B'}}>{i.name}</div>
+                    <div style={{fontSize:'10px',color:'#94A3B8'}}>
+                      catalogue: {i.totalQty} {i.unit} @ ${fmt(i.estimatedUnitPrice)}
+                    </div>
+                  </div>
+
+                  <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
+                    <div style={{width:'82px'}}>
+                      <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Qty</div>
+                      <input type="number" step="0.5" min="0" disabled={!on||busy||!open}
+                        value={valueOf(i,'qty')}
+                        onChange={e=>setDraftField(i.id,'qty',e.target.value)}
+                        onBlur={()=>on&&commit(i)}
+                        style={{width:'100%',padding:'8px 8px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
+                    </div>
+                    <div style={{width:'94px'}}>
+                      <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Price $</div>
+                      <input type="number" step="0.01" min="0" disabled={!on||busy||!open}
+                        value={valueOf(i,'price')}
+                        onChange={e=>setDraftField(i.id,'price',e.target.value)}
+                        onBlur={()=>on&&commit(i)}
+                        style={{width:'100%',padding:'8px 8px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
+                    </div>
+                    <div style={{width:'86px',textAlign:'right'}}>
+                      <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Line</div>
+                      <div style={{fontSize:'14px',fontWeight:'700',color:on?TEAL:'#CBD5E1'}}>
+                        {on?`$${fmt(line.lineTotal)}`:'—'}
+                      </div>
+                    </div>
+                  </div>
+
+                  {on&&line.qtyAssigned>0&&<div style={{fontSize:'10px',color:GOLD,width:'100%'}}>
+                    {line.qtyAssigned} of {line.qty} {i.unit} already assigned — withdraw the assignment before removing this line.
+                  </div>}
+                </div>
+              )
+            })}
           </div>}
 
-      {open&&plan.length>0&&<div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
-        <button onClick={onSetBudget} disabled={busy}
-          style={{padding:'10px 16px',minHeight:'44px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+      {open&&<div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={onSetBudget} disabled={busy||plan.length===0}
+          style={{padding:'10px 16px',minHeight:'44px',background:(busy||plan.length===0)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||plan.length===0)?'not-allowed':'pointer'}}>
           {busy?'⏳ Working...':`📢 Publish — $${fmt(perMember)} each`}
         </button>
         {cycle?.budgetSetAt&&<span style={{fontSize:'11px',color:'#64748B'}}>
-          Currently published at ${fmt(cycle.targetContribution)} each
+          Published at ${fmt(cycle.targetContribution)} each
           {Math.abs(Number(cycle.plannedTotal)-planned)>0.005&&<strong style={{color:GOLD}}> — plan has changed since</strong>}
         </span>}
       </div>}
