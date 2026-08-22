@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.11
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.12
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -57,6 +57,13 @@
 // v1.11: Grocery List is CRUD + whole-period budget + purchase status only.
 //       Supplier and Assigned To leave the catalogue: supplier moves onto the
 //       Period Purchases line, assignment reads from the Assignments screen.
+// v1.12: Assign removed from the Grocery List entirely. Allocation happens
+//       only under the Cycle umbrella, in stage order:
+//         Period Purchases -> Roll-call -> Assignments -> Settlement
+//       The Assignments screen now STARTS assignments as well as managing
+//       them, driven off the period plan rather than the catalogue — so the
+//       only things offerable are what the group agreed to buy this period,
+//       and only while the cycle is FUNDED.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -651,6 +658,142 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
         </div>
 
       </div>
+    </div>
+  )
+}
+
+// ── Assignments ───────────────────────────────────────────────
+// Assignment belongs to the CYCLE, not the catalogue. The Grocery List answers
+// "what does the hamper cost"; who buys what, in which period, with how much
+// cash, is a cycle question and now lives only here:
+//     Period Purchases -> Roll-call -> Assignments -> Settlement
+//
+// Allocation is driven off the PERIOD PLAN rather than the catalogue, so the
+// only things offerable are the items the group actually agreed to buy this
+// period, with the quantity still unallocated.
+function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
+                            onAssign, onAcquit, onWithdraw }: any) {
+  const canAssign   = cycle?.status === 'FUNDED'
+  const outstanding = plan.filter((r: any) => Number(r.qtyUnassigned) > 0.0001)
+  const covered     = plan.length > 0 && outstanding.length === 0
+
+  return (
+    <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
+      {!cycle
+        ? null
+        : ['OPEN','REOPENED'].includes(cycle.status)
+          ? <div style={{background:'#FEF9C3',border:'1px solid #FCD34D',borderRadius:'8px',padding:'10px 13px',fontSize:'11px',color:GOLD}}>
+              Nothing can be allocated yet. Publish the period plan and close the roll-call first — items are assigned against money members have confirmed they hold.
+            </div>
+          : !canAssign
+            ? <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'10px 13px',fontSize:'11px',color:'#475569'}}>
+                Cycle {cycle.periodNumber} is {String(cycle.status).toLowerCase()}. Allocation is closed — reopen the cycle to change who is buying what.
+              </div>
+            : <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'10px 13px',fontSize:'11px',color:'#3730A3'}}>
+                Allocate this period&apos;s purchases to members. Each carries the cash they are handed to buy it, capped by the confirmed pot.
+              </div>}
+
+      {canAssign&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
+        <div style={{padding:'10px 13px',borderBottom:'1px solid #F1F5F9',fontSize:'11px',fontWeight:'700',color:NAVY,textTransform:'uppercase',letterSpacing:'0.04em'}}>
+          Still to allocate
+        </div>
+        {plan.length===0
+          ? <div style={{padding:'22px 13px',textAlign:'center',color:'#94A3B8',fontSize:'12px'}}>
+              Nothing was planned for this period. Go back to Period Purchases.
+            </div>
+          : covered
+            ? <div style={{padding:'22px 13px',textAlign:'center',color:GREEN,fontSize:'12px'}}>
+                ✓ Every planned item has a buyer. Lock the cycle to solve the settlement.
+              </div>
+            : <div>
+                {outstanding.map((r: any, idx: number) => (
+                  <div key={r.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 13px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9'}}>
+                    <div style={{flex:1,minWidth:'160px'}}>
+                      <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.itemName}</div>
+                      <div style={{fontSize:'11px',color:'#64748B'}}>
+                        {r.qtyUnassigned} of {r.qty} {r.unit} unallocated · ${fmt(r.unitPrice)} each
+                        {r.supplierName&&<span> · {r.supplierName}</span>}
+                      </div>
+                    </div>
+                    <div style={{fontSize:'13px',fontWeight:'700',color:GOLD}}>${fmt(Number(r.qtyUnassigned)*Number(r.unitPrice))}</div>
+                    <button onClick={()=>onAssign(r)} disabled={busy}
+                      style={{padding:'8px 14px',minHeight:'44px',background:PURPLE,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+                      👤 Assign
+                    </button>
+                  </div>
+                ))}
+              </div>}
+      </div>}
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+        {[
+          {l:'Advanced out',    v:`$${fmt(club.advancedOut||0)}`,     c:GOLD},
+          {l:'Not yet acquitted',v:`$${fmt(club.unacquitted||0)}`,    c:(club.unacquitted||0)>0?RED:GREEN},
+          {l:'Cash uncommitted',v:`$${fmt(club.uncommittedCash||0)}`, c:(club.uncommittedCash||0)>=0?TEAL:RED},
+        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+          <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
+          <div style={{fontSize:'15px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
+        </div>)}
+      </div>
+
+      <div style={{background:'#EEF2FF',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3',border:'1px solid #C7D2FE'}}>
+        The club holds no pooled cash. Every advance is money already collected and handed to a member to spend.
+      </div>
+
+      {assigns.length===0?<div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
+        <div style={{fontSize:'32px',marginBottom:'8px'}}>🧾</div>
+        <p>No assignments yet. Assign items on the Grocery List tab.</p>
+      </div>:(
+        <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
+          <table style={{width:'100%',borderCollapse:'collapse'}}>
+            <thead><tr style={{background:'#F8FAFC'}}>
+              {['Item','Member','Qty','Advance','Spent','Variance','Status','Actions'].map(h=>(
+                <th key={h} style={{padding:'9px 10px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap',textTransform:'uppercase'}}>{h}</th>
+              ))}
+            </tr></thead>
+            <tbody>
+              {assigns.map((a:any,idx:number)=>{
+                const done = a.status==='ACQUITTED'
+                return <tr key={a.id} style={{borderBottom:'1px solid #F8FAFC',background:idx%2===0?'white':'#FAFAFA'}}>
+                  <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>{a.itemName}</td>
+                  <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>{a.memberName}</td>
+                  <td style={{padding:'9px 10px',fontSize:'12px',color:NAVY}}>{a.qtyAssigned} {a.unit}</td>
+                  <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>${fmt(a.advanceAmount)}</td>
+                  <td style={{padding:'9px 10px',fontSize:'13px',color:done?NAVY:'#94A3B8'}}>{a.actualSpent!=null?`$${fmt(a.actualSpent)}`:'—'}</td>
+                  <td style={{padding:'9px 10px'}}>
+                    {a.variance==null?<span style={{color:'#94A3B8',fontSize:'12px'}}>—</span>
+                     :a.variance===0?<span style={{fontSize:'12px',color:GREEN}}>exact</span>
+                     :<div>
+                        <div style={{fontSize:'13px',fontWeight:'600',color:a.variance>0?GOLD:'#3730A3'}}>
+                          {a.variance>0?'+':'−'}${fmt(Math.abs(a.variance))}
+                        </div>
+                        <div style={{fontSize:'10px',color:'#94A3B8'}}>{a.variance>0?'holds change':'out of pocket'}</div>
+                      </div>}
+                  </td>
+                  <td style={{padding:'9px 10px'}}>
+                    <Pill bg={done?'#DCFCE7':'#FEF9C3'} color={done?GREEN:GOLD}>{done?'✅ Acquitted':'⏳ Open'}</Pill>
+                  </td>
+                  <td style={{padding:'9px 10px'}}>
+                    <div style={{display:'flex',gap:'4px',flexWrap:'wrap'}}>
+                      {!done&&<button onClick={()=>onAcquit(a)}
+                        style={{padding:'3px 7px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer',fontWeight:'600'}}>Acquit</button>}
+                      {!done&&<button onClick={()=>onWithdraw(a)}
+                        style={{padding:'3px 7px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Withdraw</button>}
+                      {done&&a.receiptUrl&&<span style={{fontSize:'10px',color:'#94A3B8'}}>{a.receiptUrl}</span>}
+                    </div>
+                  </td>
+                </tr>
+              })}
+            </tbody>
+            <tfoot><tr style={{background:'#F8FAFC',borderTop:'2px solid #E2E8F0'}}>
+              <td colSpan={3} style={{padding:'10px',fontSize:'12px',fontWeight:'600',color:NAVY}}>Totals · {openAssigns.length} open</td>
+              <td style={{padding:'10px',fontSize:'13px',fontWeight:'700',color:NAVY}}>${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0))}</td>
+              <td style={{padding:'10px',fontSize:'13px',fontWeight:'700',color:TEAL}}>${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.actualSpent||0),0))}</td>
+              <td colSpan={3}/>
+            </tr></tfoot>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -1386,7 +1529,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                     <div style={{fontSize:'13px',fontWeight:'500',color:NAVY}}>{i.name}</div>
                     <div style={{fontSize:'11px',color:'#94A3B8'}}>{i.totalQty} {i.unit} · ${fmt(i.estimatedTotalPrice)}</div>
                   </div>
-                  <button onClick={()=>setAssignItem(i)} style={{padding:'4px 10px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'5px',fontSize:'11px',cursor:'pointer'}}>Assign →</button>
+                  <button onClick={()=>{ setTab('cycle'); setStage('assignments') }} style={{padding:'4px 10px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'5px',fontSize:'11px',cursor:'pointer'}}>Assignments →</button>
                 </div>
               ))}
             </div>}
@@ -1454,12 +1597,9 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                         </td>
                         <td style={{padding:'9px 10px'}}>
                           <div style={{display:'flex',gap:'4px',flexWrap:'wrap'}}>
-                            {['PENDING','ASSIGNED'].includes(item.status)&&<>
+                            {['PENDING','ASSIGNED'].includes(item.status)&&
                               <button onClick={()=>{ setEditItem(item); setShowItemModal(true) }}
-                                style={{padding:'3px 7px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Edit</button>
-                              <button onClick={()=>setAssignItem(item)}
-                                style={{padding:'3px 7px',background:'#FEF9C3',color:GOLD,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>{item.assignmentCount>0?'Assign more':'Assign'}</button>
-                            </>}
+                                style={{padding:'3px 7px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Edit</button>}
                             {['PENDING','ASSIGNED'].includes(item.status)&&<button onClick={()=>setPurchaseItem(item)}
                               style={{padding:'3px 7px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer',fontWeight:'600'}}>Buy ✓</button>}
                             {item.status==='PURCHASED'&&<button onClick={()=>doAction('MARK_DISTRIBUTED',{itemId:item.id})}
@@ -1504,78 +1644,13 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
             assigns={assigns.filter((a:any)=>a.periodNumber===period)} busy={busy}
             onState={(action:string,transferId:string)=>doAction(action,{transferId})}/>}
 
-          {tab==='cycle'&&stage==='assignments'&&<div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-            <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
-              {[
-                {l:'Advanced out',    v:`$${fmt(club.advancedOut||0)}`,     c:GOLD},
-                {l:'Not yet acquitted',v:`$${fmt(club.unacquitted||0)}`,    c:(club.unacquitted||0)>0?RED:GREEN},
-                {l:'Cash uncommitted',v:`$${fmt(club.uncommittedCash||0)}`, c:(club.uncommittedCash||0)>=0?TEAL:RED},
-              ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
-                <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
-                <div style={{fontSize:'15px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
-              </div>)}
-            </div>
-
-            <div style={{background:'#EEF2FF',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3',border:'1px solid #C7D2FE'}}>
-              The club holds no pooled cash. Every advance is money already collected and handed to a member to spend.
-            </div>
-
-            {assigns.length===0?<div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
-              <div style={{fontSize:'32px',marginBottom:'8px'}}>🧾</div>
-              <p>No assignments yet. Assign items on the Grocery List tab.</p>
-            </div>:(
-              <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
-                <table style={{width:'100%',borderCollapse:'collapse'}}>
-                  <thead><tr style={{background:'#F8FAFC'}}>
-                    {['Item','Member','Qty','Advance','Spent','Variance','Status','Actions'].map(h=>(
-                      <th key={h} style={{padding:'9px 10px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap',textTransform:'uppercase'}}>{h}</th>
-                    ))}
-                  </tr></thead>
-                  <tbody>
-                    {assigns.map((a:any,idx:number)=>{
-                      const done = a.status==='ACQUITTED'
-                      return <tr key={a.id} style={{borderBottom:'1px solid #F8FAFC',background:idx%2===0?'white':'#FAFAFA'}}>
-                        <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>{a.itemName}</td>
-                        <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>{a.memberName}</td>
-                        <td style={{padding:'9px 10px',fontSize:'12px',color:NAVY}}>{a.qtyAssigned} {a.unit}</td>
-                        <td style={{padding:'9px 10px',fontSize:'13px',fontWeight:'600',color:NAVY}}>${fmt(a.advanceAmount)}</td>
-                        <td style={{padding:'9px 10px',fontSize:'13px',color:done?NAVY:'#94A3B8'}}>{a.actualSpent!=null?`$${fmt(a.actualSpent)}`:'—'}</td>
-                        <td style={{padding:'9px 10px'}}>
-                          {a.variance==null?<span style={{color:'#94A3B8',fontSize:'12px'}}>—</span>
-                           :a.variance===0?<span style={{fontSize:'12px',color:GREEN}}>exact</span>
-                           :<div>
-                              <div style={{fontSize:'13px',fontWeight:'600',color:a.variance>0?GOLD:'#3730A3'}}>
-                                {a.variance>0?'+':'−'}${fmt(Math.abs(a.variance))}
-                              </div>
-                              <div style={{fontSize:'10px',color:'#94A3B8'}}>{a.variance>0?'holds change':'out of pocket'}</div>
-                            </div>}
-                        </td>
-                        <td style={{padding:'9px 10px'}}>
-                          <Pill bg={done?'#DCFCE7':'#FEF9C3'} color={done?GREEN:GOLD}>{done?'✅ Acquitted':'⏳ Open'}</Pill>
-                        </td>
-                        <td style={{padding:'9px 10px'}}>
-                          <div style={{display:'flex',gap:'4px',flexWrap:'wrap'}}>
-                            {!done&&<button onClick={()=>setAcquitRow(a)}
-                              style={{padding:'3px 7px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'4px',fontSize:'10px',cursor:'pointer',fontWeight:'600'}}>Acquit</button>}
-                            {!done&&<button onClick={()=>doAction('CANCEL_ASSIGNMENT',{itemId:a.itemId,assignedToId:a.userId})}
-                              style={{padding:'3px 7px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'4px',fontSize:'10px',cursor:'pointer'}}>Withdraw</button>}
-                            {done&&a.receiptUrl&&<span style={{fontSize:'10px',color:'#94A3B8'}}>{a.receiptUrl}</span>}
-                          </div>
-                        </td>
-                      </tr>
-                    })}
-                  </tbody>
-                  <tfoot><tr style={{background:'#F8FAFC',borderTop:'2px solid #E2E8F0'}}>
-                    <td colSpan={3} style={{padding:'10px',fontSize:'12px',fontWeight:'600',color:NAVY}}>Totals · {openAssigns.length} open</td>
-                    <td style={{padding:'10px',fontSize:'13px',fontWeight:'700',color:NAVY}}>${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0))}</td>
-                    <td style={{padding:'10px',fontSize:'13px',fontWeight:'700',color:TEAL}}>${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.actualSpent||0),0))}</td>
-                    <td colSpan={3}/>
-                  </tr></tfoot>
-                </table>
-              </div>
-            )}
-          </div>}
-
+          {tab==='cycle'&&stage==='assignments'&&<AssignmentsPanel plan={plan} assigns={assigns}
+            openAssigns={openAssigns} club={club} cycle={cycle} busy={busy}
+            onAssign={(line:any)=>setAssignItem({ id:line.itemId, name:line.itemName, unit:line.unit,
+              totalQty:Number(line.qty), qtyUnassigned:Number(line.qtyUnassigned),
+              estimatedUnitPrice:Number(line.unitPrice) })}
+            onAcquit={(a:any)=>setAcquitRow(a)}
+            onWithdraw={(a:any)=>doAction('CANCEL_ASSIGNMENT',{itemId:a.itemId,assignedToId:a.userId})}/>}
           {/* MEMBERS */}
           {tab==='members'&&<div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
             {nonMembers.length>0&&club.status!=='CLOSED'&&<div style={{background:'#F0FDF4',borderRadius:'10px',padding:'12px 14px',border:'1px solid #BBF7D0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
