@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.10
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.11
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -54,6 +54,9 @@
 //       trips per checkbox. Ticking and typing are now instant.
 // v1.10: Roll-call batched the same way, and answers can be cleared back to
 //       no-answer so a mis-tap in front of the group is undoable.
+// v1.11: Grocery List is CRUD + whole-period budget + purchase status only.
+//       Supplier and Assigned To leave the catalogue: supplier moves onto the
+//       Period Purchases line, assignment reads from the Assignments screen.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -244,8 +247,6 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
     unit:               item?.unit || 'units',
     qtyPerMember:       item?.qtyPerMember?.toString() || '1',
     estimatedUnitPrice: item?.estimatedUnitPrice?.toString() || '',
-    supplierName:       item?.supplierName || '',
-    supplierContact:    item?.supplierContact || '',
     notes:              item?.notes || '',
   })
   const [saving, setSaving] = useState(false)
@@ -313,18 +314,9 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
             <strong style={{color:TEAL}}>${fmt(estTotal)}</strong>
           </div>}
 
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'12px',marginBottom:'12px'}}>
-            <div>
-              <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Supplier Name</label>
-              <input type="text" value={form.supplierName} onChange={e=>set('supplierName')(e.target.value)} placeholder="e.g. FoodCorp Wholesale"
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
-            </div>
-            <div>
-              <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Supplier Contact</label>
-              <input type="text" value={form.supplierContact} onChange={e=>set('supplierContact')(e.target.value)} placeholder="+263 77..."
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
-            </div>
-          </div>
+          {/* Supplier moved to Period Purchases in v1.11 — which supplier the
+              group uses changes cycle to cycle, so pinning it to the catalogue
+              restated history every time they switched. */}
 
           <div style={{marginBottom:'14px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Notes</label>
@@ -729,12 +721,14 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
   // Server truth, keyed by item, used both to seed the draft and to work out
   // what has actually changed.
   const serverRows = () => {
-    const by: Record<string, { on: boolean; qty: string; price: string }> = {}
+    const by: Record<string, { on: boolean; qty: string; price: string; supplier: string; contact: string }> = {}
     for (const i of items) {
       const line = plan.find((r: any) => r.itemId === i.id)
       by[i.id] = line
-        ? { on: true,  qty: String(line.qty),            price: String(line.unitPrice) }
-        : { on: false, qty: String(i.totalQty ?? ''),    price: String(i.estimatedUnitPrice ?? '') }
+        ? { on: true,  qty: String(line.qty),         price: String(line.unitPrice),
+            supplier: line.supplierName || '',        contact: line.supplierContact || '' }
+        : { on: false, qty: String(i.totalQty ?? ''), price: String(i.estimatedUnitPrice ?? ''),
+            supplier: '',                             contact: '' }
     }
     return by
   }
@@ -745,7 +739,7 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
   // Reseed when the server view changes underneath us (a save, or a switch
   // to another cycle). Keyed on the plan's own content so local edits are not
   // wiped by an unrelated re-render.
-  const planKey = plan.map((r: any) => `${r.itemId}:${r.qty}:${r.unitPrice}`).sort().join('|')
+  const planKey = plan.map((r: any) => `${r.itemId}:${r.qty}:${r.unitPrice}:${r.supplierName||''}:${r.supplierContact||''}`).sort().join('|')
   const itemKey = items.map((i: any) => i.id).join('|')
   useEffect(() => { setRows(serverRows()) }, [planKey, itemKey])
 
@@ -763,7 +757,8 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
     const a = rows[i.id], b = base[i.id]
     if (!a || !b) return false
     if (a.on !== b.on) return true
-    return a.on && (num(a.qty) !== num(b.qty) || num(a.price) !== num(b.price))
+    return a.on && (num(a.qty) !== num(b.qty) || num(a.price) !== num(b.price)
+                 || (a.supplier||'') !== (b.supplier||'') || (a.contact||'') !== (b.contact||''))
   })
   const invalid = chosen.filter((i: any) => !(num(rows[i.id].qty) > 0) || num(rows[i.id].price) < 0)
 
@@ -774,6 +769,7 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
   function save() {
     onSavePlan(chosen.map((i: any) => ({
       itemId: i.id, qty: num(rows[i.id].qty), unitPrice: num(rows[i.id].price),
+      supplierName: rows[i.id].supplier || null, supplierContact: rows[i.id].contact || null,
     })))
   }
 
@@ -810,12 +806,13 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
           </div>
         : <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
             {visible.map((i:any,idx:number)=>{
-              const r    = rows[i.id] || { on:false, qty:'', price:'' }
+              const r    = rows[i.id] || { on:false, qty:'', price:'', supplier:'', contact:'' }
               const on   = r.on
               const line = num(r.qty) * num(r.price)
               const bad  = on && (!(num(r.qty) > 0) || num(r.price) < 0)
               const wasOn = base[i.id]?.on
-              const moved = on && wasOn && (num(r.qty) !== num(base[i.id].qty) || num(r.price) !== num(base[i.id].price))
+              const moved = on && wasOn && (num(r.qty) !== num(base[i.id].qty) || num(r.price) !== num(base[i.id].price)
+                || (r.supplier||'') !== (base[i.id].supplier||'') || (r.contact||'') !== (base[i.id].contact||''))
               return (
                 <div key={i.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9',background:on?'#F6FFFB':'white'}}>
                   <button onClick={()=>setRow(i.id,{on:!on})} disabled={!open}
@@ -849,6 +846,20 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
                       <div style={{fontSize:'14px',fontWeight:'700',color:on?TEAL:'#CBD5E1'}}>{on?`$${fmt(line)}`:'—'}</div>
                     </div>
                   </div>
+
+                  {/* Supplier belongs to the cycle, not the catalogue — the
+                      group may buy the same item elsewhere next period. */}
+                  {on&&open&&<div style={{display:'flex',gap:'8px',width:'100%',marginTop:'8px',flexWrap:'wrap'}}>
+                    <input type="text" value={r.supplier} onChange={e=>setRow(i.id,{supplier:e.target.value})}
+                      placeholder="Supplier for this period (optional)"
+                      style={{flex:2,minWidth:'170px',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
+                    <input type="text" value={r.contact} onChange={e=>setRow(i.id,{contact:e.target.value})}
+                      placeholder="Contact"
+                      style={{flex:1,minWidth:'120px',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
+                  </div>}
+                  {on&&!open&&r.supplier&&<div style={{fontSize:'11px',color:'#64748B',marginTop:'6px'}}>
+                    Supplier: {r.supplier}{r.contact?` · ${r.contact}`:''}
+                  </div>}
                 </div>
               )
             })}
@@ -1414,7 +1425,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
               <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
                 <table style={{width:'100%',borderCollapse:'collapse'}}>
                   <thead><tr style={{background:'#F8FAFC'}}>
-                    {['Item','Unit','Qty/Member','Total Qty','Supplier','Est. Price','Actual','Status','Assigned To','Actions'].map(h=>(
+                    {['Item','Unit','Qty/Member','Total Qty','Est. Price','Actual','Status','Actions'].map(h=>(
                       <th key={h} style={{padding:'9px 10px',textAlign:'left',fontSize:'10px',fontWeight:'600',color:'#64748B',borderBottom:'1px solid #E2E8F0',whiteSpace:'nowrap',textTransform:'uppercase'}}>{h}</th>
                     ))}
                   </tr></thead>
@@ -1429,10 +1440,6 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                         <td style={{padding:'9px 10px',fontSize:'12px',color:'#64748B'}}>{item.unit}</td>
                         <td style={{padding:'9px 10px',fontSize:'13px',color:NAVY,fontWeight:'500'}}>{item.qtyPerMember}</td>
                         <td style={{padding:'9px 10px',fontSize:'13px',color:NAVY}}>{item.totalQty}</td>
-                        <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>
-                          {item.supplierName||'—'}
-                          {item.supplierContact&&<div style={{fontSize:'10px',color:'#94A3B8'}}>{item.supplierContact}</div>}
-                        </td>
                         <td style={{padding:'9px 10px',fontSize:'13px',color:NAVY,fontWeight:'500'}}>${fmt(item.estimatedTotalPrice)}</td>
                         <td style={{padding:'9px 10px'}}>
                           {item.actualTotalPrice!=null
@@ -1444,13 +1451,6 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                         </td>
                         <td style={{padding:'9px 10px'}}>
                           <Pill bg={sm2.bg} color={sm2.color}>{sm2.icon} {sm2.label}</Pill>
-                        </td>
-                        <td style={{padding:'9px 10px',fontSize:'12px',color:'#475569'}}>
-                          {item.assignedToName||'—'}
-                          {item.assignmentCount>0&&<div style={{fontSize:'10px',color:'#94A3B8'}}>
-                            {item.qtyAssignedTotal}/{item.totalQty} {item.unit} · ${fmt(item.advanceTotal||0)} out
-                          </div>}
-                          {item.qtyUnassigned>0&&item.assignmentCount>0&&<div style={{fontSize:'10px',color:GOLD}}>{item.qtyUnassigned} {item.unit} unassigned</div>}
                         </td>
                         <td style={{padding:'9px 10px'}}>
                           <div style={{display:'flex',gap:'4px',flexWrap:'wrap'}}>

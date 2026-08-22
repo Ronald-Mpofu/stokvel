@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.10
+// src/app/api/grocery/route.ts — v1.11
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -103,6 +103,18 @@
 //       A response can also be CLEARED back to "no answer" (hasFunds null),
 //       so a mis-tap in front of the group is undoable — LOCK_CONTRIBUTIONS
 //       still refuses to close while anyone is unanswered.
+// v1.11: CATALOGUE vs CYCLE. "GroceryItem" is now CRUD + whole-period budget
+//       + purchase status, and nothing else. Supplier moved to the period
+//       purchase line (which supplier the group uses changes cycle to cycle)
+//       and assignment lives on "GroceryAssignment" alone.
+//         - syncItemMirror deleted. It wrote assignedToId/assignedToName back
+//           onto the catalogue, which could only ever hold ONE assignee while
+//           a line may be split across several members — the mirror was
+//           lossy by construction.
+//         - Item status stops receiving ASSIGNED. It keeps
+//           PENDING -> PURCHASED -> DISTRIBUTED, driven by acquittal and
+//           distribution rather than by allocation.
+//       Requires sql/18-grocery-supplier-to-cycle.sql.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -225,8 +237,6 @@ const itemSchema = z.object({
   unit:                z.string().default('units'),
   qtyPerMember:        z.coerce.number().positive().default(1),
   estimatedUnitPrice:  z.coerce.number().min(0),
-  supplierName:        z.string().nullish().transform(v => v || null),
-  supplierContact:     z.string().nullish().transform(v => v || null),
   notes:               z.string().nullish().transform(v => v || null),
 })
 
@@ -273,14 +283,13 @@ export async function GET(req: NextRequest) {
       const club = clubs[0]
 
       const [items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
-        sql(`SELECT gi.*, u."fullName" as "assignedToLive", pu."fullName" as "purchasedByLive",
+        sql(`SELECT gi.*, pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
                     COALESCE(a."advanceTotal",0)      as "advanceTotal",
                     COALESCE(a."spentTotal",0)        as "spentTotal",
                     COALESCE(a."openCount",0)         as "openAssignments"
              FROM "GroceryItem" gi
-             LEFT JOIN "User" u ON u.id = gi."assignedToId"
              LEFT JOIN "User" pu ON pu.id = gi."purchasedById"
              LEFT JOIN (
                SELECT "itemId",
@@ -349,6 +358,8 @@ export async function GET(req: NextRequest) {
           qty: Number(r.qty), unitPrice: Number(r.unitPrice),
           lineTotal: Number(r.lineTotal),
           estimatedUnitPrice: Number(r.estimatedUnitPrice || 0),
+          supplierName: r.supplierName, supplierContact: r.supplierContact,
+          supplierAccountId: r.supplierAccountId,
           qtyAssigned: Number(r.qtyAssigned || 0),
           qtyUnassigned: Number(r.qty) - Number(r.qtyAssigned || 0),
           notes: r.notes,
@@ -734,11 +745,10 @@ async function handleAddItem(body: any): Promise<NextResponse> {
 
   await exec(
     `INSERT INTO "GroceryItem" (id,"clubId",name,description,unit,"qtyPerMember","totalQty",
-      "estimatedUnitPrice","estimatedTotalPrice","supplierName","supplierContact",status,notes,"createdAt","updatedAt")
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'PENDING'::"GroceryItemStatus",$12,NOW(),NOW())`,
+      "estimatedUnitPrice","estimatedTotalPrice",status,notes,"createdAt","updatedAt")
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'PENDING'::"GroceryItemStatus",$10,NOW(),NOW())`,
     [itemId, data.clubId, data.name, data.description, data.unit,
-     data.qtyPerMember, totalQty, data.estimatedUnitPrice, estTotal,
-     data.supplierName, data.supplierContact, data.notes]
+     data.qtyPerMember, totalQty, data.estimatedUnitPrice, estTotal, data.notes]
   )
 
   // Update club total budget
@@ -762,10 +772,10 @@ async function handleUpdateItem(body: any): Promise<NextResponse> {
 
   await exec(
     `UPDATE "GroceryItem" SET name=$1, description=$2, unit=$3, "qtyPerMember"=$4, "totalQty"=$5,
-      "estimatedUnitPrice"=$6, "estimatedTotalPrice"=$7, "supplierName"=$8, "supplierContact"=$9, notes=$10, "updatedAt"=NOW()
-     WHERE id=$11`,
+      "estimatedUnitPrice"=$6, "estimatedTotalPrice"=$7, notes=$8, "updatedAt"=NOW()
+     WHERE id=$9`,
     [fields.name, fields.description||null, fields.unit, fields.qtyPerMember, totalQty,
-     fields.estimatedUnitPrice, estTotal, fields.supplierName||null, fields.supplierContact||null, fields.notes||null, itemId]
+     fields.estimatedUnitPrice, estTotal, fields.notes||null, itemId]
   )
 
   await exec(
@@ -985,7 +995,9 @@ async function handleSavePeriodPlan(body: any): Promise<NextResponse> {
     return NextResponse.json({ success:false, error:'clubId, periodNumber and lines are required' }, { status:400 })
 
   // Normalise and reject anything malformed before touching the database.
-  const clean: { itemId: string; qty: number; price: number }[] = []
+  const clean: { itemId: string; qty: number; price: number;
+                 supplierName: string | null; supplierContact: string | null;
+                 supplierAccountId: string | null }[] = []
   const seen = new Set<string>()
   for (const l of lines) {
     const itemId = typeof l?.itemId === 'string' ? l.itemId : ''
@@ -997,7 +1009,11 @@ async function handleSavePeriodPlan(body: any): Promise<NextResponse> {
       return NextResponse.json({ success:false, error:'Every chosen item needs a quantity above zero' }, { status:400 })
     if (!Number.isFinite(price) || price < 0)
       return NextResponse.json({ success:false, error:'Prices cannot be negative' }, { status:400 })
-    seen.add(itemId); clean.push({ itemId, qty, price })
+    seen.add(itemId)
+    clean.push({ itemId, qty, price,
+      supplierName:      typeof l?.supplierName === 'string' && l.supplierName ? l.supplierName : null,
+      supplierContact:   typeof l?.supplierContact === 'string' && l.supplierContact ? l.supplierContact : null,
+      supplierAccountId: typeof l?.supplierAccountId === 'string' && l.supplierAccountId ? l.supplierAccountId : null })
   }
 
   // One read: cycle state, which items really belong to this club, and which
@@ -1048,22 +1064,28 @@ async function handleSavePeriodPlan(body: any): Promise<NextResponse> {
   const params: any[] = [clubId, period]
   const tuples = clean.map(l => {
     const b = params.length
-    params.push(randomUUID(), l.itemId, l.qty, l.price)
-    return `($${b+1}::text,$${b+2}::text,$${b+3}::numeric,$${b+4}::numeric)`
+    params.push(randomUUID(), l.itemId, l.qty, l.price, l.supplierName, l.supplierContact, l.supplierAccountId)
+    return `($${b+1}::text,$${b+2}::text,$${b+3}::numeric,$${b+4}::numeric,$${b+5}::text,$${b+6}::text,$${b+7}::text)`
   }).join(',')
 
   await exec(
-    `WITH incoming(id,"itemId",qty,price) AS (VALUES ${tuples}),
+    `WITH incoming(id,"itemId",qty,price,"supName","supContact","supAcct") AS (VALUES ${tuples}),
           del AS (
             DELETE FROM "GroceryPeriodPurchase" p
              WHERE p."clubId"=$1 AND p."periodNumber"=$2
                AND p."itemId" NOT IN (SELECT i."itemId" FROM incoming i)
           )
      INSERT INTO "GroceryPeriodPurchase"
-       (id,"clubId","periodNumber","itemId",qty,"unitPrice","createdAt","updatedAt")
-     SELECT i.id,$1,$2,i."itemId",i.qty,i.price,NOW(),NOW() FROM incoming i
+       (id,"clubId","periodNumber","itemId",qty,"unitPrice",
+        "supplierName","supplierContact","supplierAccountId","createdAt","updatedAt")
+     SELECT i.id,$1,$2,i."itemId",i.qty,i.price,
+            i."supName",i."supContact",i."supAcct",NOW(),NOW() FROM incoming i
      ON CONFLICT ("clubId","periodNumber","itemId") DO UPDATE
-       SET qty=EXCLUDED.qty, "unitPrice"=EXCLUDED."unitPrice", "updatedAt"=NOW()`,
+       SET qty=EXCLUDED.qty, "unitPrice"=EXCLUDED."unitPrice",
+           "supplierName"=EXCLUDED."supplierName",
+           "supplierContact"=EXCLUDED."supplierContact",
+           "supplierAccountId"=EXCLUDED."supplierAccountId",
+           "updatedAt"=NOW()`,
     params
   )
   await refreshPlannedTotal(clubId, period)
@@ -1692,38 +1714,10 @@ function fmtAmt(v: any) { return Number(v || 0).toFixed(2) }
 // The ceiling is now structural — assigned total defines what members owe —
 // and the reconciliation check lives in handleSolveSettlement.
 
-// "GroceryItem"."assignedToId"/"assignedToName" are a mirror of the
-// assignment rows, not the source of truth. With one live assignee they hold
-// that member; with several they read "3 members" so no single name is
-// presented as the responsible party when it isn't.
-async function syncItemMirror(itemId: string) {
-  await exec(
-    `WITH live AS (
-       SELECT ga."userId", u."fullName"
-         FROM "GroceryAssignment" ga
-         JOIN "User" u ON u.id = ga."userId"
-        WHERE ga."itemId" = $1 AND ga.status <> 'CANCELLED'
-     ), agg AS (
-       SELECT COUNT(*) AS n,
-              MIN("userId")   AS "soleId",
-              MIN("fullName") AS "soleName"
-         FROM live
-     )
-     UPDATE "GroceryItem" gi
-        SET "assignedToId"   = CASE WHEN agg.n = 1 THEN agg."soleId" ELSE NULL END,
-            "assignedToName" = CASE WHEN agg.n = 1 THEN agg."soleName"
-                                    WHEN agg.n > 1 THEN agg.n || ' members'
-                                    ELSE NULL END,
-            status = CASE
-              WHEN gi.status IN ('PURCHASED','DISTRIBUTED') THEN gi.status
-              WHEN agg.n > 0 THEN 'ASSIGNED'::"GroceryItemStatus"
-              ELSE 'PENDING'::"GroceryItemStatus" END,
-            "updatedAt" = NOW()
-       FROM agg
-      WHERE gi.id = $1`,
-    [itemId]
-  )
-}
+// NOTE — syncItemMirror was removed in v1.11. It wrote the assignee back
+// onto "GroceryItem", a column that can hold one name while a line may be
+// split across several members, so the mirror was lossy by construction.
+// Assignment state is read from "GroceryAssignment" only.
 
 // Applies every unapplied carry-forward row for a member to their earliest
 // unpaid contribution. Contribution rows for all periods are written up front
@@ -1922,7 +1916,6 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
      period, mode, supplierId]
   )
 
-  await syncItemMirror(itemId)
 
   return NextResponse.json({ success:true,
     message:`${c.memberName} assigned ${qty} ${c.unit} of ${c.name} with a $${advance.toFixed(2)} advance` })
@@ -1948,7 +1941,6 @@ async function handleCancelAssignment(body: any): Promise<NextResponse> {
       error:'No open assignment found. An acquitted assignment must be reversed, not cancelled.' }, { status:409 })
   }
 
-  await syncItemMirror(itemId)
   return NextResponse.json({ success:true, message:'Assignment withdrawn' })
 }
 
@@ -2264,11 +2256,10 @@ function formatItem(i: any) {
     estimatedTotalPrice: Number(i.estimatedTotalPrice),
     actualUnitPrice:     i.actualUnitPrice != null ? Number(i.actualUnitPrice) : null,
     actualTotalPrice:    i.actualTotalPrice != null ? Number(i.actualTotalPrice) : null,
-    supplierName:        i.supplierName,
-    supplierContact:     i.supplierContact,
     status:              i.status,
-    assignedToId:        i.assignedToId,
-    assignedToName:      i.assignedToLive ?? i.assignedToName ?? null,
+    // assignedToId/assignedToName are gone from the catalogue payload — a
+    // line may be split across several members, so the count and quantities
+    // below are the only honest summary.
     assignmentCount:     Number(i.assignmentCount || 0),
     qtyAssignedTotal:    Number(i.qtyAssignedTotal || 0),
     qtyUnassigned:       Number(i.totalQty) - Number(i.qtyAssignedTotal || 0),
