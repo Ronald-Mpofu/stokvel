@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.9
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.10
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -52,6 +52,8 @@
 // v1.9: Period Purchases edits locally and saves in ONE request. Every tick
 //       previously wrote and then refetched the entire club — two Tokyo round
 //       trips per checkbox. Ticking and typing are now instant.
+// v1.10: Roll-call batched the same way, and answers can be cleared back to
+//       no-answer so a mis-tap in front of the group is undoable.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -925,64 +927,141 @@ function CycleBar({ cycle, busy, onLockRollCall, onLockCycle, onSolve }: any) {
 // The last-day screen. A tick is NOT a payment — the member is holding cash
 // they have not handed to anyone, and will not know who to pay until the
 // settlement is solved.
-function RollCallPanel({ rows, cycle, busy, onRespond }: any) {
-  const open      = ['OPEN','REOPENED'].includes(cycle?.status)
-  const confirmed = rows.filter((r: any) => r.fundsConfirmedAt)
-  const declined  = rows.filter((r: any) => r.fundsDeclinedAt)
-  const silent    = rows.filter((r: any) => !r.fundsConfirmedAt && !r.fundsDeclinedAt)
+//
+// Answers are held locally and saved in ONE request. Writing on each tap
+// cost two Tokyo round trips per member, which is the worst possible place
+// for that: the whole group is sitting in a room waiting for the roll-call.
+// Tapping the active answer again clears it, so a mis-tap in front of
+// everyone is undoable.
+function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: any) {
+  const serverState = () => {
+    const by: Record<string, { has: boolean | null; reason: string }> = {}
+    for (const r of rows) {
+      by[r.userId] = {
+        has: r.fundsConfirmedAt ? true : r.fundsDeclinedAt ? false : null,
+        reason: r.declineReason || '',
+      }
+    }
+    return by
+  }
+
+  const [draft, setDraft] = useState(serverState)
+  const rowsKey = rows.map((r: any) => `${r.userId}:${r.fundsConfirmedAt?1:r.fundsDeclinedAt?0:'-'}:${r.declineReason||''}`).join('|')
+  useEffect(() => { setDraft(serverState()) }, [rowsKey])
+
+  const open = ['OPEN','REOPENED'].includes(cycle?.status)
+  const base = serverState()
+  const dirty = rows.some((r: any) => {
+    const a = draft[r.userId], b = base[r.userId]
+    if (!a || !b) return false
+    return a.has !== b.has || (a.has === false && a.reason !== b.reason)
+  })
+
+  const answered  = rows.filter((r: any) => draft[r.userId]?.has !== null && draft[r.userId]?.has !== undefined)
+  const confirmed = rows.filter((r: any) => draft[r.userId]?.has === true)
+  const declined  = rows.filter((r: any) => draft[r.userId]?.has === false)
+  const silent    = rows.filter((r: any) => draft[r.userId]?.has === null || draft[r.userId]?.has === undefined)
   const pot       = confirmed.reduce((t: number, r: any) => t + Number(r.amountPayable ?? r.amountDue), 0)
+
+  // Tapping the active answer again clears it back to no-answer.
+  const answer = (userId: string, v: boolean) =>
+    setDraft(d => ({ ...d, [userId]: { ...d[userId], has: d[userId]?.has === v ? null : v } }))
+  const setReason = (userId: string, reason: string) =>
+    setDraft(d => ({ ...d, [userId]: { ...d[userId], reason } }))
+
+  function save() {
+    onSaveRollCall(rows.map((r: any) => ({
+      userId: r.userId,
+      hasFunds: draft[r.userId]?.has ?? null,
+      reason: draft[r.userId]?.has === false ? (draft[r.userId]?.reason || null) : null,
+    })))
+  }
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
         {[
-          {l:'Has money', v:String(confirmed.length), c:GREEN},
-          {l:'No money',  v:String(declined.length),  c:declined.length?RED:'#94A3B8'},
-          {l:'Money in the room', v:`$${fmt(pot)}`,   c:TEAL},
+          {l:'Answered',   v:`${answered.length}/${rows.length}`, c:answered.length===rows.length?GREEN:'#475569'},
+          {l:'Has money',  v:String(confirmed.length),            c:GREEN},
+          {l:'No money',   v:String(declined.length),             c:declined.length?RED:'#94A3B8'},
+          {l:'In the room',v:`$${fmt(pot)}`,                      c:TEAL},
         ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
           <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
           <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
         </div>)}
       </div>
 
-      {open&&silent.length>0&&<div style={{background:'#FEF9C3',border:'1px solid #FCD34D',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:GOLD}}>
-        Waiting on {silent.length} member{silent.length===1?'':'s'}. The roll-call cannot close until everyone answers — silence is not counted as a decline.
-      </div>}
-      {!open&&<div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
-        Roll-call is closed for this cycle. Reopen the cycle to change a response.
-      </div>}
+      {open
+        ? <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3'}}>
+            Go round the group and mark each member. Tap the same answer again to clear it. Nothing is sent until you press Save.
+          </div>
+        : <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
+            Roll-call is closed for this cycle. Reopen it to change a response.
+          </div>}
 
       <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
         {rows.map((r: any, idx: number) => {
-          const yes = !!r.fundsConfirmedAt, no = !!r.fundsDeclinedAt
+          const d = draft[r.userId] || { has:null, reason:'' }
+          const yes = d.has === true, no = d.has === false
+          const moved = d.has !== base[r.userId]?.has
           return (
-            <div key={r.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9'}}>
-              <div style={{width:'32px',height:'32px',borderRadius:'50%',flexShrink:0,background:'#E1F5EE',color:TEAL,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'700'}}>
-                {(r.memberName||'?').split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
-              </div>
-              <div style={{flex:1,minWidth:'120px'}}>
-                <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.memberName}</div>
-                <div style={{fontSize:'11px',color:'#64748B'}}>
-                  ${fmt(r.amountPayable ?? r.amountDue)} to bring
-                  {!!r.carryAdjustment&&<span style={{color:r.carryAdjustment<0?'#3730A3':GOLD}}> · ${fmt(r.amountDue)} base {r.carryAdjustment<0?'−':'+'} ${fmt(Math.abs(r.carryAdjustment))} carried</span>}
+            <div key={r.id} style={{padding:'10px 12px',borderTop:idx===0?'none':'1px solid #F1F5F9',background:yes?'#F6FFFB':no?'#FFFBFB':'white'}}>
+              <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
+                <div style={{width:'32px',height:'32px',borderRadius:'50%',flexShrink:0,background:'#E1F5EE',color:TEAL,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'700'}}>
+                  {(r.memberName||'?').split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
                 </div>
-                {no&&r.declineReason&&<div style={{fontSize:'10px',color:RED,marginTop:'2px'}}>{r.declineReason}</div>}
-                {no&&r.arrearsCarriedAt&&<div style={{fontSize:'10px',color:GOLD,marginTop:'2px'}}>Carried as arrears</div>}
-              </div>
-              {open
-                ? <div style={{display:'flex',gap:'6px'}}>
-                    <button onClick={()=>onRespond(r.userId,true)} disabled={busy}
-                      style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',border:`1.5px solid ${yes?GREEN:'#E2E8F0'}`,background:yes?'#DCFCE7':'white',color:yes?GREEN:'#64748B'}}>✓ Has money</button>
-                    <button onClick={()=>onRespond(r.userId,false)} disabled={busy}
-                      style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',border:`1.5px solid ${no?RED:'#E2E8F0'}`,background:no?'#FEF2F2':'white',color:no?RED:'#64748B'}}>✗ Not yet</button>
+                <div style={{flex:1,minWidth:'120px'}}>
+                  <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>
+                    {r.memberName}
+                    {moved&&<span style={{fontSize:'10px',color:GOLD,marginLeft:'6px'}}>• unsaved</span>}
                   </div>
-                : <Pill bg={yes?'#DCFCE7':no?'#FEF2F2':'#F1F5F9'} color={yes?GREEN:no?RED:'#64748B'}>
-                    {yes?'✓ Confirmed':no?'✗ Declined':'— No answer'}
-                  </Pill>}
+                  <div style={{fontSize:'11px',color:'#64748B'}}>
+                    ${fmt(r.amountPayable ?? r.amountDue)} to bring
+                    {!!r.carryAdjustment&&<span style={{color:r.carryAdjustment<0?'#3730A3':GOLD}}> · ${fmt(r.amountDue)} base {r.carryAdjustment<0?'−':'+'} ${fmt(Math.abs(r.carryAdjustment))} carried</span>}
+                  </div>
+                  {r.arrearsCarriedAt&&<div style={{fontSize:'10px',color:GOLD,marginTop:'2px'}}>Previously carried as arrears</div>}
+                </div>
+                {open
+                  ? <div style={{display:'flex',gap:'6px'}}>
+                      <button onClick={()=>answer(r.userId,true)}
+                        style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${yes?GREEN:'#E2E8F0'}`,background:yes?'#DCFCE7':'white',color:yes?GREEN:'#64748B'}}>✓ Has money</button>
+                      <button onClick={()=>answer(r.userId,false)}
+                        style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${no?RED:'#E2E8F0'}`,background:no?'#FEF2F2':'white',color:no?RED:'#64748B'}}>✗ Not yet</button>
+                    </div>
+                  : <Pill bg={yes?'#DCFCE7':no?'#FEF2F2':'#F1F5F9'} color={yes?GREEN:no?RED:'#64748B'}>
+                      {yes?'✓ Confirmed':no?'✗ Declined':'— No answer'}
+                    </Pill>}
+              </div>
+              {open&&no&&<input type="text" value={d.reason} onChange={e=>setReason(r.userId,e.target.value)}
+                placeholder="Reason (optional)"
+                style={{width:'100%',marginTop:'8px',padding:'8px 10px',border:'1.5px solid #FECACA',borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>}
+              {!open&&no&&r.declineReason&&<div style={{fontSize:'10px',color:RED,marginTop:'4px'}}>{r.declineReason}</div>}
             </div>
           )
         })}
       </div>
+
+      {open&&<div style={{position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={save} disabled={busy||!dirty}
+          style={{padding:'10px 18px',minHeight:'44px',background:(busy||!dirty)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty)?'not-allowed':'pointer'}}>
+          {busy?'⏳ Saving...':dirty?'💾 Save roll-call':'Saved'}
+        </button>
+        {dirty&&<button onClick={()=>setDraft(serverState())} disabled={busy}
+          style={{padding:'10px 14px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
+        {/* Closing fixes who is in the cycle, so it must act on saved answers
+            rather than whatever is sitting unsent in the browser. */}
+        <button onClick={onCloseRollCall} disabled={busy||dirty||silent.length>0||confirmed.length===0}
+          style={{padding:'10px 18px',minHeight:'44px',background:(busy||dirty||silent.length>0||confirmed.length===0)?'#CBD5E1':'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||silent.length>0||confirmed.length===0)?'not-allowed':'pointer'}}>
+          🔒 Close roll-call
+        </button>
+        {dirty
+          ? <span style={{fontSize:'11px',color:GOLD}}>Save before closing.</span>
+          : silent.length>0
+            ? <span style={{fontSize:'11px',color:GOLD}}>Waiting on {silent.map((r:any)=>r.memberName).join(', ')} — silence is not counted as a decline.</span>
+            : confirmed.length===0
+              ? <span style={{fontSize:'11px',color:RED}}>Nobody has funds — there is nothing to assign this cycle.</span>
+              : <span style={{fontSize:'11px',color:'#64748B'}}>Closing fixes the ${fmt(pot)} pot and carries arrears for the {declined.length} who declined.</span>}
+      </div>}
     </div>
   )
 }
@@ -1417,9 +1496,9 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
             onSavePlan={(lines:any[])=>doAction('SAVE_PERIOD_PLAN',{lines,periodNumber:period})}
             onSetBudget={()=>doAction('SET_PERIOD_BUDGET',{periodNumber:period})}/>}
 
-          {tab==='cycle'&&stage==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
-            onRespond={(userId:string,hasFunds:boolean)=>
-              doAction(hasFunds?'CONFIRM_FUNDS':'DECLINE_FUNDS',{userId,periodNumber:period})}/>}
+          {tab==='cycle'&&stage==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={saving}
+            onSaveRollCall={(responses:any[])=>doAction('SAVE_ROLL_CALL',{responses,periodNumber:period})}
+            onCloseRollCall={()=>doAction('LOCK_CONTRIBUTIONS',{periodNumber:period})}/>}
 
           {tab==='cycle'&&stage==='settlement'&&<SettlementPanel transfers={cycleTx}
             assigns={assigns.filter((a:any)=>a.periodNumber===period)} busy={busy}

@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.9
+// src/app/api/grocery/route.ts — v1.10
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -95,6 +95,14 @@
 //       gone + upsert-what-remains via CTE), so the cost is constant in the
 //       number of items rather than linear. The single-line actions stay for
 //       anything that still wants them.
+// v1.10: SAVE_ROLL_CALL — the whole roll-call in one request, for the same
+//       reason as the period plan. Each tick was a write plus a full club
+//       refetch, so a ten-member roll-call cost twenty Tokyo round trips at
+//       exactly the moment the group is sitting in a room waiting for it.
+//       One UPDATE joined against a VALUES list now covers every member.
+//       A response can also be CLEARED back to "no answer" (hasFunds null),
+//       so a mis-tap in front of the group is undoable — LOCK_CONTRIBUTIONS
+//       still refuses to close while anyone is unanswered.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -462,6 +470,7 @@ export async function POST(req: NextRequest) {
     if (body.action === 'SAVE_PERIOD_PURCHASE')   return handleSavePeriodPurchase(body)
     if (body.action === 'REMOVE_PERIOD_PURCHASE') return handleRemovePeriodPurchase(body)
     if (body.action === 'SET_PERIOD_BUDGET')      return handleSetPeriodBudget(body)
+    if (body.action === 'SAVE_ROLL_CALL')    return handleSaveRollCall(body)
     if (body.action === 'CONFIRM_FUNDS')     return handleFundsResponse(body, true)
     if (body.action === 'DECLINE_FUNDS')     return handleFundsResponse(body, false)
     if (body.action === 'LOCK_CONTRIBUTIONS')return handleLockContributions(body)
@@ -1212,6 +1221,71 @@ async function handleSetPeriodBudget(body: any): Promise<NextResponse> {
     data:{ plannedTotal: Number(money(totalCents)), targetContribution: Number(money(baseCents)),
            memberCount: userIds.length, lines },
     message:`Period ${period}: $${money(totalCents)} of groceries across ${userIds.length} members — $${money(baseCents)} each.` })
+}
+
+// ── Save the whole roll-call at once ──────────────────────────
+// hasFunds true = has the money, false = does not, null = clears the answer.
+// Timestamps are preserved through COALESCE so re-saving an unchanged row
+// does not restate when the member actually answered.
+async function handleSaveRollCall(body: any): Promise<NextResponse> {
+  const clubId    = typeof body.clubId === 'string' ? body.clubId : ''
+  const period    = Number(body.periodNumber)
+  const responses = Array.isArray(body.responses) ? body.responses : null
+  if (!clubId || !Number.isInteger(period) || period < 1 || !responses)
+    return NextResponse.json({ success:false, error:'clubId, periodNumber and responses are required' }, { status:400 })
+  if (!responses.length)
+    return NextResponse.json({ success:true, data:{ updated:0 }, message:'Nothing to save' })
+
+  const clean: { userId: string; has: boolean | null; reason: string | null }[] = []
+  const seen = new Set<string>()
+  for (const r of responses) {
+    const userId = typeof r?.userId === 'string' ? r.userId : ''
+    if (!userId) return NextResponse.json({ success:false, error:'A response is missing its member' }, { status:400 })
+    if (seen.has(userId)) return NextResponse.json({ success:false, error:'The same member appears twice' }, { status:400 })
+    seen.add(userId)
+    clean.push({
+      userId,
+      has: r.hasFunds === true ? true : r.hasFunds === false ? false : null,
+      reason: typeof r?.reason === 'string' && r.reason ? r.reason : null,
+    })
+  }
+
+  const cy = await sql(`SELECT status FROM "GroceryCycle" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period])
+  if (!cy.length) return NextResponse.json({ success:false, error:'Cycle not found' }, { status:404 })
+  if (!['OPEN','REOPENED'].includes(String(cy[0].status)))
+    return NextResponse.json({ success:false,
+      error:`Cycle ${period} is ${String(cy[0].status).toLowerCase()} — the roll-call is closed. Reopen it to change a response.` },
+      { status:409 })
+
+  const params: any[] = [clubId, period, typeof body.recordedById === 'string' ? body.recordedById : null]
+  const tuples = clean.map(r => {
+    const b = params.length
+    params.push(r.userId, r.has, r.reason)
+    return `($${b+1}::text,$${b+2}::boolean,$${b+3}::text)`
+  }).join(',')
+
+  const done = await sql(
+    `UPDATE "GroceryContribution" gc
+        SET "fundsConfirmedAt"   = CASE WHEN v.has IS TRUE  THEN COALESCE(gc."fundsConfirmedAt", NOW()) ELSE NULL END,
+            "fundsConfirmedById" = CASE WHEN v.has IS TRUE  THEN COALESCE(gc."fundsConfirmedById", $3) ELSE NULL END,
+            "fundsDeclinedAt"    = CASE WHEN v.has IS FALSE THEN COALESCE(gc."fundsDeclinedAt", NOW()) ELSE NULL END,
+            "declineReason"      = CASE WHEN v.has IS FALSE THEN v.reason ELSE NULL END,
+            "updatedAt"          = NOW()
+       FROM (VALUES ${tuples}) AS v("userId", has, reason)
+      WHERE gc."clubId" = $1 AND gc."periodNumber" = $2 AND gc."userId" = v."userId"
+      RETURNING gc."userId", gc."fundsConfirmedAt", gc."fundsDeclinedAt", gc."amountPayable"`,
+    params
+  )
+
+  const yes = done.filter((r: any) => r.fundsConfirmedAt)
+  const no  = done.filter((r: any) => r.fundsDeclinedAt)
+  const pot = yes.reduce((t: number, r: any) => t + cents(r.amountPayable), 0)
+
+  return NextResponse.json({ success:true,
+    data:{ updated: done.length, confirmed: yes.length, declined: no.length,
+           unanswered: done.length - yes.length - no.length,
+           potIfClosedNow: Number(money(pot)) },
+    message:`Roll-call saved — ${yes.length} with funds, ${no.length} without. $${money(pot)} in the room.` })
 }
 
 // ── Funds confirmation ────────────────────────────────────────
