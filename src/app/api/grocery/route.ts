@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.8
+// src/app/api/grocery/route.ts — v1.9
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -86,6 +86,15 @@
 //         or any cycle past OPEN. The grocery CATALOGUE is exempt — building
 //         the list is planning, not transacting — and so is the period
 //         purchase plan, which is re-derived anyway.
+// v1.9: SAVE_PERIOD_PLAN — the whole period plan in one request. Ticking an
+//       item used to fire SAVE_PERIOD_PURCHASE and then a full club refetch,
+//       so every checkbox cost two Tokyo round trips plus re-serialising
+//       items, members, contributions, assignments, cycles, transfers and
+//       suppliers. Editing a twenty-item list meant forty round trips.
+//       The batch replaces the plan in a single statement (delete-what-is-
+//       gone + upsert-what-remains via CTE), so the cost is constant in the
+//       number of items rather than linear. The single-line actions stay for
+//       anything that still wants them.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -449,6 +458,7 @@ export async function POST(req: NextRequest) {
     if (body.action === 'CANCEL_ASSIGNMENT') return handleCancelAssignment(body)
     if (body.action === 'ACQUIT_ASSIGNMENT') return handleAcquitAssignment(body)
     if (body.action === 'RESCHEDULE_CLUB')        return handleRescheduleClub(body)
+    if (body.action === 'SAVE_PERIOD_PLAN')       return handleSavePeriodPlan(body)
     if (body.action === 'SAVE_PERIOD_PURCHASE')   return handleSavePeriodPurchase(body)
     if (body.action === 'REMOVE_PERIOD_PURCHASE') return handleRemovePeriodPurchase(body)
     if (body.action === 'SET_PERIOD_BUDGET')      return handleSetPeriodBudget(body)
@@ -952,6 +962,107 @@ async function handleRescheduleClub(body: any): Promise<NextResponse> {
     data:{ periodMonths: months, contributionFrequency: freq,
            startDate: start, endDate: end, periods: periodCount },
     message:`Rescheduled: ${periodCount} ${freq.toLowerCase()} period${periodCount===1?'':'s'} from ${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}.` })
+}
+
+// ── Save the whole period plan at once ────────────────────────
+// Replaces the plan for a period in one shot. Constant round-trip cost
+// whatever the list size: one read to validate, one statement to delete and
+// upsert, one to restate the total.
+async function handleSavePeriodPlan(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  const period = Number(body.periodNumber)
+  const lines  = Array.isArray(body.lines) ? body.lines : null
+  if (!clubId || !Number.isInteger(period) || period < 1 || !lines)
+    return NextResponse.json({ success:false, error:'clubId, periodNumber and lines are required' }, { status:400 })
+
+  // Normalise and reject anything malformed before touching the database.
+  const clean: { itemId: string; qty: number; price: number }[] = []
+  const seen = new Set<string>()
+  for (const l of lines) {
+    const itemId = typeof l?.itemId === 'string' ? l.itemId : ''
+    const qty    = Number(l?.qty)
+    const price  = Number(l?.unitPrice)
+    if (!itemId) return NextResponse.json({ success:false, error:'A line is missing its item' }, { status:400 })
+    if (seen.has(itemId)) return NextResponse.json({ success:false, error:'The same item appears twice in the plan' }, { status:400 })
+    if (!Number.isFinite(qty) || qty <= 0)
+      return NextResponse.json({ success:false, error:'Every chosen item needs a quantity above zero' }, { status:400 })
+    if (!Number.isFinite(price) || price < 0)
+      return NextResponse.json({ success:false, error:'Prices cannot be negative' }, { status:400 })
+    seen.add(itemId); clean.push({ itemId, qty, price })
+  }
+
+  // One read: cycle state, which items really belong to this club, and which
+  // are already assigned so they cannot be dropped from under a member.
+  const ctx = await sql(
+    `SELECT
+       (SELECT cy.status FROM "GroceryCycle" cy
+         WHERE cy."clubId"=$1 AND cy."periodNumber"=$2)                      AS "cycleStatus",
+       COALESCE((SELECT json_agg(gi.id) FROM "GroceryItem" gi
+                  WHERE gi."clubId"=$1), '[]'::json)                         AS "validItems",
+       COALESCE((SELECT json_agg(json_build_object('itemId', ga."itemId", 'name', gi2.name))
+                   FROM "GroceryAssignment" ga
+                   JOIN "GroceryItem" gi2 ON gi2.id = ga."itemId"
+                  WHERE ga."clubId"=$1 AND ga."periodNumber"=$2
+                    AND ga.status <> 'CANCELLED'), '[]'::json)               AS "assigned"`,
+    [clubId, period]
+  )
+  const status = ctx[0]?.cycleStatus
+  if (!status) return NextResponse.json({ success:false, error:`Cycle ${period} does not exist for this club` }, { status:404 })
+  if (!['OPEN','REOPENED'].includes(String(status)))
+    return NextResponse.json({ success:false,
+      error:`Cycle ${period} is ${String(status).toLowerCase()}. Reopen it to change what the group is buying — contributions are derived from this plan.` },
+      { status:409 })
+
+  const valid = new Set<string>((ctx[0].validItems || []).map((x: any) => String(x)))
+  const alien = clean.filter(l => !valid.has(l.itemId))
+  if (alien.length)
+    return NextResponse.json({ success:false, error:`${alien.length} item(s) do not belong to this club` }, { status:400 })
+
+  const keeping = new Set(clean.map(l => l.itemId))
+  const orphan  = (ctx[0].assigned || []).filter((a: any) => !keeping.has(String(a.itemId)))
+  if (orphan.length) {
+    const names = Array.from(new Set(orphan.map((a: any) => String(a.name))))
+    return NextResponse.json({ success:false,
+      error:`${names.join(', ')} ${names.length===1?'is':'are'} already assigned to a member for this period. Withdraw the assignment before removing ${names.length===1?'it':'them'} from the plan.` },
+      { status:409 })
+  }
+
+  if (!clean.length) {
+    await exec(`DELETE FROM "GroceryPeriodPurchase" WHERE "clubId"=$1 AND "periodNumber"=$2`, [clubId, period])
+    await refreshPlannedTotal(clubId, period)
+    return NextResponse.json({ success:true, data:{ lines:0, plannedTotal:0 }, message:'Period plan cleared' })
+  }
+
+  // Delete-what-is-gone and upsert-what-remains in ONE statement. The two
+  // sets never overlap — the CTE only removes items absent from `incoming`
+  // — so running both against the same snapshot is safe.
+  const params: any[] = [clubId, period]
+  const tuples = clean.map(l => {
+    const b = params.length
+    params.push(randomUUID(), l.itemId, l.qty, l.price)
+    return `($${b+1}::text,$${b+2}::text,$${b+3}::numeric,$${b+4}::numeric)`
+  }).join(',')
+
+  await exec(
+    `WITH incoming(id,"itemId",qty,price) AS (VALUES ${tuples}),
+          del AS (
+            DELETE FROM "GroceryPeriodPurchase" p
+             WHERE p."clubId"=$1 AND p."periodNumber"=$2
+               AND p."itemId" NOT IN (SELECT i."itemId" FROM incoming i)
+          )
+     INSERT INTO "GroceryPeriodPurchase"
+       (id,"clubId","periodNumber","itemId",qty,"unitPrice","createdAt","updatedAt")
+     SELECT i.id,$1,$2,i."itemId",i.qty,i.price,NOW(),NOW() FROM incoming i
+     ON CONFLICT ("clubId","periodNumber","itemId") DO UPDATE
+       SET qty=EXCLUDED.qty, "unitPrice"=EXCLUDED."unitPrice", "updatedAt"=NOW()`,
+    params
+  )
+  await refreshPlannedTotal(clubId, period)
+
+  const total = clean.reduce((t, l) => t + l.qty * l.price, 0)
+  return NextResponse.json({ success:true,
+    data:{ lines: clean.length, plannedTotal: Number(total.toFixed(4)) },
+    message:`Period ${period} plan saved — ${clean.length} item${clean.length===1?'':'s'}, $${total.toFixed(2)}.` })
 }
 
 // ── Period purchases ──────────────────────────────────────────

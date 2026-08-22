@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.8
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.9
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -49,6 +49,9 @@
 // v1.8: ScheduleForm on the Settings tab. Dates, frequency and duration are
 //       editable while the club has not started, and locked with a named
 //       reason once it has.
+// v1.9: Period Purchases edits locally and saves in ONE request. Every tick
+//       previously wrote and then refetched the entire club — two Tokyo round
+//       trips per checkbox. Ticking and typing are now instant.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -715,62 +718,71 @@ function StageNav({ stage, setStage, cycle }: any) {
 }
 
 // ── Period Purchases ──────────────────────────────────────────
-// The catalogue with a tick against each item the group is buying THIS
-// period, with its own quantity and its own price. An earlier version added
-// items one at a time from a dropdown of whatever was left over, which is
-// the wrong shape: the group works down the list deciding yes or no, and
-// needs to see the running contribution move as they do it.
-//
-// Quantity and price commit on blur rather than on every keystroke — each
-// save is a round trip to Tokyo, and per-character writes would make the
-// field feel dead while typing.
-function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSave, onRemove, onSetBudget }: any) {
-  const [draft, setDraft] = useState<Record<string, { qty: string; price: string }>>({})
+// Everything is edited locally and saved in ONE request. The previous
+// version wrote on every tick and then refetched the whole club, so each
+// checkbox cost two round trips to Tokyo and a twenty-item list meant forty.
+// Ticking and typing are now instant; the network is touched once, when the
+// admin presses Save.
+function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, onSetBudget }: any) {
+  // Server truth, keyed by item, used both to seed the draft and to work out
+  // what has actually changed.
+  const serverRows = () => {
+    const by: Record<string, { on: boolean; qty: string; price: string }> = {}
+    for (const i of items) {
+      const line = plan.find((r: any) => r.itemId === i.id)
+      by[i.id] = line
+        ? { on: true,  qty: String(line.qty),            price: String(line.unitPrice) }
+        : { on: false, qty: String(i.totalQty ?? ''),    price: String(i.estimatedUnitPrice ?? '') }
+    }
+    return by
+  }
+
+  const [rows, setRows]   = useState(serverRows)
   const [search, setSearch] = useState('')
 
-  const open    = ['OPEN','REOPENED'].includes(cycle?.status)
-  const planBy: Record<string, any> = {}
-  for (const r of plan) planBy[r.itemId] = r
+  // Reseed when the server view changes underneath us (a save, or a switch
+  // to another cycle). Keyed on the plan's own content so local edits are not
+  // wiped by an unrelated re-render.
+  const planKey = plan.map((r: any) => `${r.itemId}:${r.qty}:${r.unitPrice}`).sort().join('|')
+  const itemKey = items.map((i: any) => i.id).join('|')
+  useEffect(() => { setRows(serverRows()) }, [planKey, itemKey])
 
-  const planned   = plan.reduce((t: number, r: any) => t + Number(r.lineTotal), 0)
+  const open = ['OPEN','REOPENED'].includes(cycle?.status)
+  const num  = (v: string) => { const n = parseFloat(v); return Number.isFinite(n) ? n : 0 }
+
+  const chosen  = items.filter((i: any) => rows[i.id]?.on)
+  const planned = chosen.reduce((t: number, i: any) => t + num(rows[i.id].qty) * num(rows[i.id].price), 0)
   const perMember = members.length ? planned / members.length : 0
-  const term      = search.trim().toLowerCase()
-  const visible   = term ? items.filter((i: any) => (i.name||'').toLowerCase().includes(term)) : items
 
-  const valueOf = (i: any, field: 'qty'|'price') => {
-    const d = draft[i.id]
-    if (d && d[field] !== undefined) return d[field]
-    const line = planBy[i.id]
-    if (field === 'qty')   return line ? String(line.qty) : String(i.totalQty ?? '')
-    return line ? String(line.unitPrice) : String(i.estimatedUnitPrice ?? '')
-  }
-  const setDraftField = (id: string, field: 'qty'|'price', v: string) =>
-    setDraft(d => ({ ...d, [id]: { qty: d[id]?.qty ?? '', price: d[id]?.price ?? '', [field]: v } }))
+  // Dirty check compares against server truth rather than tracking a flag,
+  // so an edit-and-undo correctly reports nothing to save.
+  const base  = serverRows()
+  const dirty = items.some((i: any) => {
+    const a = rows[i.id], b = base[i.id]
+    if (!a || !b) return false
+    if (a.on !== b.on) return true
+    return a.on && (num(a.qty) !== num(b.qty) || num(a.price) !== num(b.price))
+  })
+  const invalid = chosen.filter((i: any) => !(num(rows[i.id].qty) > 0) || num(rows[i.id].price) < 0)
 
-  function commit(i: any) {
-    const q = parseFloat(valueOf(i,'qty') || '0')
-    const p = parseFloat(valueOf(i,'price') || '0')
-    if (!(q > 0) || !(p >= 0)) return
-    const line = planBy[i.id]
-    if (line && Number(line.qty) === q && Number(line.unitPrice) === p) return
-    onSave(i.id, q, p)
-  }
+  const setRow = (id: string, patch: any) => setRows(r => ({ ...r, [id]: { ...r[id], ...patch } }))
+  const term    = search.trim().toLowerCase()
+  const visible = term ? items.filter((i: any) => (i.name||'').toLowerCase().includes(term)) : items
 
-  function toggle(i: any) {
-    if (planBy[i.id]) { onRemove(i.id); return }
-    const q = parseFloat(valueOf(i,'qty') || '0')
-    const p = parseFloat(valueOf(i,'price') || '0')
-    onSave(i.id, q > 0 ? q : 1, p >= 0 ? p : 0)
+  function save() {
+    onSavePlan(chosen.map((i: any) => ({
+      itemId: i.id, qty: num(rows[i.id].qty), unitPrice: num(rows[i.id].price),
+    })))
   }
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
       <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
         {[
-          {l:'Items chosen',      v:`${plan.length}/${items.length}`, c:NAVY},
-          {l:'Buying this period',v:`$${fmt(planned)}`,               c:GOLD},
-          {l:'Members',           v:String(members.length),           c:'#475569'},
-          {l:'Contribution each', v:`$${fmt(perMember)}`,             c:TEAL},
+          {l:'Items chosen',      v:`${chosen.length}/${items.length}`, c:NAVY},
+          {l:'Buying this period',v:`$${fmt(planned)}`,                 c:GOLD},
+          {l:'Members',           v:String(members.length),             c:'#475569'},
+          {l:'Contribution each', v:`$${fmt(perMember)}`,               c:TEAL},
         ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
           <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
           <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
@@ -779,7 +791,7 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSave, onRemo
 
       {open
         ? <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3'}}>
-            Tick what this period&apos;s money will buy, and adjust quantity or price where it has moved. The contribution updates as you go — publish it when the group agrees.
+            Tick what this period&apos;s money will buy and adjust quantity or price where it has moved. Nothing is sent until you press Save.
           </div>
         : <div style={{background:'#F1F5F9',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#475569'}}>
             The roll-call has closed, so this plan is fixed. Members were told what to bring based on it.
@@ -796,61 +808,66 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSave, onRemo
           </div>
         : <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
             {visible.map((i:any,idx:number)=>{
-              const line = planBy[i.id]
-              const on   = !!line
+              const r    = rows[i.id] || { on:false, qty:'', price:'' }
+              const on   = r.on
+              const line = num(r.qty) * num(r.price)
+              const bad  = on && (!(num(r.qty) > 0) || num(r.price) < 0)
+              const wasOn = base[i.id]?.on
+              const moved = on && wasOn && (num(r.qty) !== num(base[i.id].qty) || num(r.price) !== num(base[i.id].price))
               return (
                 <div key={i.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9',background:on?'#F6FFFB':'white'}}>
-                  <button onClick={()=>toggle(i)} disabled={busy||!open}
-                    style={{width:'24px',height:'24px',minWidth:'24px',borderRadius:'6px',flexShrink:0,cursor:(busy||!open)?'not-allowed':'pointer',border:`2px solid ${on?TEAL:'#CBD5E1'}`,background:on?TEAL:'white',color:'white',fontSize:'13px',fontWeight:'700',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
+                  <button onClick={()=>setRow(i.id,{on:!on})} disabled={!open}
+                    style={{width:'24px',height:'24px',minWidth:'24px',borderRadius:'6px',flexShrink:0,cursor:open?'pointer':'not-allowed',border:`2px solid ${on?TEAL:'#CBD5E1'}`,background:on?TEAL:'white',color:'white',fontSize:'13px',fontWeight:'700',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
                     {on?'✓':''}
                   </button>
 
                   <div style={{flex:1,minWidth:'130px'}}>
-                    <div style={{fontSize:'13px',fontWeight:'600',color:on?NAVY:'#64748B'}}>{i.name}</div>
-                    <div style={{fontSize:'10px',color:'#94A3B8'}}>
-                      catalogue: {i.totalQty} {i.unit} @ ${fmt(i.estimatedUnitPrice)}
+                    <div style={{fontSize:'13px',fontWeight:'600',color:on?NAVY:'#64748B'}}>
+                      {i.name}
+                      {(on!==wasOn||moved)&&<span style={{fontSize:'10px',color:GOLD,marginLeft:'6px'}}>• unsaved</span>}
                     </div>
+                    <div style={{fontSize:'10px',color:'#94A3B8'}}>catalogue: {i.totalQty} {i.unit} @ ${fmt(i.estimatedUnitPrice)}</div>
                   </div>
 
                   <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
                     <div style={{width:'82px'}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Qty</div>
-                      <input type="number" step="0.5" min="0" disabled={!on||busy||!open}
-                        value={valueOf(i,'qty')}
-                        onChange={e=>setDraftField(i.id,'qty',e.target.value)}
-                        onBlur={()=>on&&commit(i)}
-                        style={{width:'100%',padding:'8px 8px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
+                      <input type="number" step="0.5" min="0" disabled={!on||!open} value={r.qty}
+                        onChange={e=>setRow(i.id,{qty:e.target.value})}
+                        style={{width:'100%',padding:'8px',border:`1.5px solid ${bad?'#FECACA':'#E2E8F0'}`,borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
                     </div>
                     <div style={{width:'94px'}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Price $</div>
-                      <input type="number" step="0.01" min="0" disabled={!on||busy||!open}
-                        value={valueOf(i,'price')}
-                        onChange={e=>setDraftField(i.id,'price',e.target.value)}
-                        onBlur={()=>on&&commit(i)}
-                        style={{width:'100%',padding:'8px 8px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
+                      <input type="number" step="0.01" min="0" disabled={!on||!open} value={r.price}
+                        onChange={e=>setRow(i.id,{price:e.target.value})}
+                        style={{width:'100%',padding:'8px',border:`1.5px solid ${bad?'#FECACA':'#E2E8F0'}`,borderRadius:'7px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
                     </div>
                     <div style={{width:'86px',textAlign:'right'}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Line</div>
-                      <div style={{fontSize:'14px',fontWeight:'700',color:on?TEAL:'#CBD5E1'}}>
-                        {on?`$${fmt(line.lineTotal)}`:'—'}
-                      </div>
+                      <div style={{fontSize:'14px',fontWeight:'700',color:on?TEAL:'#CBD5E1'}}>{on?`$${fmt(line)}`:'—'}</div>
                     </div>
                   </div>
-
-                  {on&&line.qtyAssigned>0&&<div style={{fontSize:'10px',color:GOLD,width:'100%'}}>
-                    {line.qtyAssigned} of {line.qty} {i.unit} already assigned — withdraw the assignment before removing this line.
-                  </div>}
                 </div>
               )
             })}
           </div>}
 
-      {open&&<div style={{display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
-        <button onClick={onSetBudget} disabled={busy||plan.length===0}
-          style={{padding:'10px 16px',minHeight:'44px',background:(busy||plan.length===0)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||plan.length===0)?'not-allowed':'pointer'}}>
-          {busy?'⏳ Working...':`📢 Publish — $${fmt(perMember)} each`}
+      {open&&<div style={{position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+        <button onClick={save} disabled={busy||!dirty||invalid.length>0}
+          style={{padding:'10px 18px',minHeight:'44px',background:(busy||!dirty||invalid.length>0)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty||invalid.length>0)?'not-allowed':'pointer'}}>
+          {busy?'⏳ Saving...':dirty?'💾 Save plan':'Saved'}
         </button>
-        {cycle?.budgetSetAt&&<span style={{fontSize:'11px',color:'#64748B'}}>
+        {dirty&&<button onClick={()=>setRows(serverRows())} disabled={busy}
+          style={{padding:'10px 14px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
+        {/* Publishing tells members what to bring, so it must reflect a saved
+            plan — never unsaved edits sitting in the browser. */}
+        <button onClick={onSetBudget} disabled={busy||dirty||chosen.length===0}
+          style={{padding:'10px 18px',minHeight:'44px',background:(busy||dirty||chosen.length===0)?'#CBD5E1':GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||chosen.length===0)?'not-allowed':'pointer'}}>
+          📢 Publish — ${fmt(perMember)} each
+        </button>
+        {dirty&&<span style={{fontSize:'11px',color:GOLD}}>Save the plan before publishing.</span>}
+        {invalid.length>0&&<span style={{fontSize:'11px',color:RED}}>{invalid.length} ticked item{invalid.length===1?'':'s'} need a quantity above zero.</span>}
+        {!dirty&&cycle?.budgetSetAt&&<span style={{fontSize:'11px',color:'#64748B'}}>
           Published at ${fmt(cycle.targetContribution)} each
           {Math.abs(Number(cycle.plannedTotal)-planned)>0.005&&<strong style={{color:GOLD}}> — plan has changed since</strong>}
         </span>}
@@ -1396,9 +1413,8 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           {tab==='cycle'&&<StageNav stage={stage} setStage={setStage} cycle={cycle}/>}
 
           {tab==='cycle'&&stage==='periodplan'&&<PeriodPurchasePanel plan={plan} items={items} cycle={cycle}
-            members={members} busy={busy}
-            onSave={(itemId:string,qty:number,unitPrice:number)=>doAction('SAVE_PERIOD_PURCHASE',{itemId,qty,unitPrice,periodNumber:period})}
-            onRemove={(itemId:string)=>doAction('REMOVE_PERIOD_PURCHASE',{itemId,periodNumber:period})}
+            members={members} busy={saving}
+            onSavePlan={(lines:any[])=>doAction('SAVE_PERIOD_PLAN',{lines,periodNumber:period})}
             onSetBudget={()=>doAction('SET_PERIOD_BUDGET',{periodNumber:period})}/>}
 
           {tab==='cycle'&&stage==='rollcall'&&<RollCallPanel rows={rollCall} cycle={cycle} busy={busy}
