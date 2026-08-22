@@ -1,4 +1,4 @@
-// src/app/api/grocery/route.ts — v1.7
+// src/app/api/grocery/route.ts — v1.8
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -77,6 +77,15 @@
 //         - An item cannot be assigned beyond what the period plan contains,
 //           and an item absent from the plan cannot be assigned at all.
 //       Requires sql/17-grocery-period-purchases.sql.
+// v1.8: RESCHEDULE. An active club whose cycles have not actually started can
+//       have its dates, frequency and duration changed. Once anything real
+//       has happened the schedule locks, because changing it regenerates the
+//       contribution rows those things hang off.
+//         "In motion" means a roll-call answer, a payment, an assignment, a
+//         settlement instruction, a carry-forward row, an acquitted purchase,
+//         or any cycle past OPEN. The grocery CATALOGUE is exempt — building
+//         the list is planning, not transacting — and so is the period
+//         purchase plan, which is re-derived anyway.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -246,7 +255,7 @@ export async function GET(req: NextRequest) {
       if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
       const club = clubs[0]
 
-      const [items, members, contribs, assignments, cycles, transfers, suppliers, plan] = await Promise.all([
+      const [items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
         sql(`SELECT gi.*, u."fullName" as "assignedToLive", pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
@@ -303,6 +312,7 @@ export async function GET(req: NextRequest) {
              JOIN "GroceryItem" gi ON gi.id = pp."itemId"
              WHERE pp."clubId" = $1
              ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId]),
+        scheduleLock(clubId),
       ])
 
       const now = new Date()
@@ -314,6 +324,8 @@ export async function GET(req: NextRequest) {
           totalContributed: Number(m.totalContributed), sharePercentage: Number(m.sharePercentage),
           isActive: m.isActive, joinedAt: m.joinedAt,
         })),
+        scheduleLocked:  lock.locked,
+        scheduleLockReasons: lock.reasons,
         periodPurchases: plan.map((r: any) => ({
           id: r.id, periodNumber: Number(r.periodNumber), itemId: r.itemId,
           itemName: r.itemName, unit: r.unit,
@@ -436,6 +448,7 @@ export async function POST(req: NextRequest) {
     if (body.action === 'ASSIGN_ITEM')       return handleAssignItem(body)
     if (body.action === 'CANCEL_ASSIGNMENT') return handleCancelAssignment(body)
     if (body.action === 'ACQUIT_ASSIGNMENT') return handleAcquitAssignment(body)
+    if (body.action === 'RESCHEDULE_CLUB')        return handleRescheduleClub(body)
     if (body.action === 'SAVE_PERIOD_PURCHASE')   return handleSavePeriodPurchase(body)
     if (body.action === 'REMOVE_PERIOD_PURCHASE') return handleRemovePeriodPurchase(body)
     if (body.action === 'SET_PERIOD_BUDGET')      return handleSetPeriodBudget(body)
@@ -803,6 +816,142 @@ function splitContribution(totalCents: number, userIds: string[], periodNumber: 
     out.set(u, (out.get(u) as number) + 1)
   }
   return out
+}
+
+// ── Schedule mutability ───────────────────────────────────────
+// Changing the start date, frequency or duration regenerates every
+// contribution row, so it is only safe while nothing hangs off them. One
+// round trip establishes the whole picture, and the caller gets back the
+// specific reasons rather than a bare "locked" so the admin knows what to
+// undo if they need to.
+async function scheduleLock(clubId: string) {
+  const r = await sql(
+    `SELECT
+       (SELECT COUNT(*) FROM "GroceryContribution"
+         WHERE "clubId"=$1 AND ("fundsConfirmedAt" IS NOT NULL
+                             OR "fundsDeclinedAt"  IS NOT NULL))            AS "rollCall",
+       (SELECT COUNT(*) FROM "GroceryContribution"
+         WHERE "clubId"=$1 AND ("amountPaid" > 0 OR "arrearsCarriedAt" IS NOT NULL)) AS "payments",
+       (SELECT COUNT(*) FROM "GroceryAssignment"
+         WHERE "clubId"=$1 AND status <> 'CANCELLED')                       AS "assignments",
+       (SELECT COUNT(*) FROM "GrocerySettlementTransfer"
+         WHERE "clubId"=$1 AND status <> 'CANCELLED')                       AS "settlements",
+       (SELECT COUNT(*) FROM "GroceryCarryForward" WHERE "clubId"=$1)       AS "carry",
+       (SELECT COUNT(*) FROM "GroceryCycle"
+         WHERE "clubId"=$1 AND status NOT IN ('OPEN','REOPENED'))           AS "cyclesStarted",
+       (SELECT COUNT(*) FROM "GroceryItem"
+         WHERE "clubId"=$1 AND status IN ('PURCHASED','DISTRIBUTED'))       AS "purchases"`,
+    [clubId]
+  )
+  const c = r[0] || {}
+  const checks: [string, number, string][] = [
+    ['rollCall',      Number(c.rollCall      || 0), 'members have answered the roll-call'],
+    ['payments',      Number(c.payments      || 0), 'contributions have been paid or carried as arrears'],
+    ['assignments',   Number(c.assignments   || 0), 'items have been assigned to members'],
+    ['settlements',   Number(c.settlements   || 0), 'settlement instructions have been issued'],
+    ['carry',         Number(c.carry         || 0), 'carry-forward balances exist'],
+    ['cyclesStarted', Number(c.cyclesStarted || 0), 'a cycle has moved past the roll-call'],
+    ['purchases',     Number(c.purchases     || 0), 'items have been purchased or distributed'],
+  ]
+  const reasons = checks.filter(([, n]) => n > 0).map(([, n, why]) => `${n} ${why}`)
+  return { locked: reasons.length > 0, reasons }
+}
+
+// ── Reschedule ────────────────────────────────────────────────
+async function handleRescheduleClub(body: any): Promise<NextResponse> {
+  const clubId = typeof body.clubId === 'string' ? body.clubId : ''
+  if (!clubId) return NextResponse.json({ success:false, error:'clubId is required' }, { status:400 })
+
+  const lock = await scheduleLock(clubId)
+  if (lock.locked) {
+    return NextResponse.json({ success:false,
+      error:`This club is already in motion, so its schedule is locked: ${lock.reasons.join('; ')}. Changing the dates now would regenerate the contribution rows those records depend on.` },
+      { status:409 })
+  }
+
+  const clubs = await sql(`SELECT * FROM "GroceryClub" WHERE id=$1`, [clubId])
+  if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
+  const club = clubs[0]
+
+  const months = Number.isInteger(Number(body.periodMonths)) ? Number(body.periodMonths) : Number(club.periodMonths)
+  const freq   = ['WEEKLY','FORTNIGHTLY','MONTHLY'].includes(body.contributionFrequency)
+    ? body.contributionFrequency : String(club.contributionFrequency)
+  const start  = body.startDate ? new Date(body.startDate) : new Date(club.startDate)
+
+  if (!(months > 0))          return NextResponse.json({ success:false, error:'Duration must be at least one month' }, { status:400 })
+  if (isNaN(start.getTime())) return NextResponse.json({ success:false, error:'Start date is not a valid date' }, { status:400 })
+
+  const periodCount = calcPeriodCount(months, freq)
+  if (periodCount > 260)
+    return NextResponse.json({ success:false, error:`That works out to ${periodCount} periods. Reduce the duration or use a less frequent cycle.` }, { status:400 })
+
+  // End date is derived, never taken from the client — a stored end date that
+  // disagrees with startDate + duration would make every downstream figure
+  // ambiguous.
+  const end = calcDueDate(start, periodCount, freq)
+
+  const members = await sql(
+    `SELECT "userId" FROM "GroceryMember" WHERE "clubId"=$1 AND "isActive"=true ORDER BY "userId"`, [clubId])
+
+  // Nothing is in motion, so rows beyond the new horizon can go. Anything
+  // still within it is re-dated rather than dropped and recreated, which
+  // keeps the period purchase plan attached to its cycle.
+  await Promise.all([
+    exec(`DELETE FROM "GroceryPeriodPurchase" WHERE "clubId"=$1 AND "periodNumber" > $2`, [clubId, periodCount]),
+    exec(`DELETE FROM "GroceryContribution"   WHERE "clubId"=$1 AND "periodNumber" > $2`, [clubId, periodCount]),
+    exec(`DELETE FROM "GroceryCycle"          WHERE "clubId"=$1 AND "periodNumber" > $2`, [clubId, periodCount]),
+  ])
+
+  // Re-date the surviving contribution rows in one statement per chunk
+  // rather than one per row — the round trip to Tokyo is the cost here.
+  if (members.length) {
+    const rows: { userId: string; p: number; due: Date }[] = []
+    for (const m of members) {
+      for (let p = 1; p <= periodCount; p++) rows.push({ userId: String(m.userId), p, due: calcDueDate(start, p, freq) })
+    }
+    for (let i = 0; i < rows.length; i += ACTIVATE_CHUNK_ROWS) {
+      const chunk = rows.slice(i, i + ACTIVATE_CHUNK_ROWS)
+      const params: any[] = [clubId]
+      const tuples = chunk.map(r => {
+        const b = params.length
+        params.push(randomUUID(), r.userId, r.p, r.due)
+        return `($${b+1},$1,$${b+2},$${b+3},$${b+4},0,0)`
+      }).join(',')
+      await exec(
+        `INSERT INTO "GroceryContribution"
+           (id,"clubId","userId","periodNumber","dueDate","amountDue","amountPaid","createdAt","updatedAt")
+         SELECT v.id,v."clubId",v."userId",v.p,v.due,v.amt,v.paid,NOW(),NOW()
+           FROM (VALUES ${tuples}) AS v(id,"clubId","userId",p,due,amt,paid)
+         ON CONFLICT ("clubId","userId","periodNumber") DO UPDATE
+           SET "dueDate"=EXCLUDED."dueDate", "updatedAt"=NOW()`,
+        params)
+    }
+  }
+
+  // Cycles: one OPEN row per period, none missing, none stale.
+  const cparams: any[] = [clubId]
+  const ctuples = Array.from({ length: periodCount }, (_, i) => {
+    const b = cparams.length
+    cparams.push(randomUUID(), i + 1)
+    return `($${b+1},$1,$${b+2})`
+  }).join(',')
+  await exec(
+    `INSERT INTO "GroceryCycle" (id,"clubId","periodNumber",status,"createdAt","updatedAt")
+     SELECT v.id, v."clubId", v.p, 'OPEN', NOW(), NOW()
+       FROM (VALUES ${ctuples}) AS v(id,"clubId",p)
+     ON CONFLICT ("clubId","periodNumber") DO NOTHING`,
+    cparams)
+
+  await exec(
+    `UPDATE "GroceryClub"
+        SET "periodMonths"=$1, "contributionFrequency"=$2, "startDate"=$3, "endDate"=$4, "updatedAt"=NOW()
+      WHERE id=$5`,
+    [months, freq, start, end, clubId])
+
+  return NextResponse.json({ success:true,
+    data:{ periodMonths: months, contributionFrequency: freq,
+           startDate: start, endDate: end, periods: periodCount },
+    message:`Rescheduled: ${periodCount} ${freq.toLowerCase()} period${periodCount===1?'':'s'} from ${start.toISOString().split('T')[0]} to ${end.toISOString().split('T')[0]}.` })
 }
 
 // ── Period purchases ──────────────────────────────────────────

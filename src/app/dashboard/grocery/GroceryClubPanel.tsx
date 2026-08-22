@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.7
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.8
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -46,6 +46,9 @@
 //       into one Cycle tab with a stepper, taking the bar to six tabs at
 //       ~730px. The bar also wraps rather than scrolling, so it cannot
 //       overflow at any width no matter what is added later.
+// v1.8: ScheduleForm on the Settings tab. Dates, frequency and duration are
+//       editable while the club has not started, and locked with a named
+//       reason once it has.
 import { useState, useEffect, useCallback } from 'react'
 
 const TEAL = '#0F6E56'; const NAVY = '#0D2137'; const GOLD = '#854D0E'
@@ -1599,6 +1602,8 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
           {/* SETTINGS */}
           {tab==='settings'&&<div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
+            <ScheduleForm club={club} locked={club.scheduleLocked} reasons={club.scheduleLockReasons}
+              saving={busy} onReschedule={(payload:any)=>doAction('RESCHEDULE_CLUB',payload)}/>
             <SettingsForm club={club} members={members} onSave={(payload:any)=>doAction('UPDATE_CLUB',payload)} saving={saving}/>
             {['DISTRIBUTED','ACTIVE','PURCHASING'].includes(club.status)&&<div style={{background:'#FEF9C3',borderRadius:'10px',padding:'14px',border:'1px solid #FCD34D'}}>
               <div style={{fontSize:'13px',fontWeight:'600',color:GOLD,marginBottom:'8px'}}>💰 Surplus / Deficit Notes</div>
@@ -1617,6 +1622,97 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           </div>}
         </div>
       </div>
+    </div>
+  )
+}
+
+// ── Schedule ──────────────────────────────────────────────────
+// Dates, frequency and duration stay editable while the club has not
+// actually started, because changing them regenerates every contribution row
+// and that is only safe while nothing hangs off those rows. Once a roll-call
+// is answered, money moves or items are assigned, the schedule locks and the
+// panel says exactly what locked it rather than greying out silently.
+function ScheduleForm({ club, locked, reasons, onReschedule, saving }: any) {
+  const iso = (d: any) => { try { return new Date(d).toISOString().split('T')[0] } catch { return '' } }
+  const [form, setForm] = useState({
+    periodMonths: String(club.periodMonths ?? 3),
+    contributionFrequency: club.contributionFrequency || 'MONTHLY',
+    startDate: iso(club.startDate),
+  })
+  const set = (k: string) => (v: string) => setForm(p => ({ ...p, [k]: v }))
+
+  const months  = parseInt(form.periodMonths || '0', 10)
+  const freq    = form.contributionFrequency
+  const periods = !(months > 0) ? 0
+    : freq === 'WEEKLY' ? Math.ceil(months * 4.33)
+    : freq === 'FORTNIGHTLY' ? Math.ceil(months * 2.17)
+    : months
+  const changed = String(club.periodMonths) !== form.periodMonths
+    || (club.contributionFrequency || 'MONTHLY') !== form.contributionFrequency
+    || iso(club.startDate) !== form.startDate
+  const tooMany = periods > 260
+  const blocked = saving || !changed || !(periods > 0) || tooMany
+
+  return (
+    <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'16px'}}>
+      <h4 style={{fontSize:'14px',fontWeight:'600',color:NAVY,margin:'0 0 4px'}}>📅 Schedule</h4>
+      <p style={{fontSize:'11px',color:'#64748B',margin:'0 0 14px'}}>
+        Start date, frequency and duration. The end date is worked out from these.
+      </p>
+
+      {locked
+        ? <div style={{background:'#FEF9C3',border:'1px solid #FCD34D',borderRadius:'8px',padding:'11px 13px'}}>
+            <div style={{fontSize:'12px',fontWeight:'700',color:GOLD,marginBottom:'5px'}}>🔒 Locked — this club is in motion</div>
+            <ul style={{margin:'0 0 6px',paddingLeft:'18px'}}>
+              {(reasons||[]).map((r:string,i:number)=>(
+                <li key={i} style={{fontSize:'11px',color:'#78350F',marginBottom:'2px'}}>{r}</li>
+              ))}
+            </ul>
+            <div style={{fontSize:'11px',color:'#78350F'}}>
+              Changing the dates now would regenerate the contribution rows these records depend on. The grocery list is unaffected — you can still edit the catalogue.
+            </div>
+          </div>
+        : <div>
+            <div style={{background:'#EEF2FF',border:'1px solid #C7D2FE',borderRadius:'8px',padding:'9px 12px',fontSize:'11px',color:'#3730A3',marginBottom:'12px'}}>
+              Nothing has happened on this club yet, so the schedule can still change. It locks once a roll-call is answered, money moves, or items are assigned.
+            </div>
+
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'12px'}}>
+              <div>
+                <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Start date</label>
+                <input type="date" value={form.startDate} onChange={e=>set('startDate')(e.target.value)}
+                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Frequency</label>
+                <select value={form.contributionFrequency} onChange={e=>set('contributionFrequency')(e.target.value)}
+                  style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'16px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                  <option value="WEEKLY">Weekly</option>
+                  <option value="FORTNIGHTLY">Fortnightly</option>
+                  <option value="MONTHLY">Monthly</option>
+                </select>
+              </div>
+              <div>
+                <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Duration (months)</label>
+                <input type="number" min="1" step="1" value={form.periodMonths} onChange={e=>set('periodMonths')(e.target.value)}
+                  style={{width:'100%',padding:'10px 12px',border:`1.5px solid ${tooMany?'#FECACA':'#E2E8F0'}`,borderRadius:'8px',fontSize:'16px',outline:'none',boxSizing:'border-box'}}/>
+              </div>
+            </div>
+
+            <div style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px',fontSize:'12px',color:'#475569',marginBottom:'12px'}}>
+              {periods>0
+                ? <span>That is <strong style={{color:NAVY}}>{periods}</strong> {freq.toLowerCase()} period{periods===1?'':'s'}. Contribution rows are rebuilt for every member across all of them.</span>
+                : <span>Set a duration of at least one month.</span>}
+              {tooMany&&<div style={{color:RED,marginTop:'4px'}}>{periods} periods is too many — reduce the duration or use a less frequent cycle.</div>}
+            </div>
+
+            <button onClick={()=>onReschedule({ clubId:club.id, periodMonths:months,
+                contributionFrequency:form.contributionFrequency, startDate:form.startDate })}
+              disabled={blocked}
+              style={{padding:'10px 20px',minHeight:'44px',background:blocked?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:blocked?'not-allowed':'pointer'}}>
+              {saving?'⏳ Rebuilding schedule...':changed?'📅 Apply new schedule':'No changes to apply'}
+            </button>
+          </div>}
     </div>
   )
 }
