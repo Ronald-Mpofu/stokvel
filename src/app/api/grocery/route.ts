@@ -203,6 +203,36 @@ function timingHeader(sink: Timing[], totalMs: number): Record<string, string> {
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
 }
+
+// Postgres serialises `timestamp` (without time zone) into JSON with no
+// offset: "2026-08-24T09:00:00". JavaScript reads an offsetless string as
+// LOCAL time, while Prisma's driver hands the same column back as a UTC Date.
+// Anything read through jsonb therefore has to be marked as UTC explicitly or
+// every date silently shifts by the reader's offset — ten hours in Sydney, two
+// in Harare, none on a UTC server, which is the worst version because it looks
+// correct in production logs and wrong on the phone.
+//
+// Matches only the exact naive-timestamp shape. A string already carrying Z or
+// an offset is left alone, as is any other text.
+const NAIVE_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?$/
+
+function utcify<T>(value: T): T {
+  if (typeof value === 'string') {
+    return (NAIVE_TIMESTAMP.test(value) ? `${value}Z` : value) as unknown as T
+  }
+  if (Array.isArray(value)) return value.map(utcify) as unknown as T
+  if (value !== null && typeof value === 'object') {
+    // Dates and Decimals arrive as objects from the driver on non-jsonb reads
+    // and must pass through untouched.
+    if (value instanceof Date) return value
+    const proto = Object.getPrototypeOf(value)
+    if (proto !== Object.prototype && proto !== null) return value
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = utcify(v)
+    return out as unknown as T
+  }
+  return value
+}
 async function exec(query: string, params: any[] = []) {
   return prisma.$executeRawUnsafe(query, ...params)
 }
@@ -359,118 +389,178 @@ export async function GET(req: NextRequest) {
     const clubId  = searchParams.get('clubId')
 
     if (clubId) {
-      // Single hop. The club row is one of the ten, not a gate in front of
-      // them — a missing club costs one wasted parallel batch, which is far
-      // cheaper than making every successful read wait for the check.
-      const [clubs, items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
-        timed('club', marks, sql(`SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
-              u."fullName" as "coordinatorName",
-              COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
-                         WHERE ga."clubId"=gc.id AND ga.status IN ('ASSIGNED','PURCHASED')),0) AS "advancedOut",
-              COALESCE((SELECT SUM(ga2."advanceAmount") FROM "GroceryAssignment" ga2
-                         WHERE ga2."clubId"=gc.id AND ga2.status IN ('ASSIGNED','PURCHASED')
-                           AND ga2."actualSpent" IS NULL),0)                                   AS "unacquitted",
-              COALESCE((SELECT COUNT(*) FROM "GroceryAssignment" ga3
-                         WHERE ga3."clubId"=gc.id AND ga3.status IN ('ASSIGNED','PURCHASED')),0) AS "openAssignments",
-              COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
-                         WHERE cf."clubId"=gc.id AND cf."appliedPeriod" IS NULL),0)            AS "carryForwardNet"
-             FROM "GroceryClub" gc
-             JOIN "Group" g ON g.id = gc."groupId"
-             LEFT JOIN "User" u ON u.id = gc."coordinatorId"
-             WHERE gc.id = $1`, [clubId])),
+      // ONE STATEMENT. NOT ELEVEN.
+      //
+      // The previous version issued eleven queries inside a Promise.all and
+      // called that parallel. It is not. DATABASE_URL carries
+      // connection_limit=1 — correct for serverless, since an instance serves
+      // one request at a time — which means Prisma's pool holds exactly ONE
+      // connection. Eleven concurrent queries do not run concurrently; they
+      // queue on that connection and execute one after another, and each one
+      // pays a full round trip to Tokyo. Promise.all changed the shape of the
+      // code and nothing about the wire.
+      //
+      // That is why the load time did not track data volume: a club with four
+      // items and five members costs the same as one with five hundred rows,
+      // because the cost was never the rows. It was eleven sequential
+      // trans-Pacific round trips, plus ~2s of connection handshake on a cold
+      // instance, plus whatever the page did before this request started.
+      //
+      // So the fix is not to make the queries faster. It is to stop making
+      // eleven of them. Everything below is one statement: the club row, seven
+      // aggregated result sets and the schedule-lock counts, assembled by
+      // Postgres into a single row of JSON. One round trip, whatever the club
+      // contains.
+      // WINDOW IS BOUNDED AT BOTH ENDS — BETWEEN active-1 AND active.
+      // A lower bound alone is close to useless here, and the first version of
+      // this optimisation shipped with exactly that mistake. Contribution rows
+      // are generated for the WHOLE schedule the moment a club is activated,
+      // so ">= active - 1" excludes precisely one period and lets every future
+      // one through: on a 52-period weekly club sitting at period 2, it
+      // returned 51 periods and called it scoping. Caught by executing the
+      // query against real data rather than reading it.
+      const detailRows = await timed('detail', marks, sql(`
+        SELECT
+          to_jsonb(gc) || jsonb_build_object(
+            'groupName',       g.name,
+            'groupCurrency',   g.currency,
+            'coordinatorName', u."fullName",
+            'advancedOut', COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
+                                      WHERE ga."clubId"=$1 AND ga.status IN ('ASSIGNED','PURCHASED')),0),
+            'unacquitted', COALESCE((SELECT SUM(ga2."advanceAmount") FROM "GroceryAssignment" ga2
+                                      WHERE ga2."clubId"=$1 AND ga2.status IN ('ASSIGNED','PURCHASED')
+                                        AND ga2."actualSpent" IS NULL),0),
+            'openAssignments', COALESCE((SELECT COUNT(*) FROM "GroceryAssignment" ga3
+                                      WHERE ga3."clubId"=$1 AND ga3.status IN ('ASSIGNED','PURCHASED')),0),
+            'carryForwardNet', COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                                      WHERE cf."clubId"=$1 AND cf."appliedPeriod" IS NULL),0)
+          ) AS club,
 
-        // The catalogue, with its assignment rollup. The inner aggregate is
-        // scoped to this club — without that filter it groups every
-        // assignment row on the platform before the join discards them.
-        timed('items', marks, sql(`SELECT gi.*, pu."fullName" as "purchasedByLive",
-                    COALESCE(a."assignmentCount",0)   as "assignmentCount",
-                    COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
-                    COALESCE(a."advanceTotal",0)      as "advanceTotal",
-                    COALESCE(a."spentTotal",0)        as "spentTotal",
-                    COALESCE(a."openCount",0)         as "openAssignments"
-             FROM "GroceryItem" gi
-             LEFT JOIN "User" pu ON pu.id = gi."purchasedById"
-             LEFT JOIN (
-               SELECT "itemId",
-                      COUNT(*)                                              as "assignmentCount",
-                      SUM("qtyAssigned")                                    as "qtyAssigned",
-                      SUM("advanceAmount")                                  as "advanceTotal",
-                      SUM(COALESCE("actualSpent",0))                        as "spentTotal",
-                      COUNT(*) FILTER (WHERE status IN ('ASSIGNED','PURCHASED')) as "openCount"
-                 FROM "GroceryAssignment"
-                WHERE "clubId" = $1 AND status <> 'CANCELLED'
-                GROUP BY "itemId"
-             ) a ON a."itemId" = gi.id
-             WHERE gi."clubId" = $1 ORDER BY gi."createdAt" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."createdAt" ASC), '[]'::jsonb) FROM (
+             SELECT gi.*, pu."fullName" AS "purchasedByLive",
+                    COALESCE(agg."assignmentCount",0) AS "assignmentCount",
+                    COALESCE(agg."qtyAssigned",0)     AS "qtyAssignedTotal",
+                    COALESCE(agg."advanceTotal",0)    AS "advanceTotal",
+                    COALESCE(agg."spentTotal",0)      AS "spentTotal",
+                    COALESCE(agg."openCount",0)       AS "openAssignments"
+               FROM "GroceryItem" gi
+               LEFT JOIN "User" pu ON pu.id = gi."purchasedById"
+               LEFT JOIN (
+                 SELECT "itemId",
+                        COUNT(*)                                                   AS "assignmentCount",
+                        SUM("qtyAssigned")                                         AS "qtyAssigned",
+                        SUM("advanceAmount")                                       AS "advanceTotal",
+                        SUM(COALESCE("actualSpent",0))                             AS "spentTotal",
+                        COUNT(*) FILTER (WHERE status IN ('ASSIGNED','PURCHASED')) AS "openCount"
+                   FROM "GroceryAssignment"
+                  WHERE "clubId" = $1 AND status <> 'CANCELLED'
+                  GROUP BY "itemId"
+               ) agg ON agg."itemId" = gi.id
+              WHERE gi."clubId" = $1
+          ) t) AS items,
 
-        timed('members', marks, sql(`SELECT gm.*, u."fullName", u.email, u.tier
-             FROM "GroceryMember" gm
-             JOIN "User" u ON u.id = gm."userId"
-             WHERE gm."clubId" = $1 AND gm."isActive" = true
-             ORDER BY u."fullName" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."fullName" ASC), '[]'::jsonb) FROM (
+             SELECT gm.*, u2."fullName", u2.email, u2.tier
+               FROM "GroceryMember" gm
+               JOIN "User" u2 ON u2.id = gm."userId"
+              WHERE gm."clubId" = $1 AND gm."isActive" = true
+          ) t) AS members,
 
-        // Current period and the previous one only.
-        timed('contributions', marks, sql(`SELECT gc2.*, u."fullName" as "memberName"
-             FROM "GroceryContribution" gc2
-             JOIN "User" u ON u.id = gc2."userId"
-             WHERE gc2."clubId" = $1
-               AND gc2."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY gc2."periodNumber" ASC, gc2."userId" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."periodNumber" ASC, t."userId" ASC), '[]'::jsonb) FROM (
+             SELECT c2.*, u3."fullName" AS "memberName"
+               FROM "GroceryContribution" c2
+               JOIN "User" u3 ON u3.id = c2."userId"
+              WHERE c2."clubId" = $1 AND c2."periodNumber" BETWEEN COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1) - 1 AND COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1)
+          ) t) AS contributions,
 
-        // periodNumber is COALESCEd because rows written before v1.5 predate
-        // the column and read as NULL; the panel treats those as period 1.
-        timed('assignments', marks, sql(`SELECT ga.*, u."fullName" as "memberName", gi.name as "itemName", gi.unit
-             FROM "GroceryAssignment" ga
-             JOIN "User" u        ON u.id  = ga."userId"
-             JOIN "GroceryItem" gi ON gi.id = ga."itemId"
-             WHERE ga."clubId" = $1 AND ga.status <> 'CANCELLED'
-               AND COALESCE(ga."periodNumber",1) >= ${PERIOD_WINDOW}
-             ORDER BY gi.name ASC, u."fullName" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."itemName" ASC, t."memberName" ASC), '[]'::jsonb) FROM (
+             SELECT ga4.*, u4."fullName" AS "memberName", gi2.name AS "itemName", gi2.unit
+               FROM "GroceryAssignment" ga4
+               JOIN "User" u4        ON u4.id  = ga4."userId"
+               JOIN "GroceryItem" gi2 ON gi2.id = ga4."itemId"
+              WHERE ga4."clubId" = $1 AND ga4.status <> 'CANCELLED'
+                AND COALESCE(ga4."periodNumber",1) BETWEEN COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1) - 1 AND COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1)
+          ) t) AS assignments,
 
-        // Cycles stay whole — one narrow row per period, and the panel needs
-        // the full list to work out which period is active.
-        timed('cycles', marks, sql(`SELECT * FROM "GroceryCycle" WHERE "clubId" = $1 ORDER BY "periodNumber" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."periodNumber" ASC), '[]'::jsonb) FROM (
+             SELECT * FROM "GroceryCycle" WHERE "clubId" = $1
+          ) t) AS cycles,
 
-        timed('transfers', marks, sql(`SELECT st.*, pu."fullName" as "payerName", ru."fullName" as "payeeName",
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."periodNumber" ASC, t.amount DESC), '[]'::jsonb) FROM (
+             SELECT st.*, pu2."fullName" AS "payerName", ru."fullName" AS "payeeName",
                     sa."supplierName", sa."bankName", sa."accountNumber", sa."referenceFormat"
-             FROM "GrocerySettlementTransfer" st
-             JOIN "User" pu ON pu.id = st."payerId"
-             LEFT JOIN "User" ru ON ru.id = st."payeeUserId"
-             LEFT JOIN "GrocerySupplierAccount" sa ON sa.id = st."payeeSupplierId"
-             WHERE st."clubId" = $1 AND st.status <> 'CANCELLED'
-               AND st."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId])),
+               FROM "GrocerySettlementTransfer" st
+               JOIN "User" pu2 ON pu2.id = st."payerId"
+               LEFT JOIN "User" ru ON ru.id = st."payeeUserId"
+               LEFT JOIN "GrocerySupplierAccount" sa ON sa.id = st."payeeSupplierId"
+              WHERE st."clubId" = $1 AND st.status <> 'CANCELLED'
+                AND st."periodNumber" BETWEEN COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1) - 1 AND COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1)
+          ) t) AS transfers,
 
-        timed('suppliers', marks, sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
-             ORDER BY "supplierName" ASC`, [clubId])),
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."supplierName" ASC), '[]'::jsonb) FROM (
+             SELECT * FROM "GrocerySupplierAccount"
+              WHERE "clubId" = $1 AND "isActive" = true
+          ) t) AS suppliers,
 
-        // qtyAssigned was a correlated subquery evaluated once per plan line.
-        // One scoped grouped aggregate joined on (itemId, periodNumber) gives
-        // the same numbers at constant cost.
-        timed('periodPlan', marks, sql(`SELECT pp.*, gi.name AS "itemName", gi.unit, gi."estimatedUnitPrice",
+          (SELECT COALESCE(jsonb_agg(to_jsonb(t) ORDER BY t."periodNumber" ASC, t."itemName" ASC), '[]'::jsonb) FROM (
+             SELECT pp.*, gi3.name AS "itemName", gi3.unit, gi3."estimatedUnitPrice",
                     COALESCE(qa."qtyAssigned",0) AS "qtyAssigned"
-             FROM "GroceryPeriodPurchase" pp
-             JOIN "GroceryItem" gi ON gi.id = pp."itemId"
-             LEFT JOIN (
-               SELECT "itemId", COALESCE("periodNumber",1) AS "periodNumber",
-                      SUM("qtyAssigned") AS "qtyAssigned"
-                 FROM "GroceryAssignment"
-                WHERE "clubId" = $1 AND status <> 'CANCELLED'
-                GROUP BY "itemId", COALESCE("periodNumber",1)
-             ) qa ON qa."itemId" = pp."itemId" AND qa."periodNumber" = pp."periodNumber"
-             WHERE pp."clubId" = $1
-               AND pp."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId])),
+               FROM "GroceryPeriodPurchase" pp
+               JOIN "GroceryItem" gi3 ON gi3.id = pp."itemId"
+               LEFT JOIN (
+                 SELECT "itemId", COALESCE("periodNumber",1) AS "periodNumber",
+                        SUM("qtyAssigned") AS "qtyAssigned"
+                   FROM "GroceryAssignment"
+                  WHERE "clubId" = $1 AND status <> 'CANCELLED'
+                  GROUP BY "itemId", COALESCE("periodNumber",1)
+               ) qa ON qa."itemId" = pp."itemId" AND qa."periodNumber" = pp."periodNumber"
+              WHERE pp."clubId" = $1 AND pp."periodNumber" BETWEEN COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1) - 1 AND COALESCE(
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+                     (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1), 1)
+          ) t) AS "periodPurchases",
 
-        timed('scheduleLock', marks, scheduleLock(clubId)),
+          ${LOCK_COUNTS_JSON('$1')} AS "lockCounts"
 
-        // Control. `SELECT 1` has no table, no index and no rows to serialise.
-        // If this is slow, EVERYTHING is slow for a reason that has nothing to
-        // do with the queries above.
-        timed('probe', marks, sql(`SELECT 1 AS ok`)),
-      ])
+        FROM "GroceryClub" gc
+        JOIN "Group" g ON g.id = gc."groupId"
+        LEFT JOIN "User" u ON u.id = gc."coordinatorId"
+        WHERE gc.id = $1`, [clubId]))
 
-      if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
+      if (!detailRows.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
+
+      // Postgres renders `timestamp` (no time zone) into JSON without an
+      // offset — "2026-08-24T09:00:00" — and JavaScript parses an offsetless
+      // string as LOCAL time. Prisma's own driver hands these back as UTC
+      // Dates, so leaving them raw would silently shift every date by the
+      // reader's offset: ten hours in Sydney, two in Harare. utcify walks the
+      // payload and marks those strings as UTC, restoring the exact semantics
+      // the previous code had.
+      const d = utcify(detailRows[0])
+
+      const clubs       = [d.club]
+      const items       = d.items            as any[]
+      const members     = d.members          as any[]
+      const contribs    = d.contributions    as any[]
+      const assignments = d.assignments      as any[]
+      const cycles      = d.cycles           as any[]
+      const transfers   = d.transfers        as any[]
+      const suppliers   = d.suppliers        as any[]
+      const plan        = d.periodPurchases  as any[]
+      const lock        = lockFromCounts(d.lockCounts)
       const club = clubs[0]
 
       // Recomputed here so the client is told which window it received rather
@@ -1017,41 +1107,52 @@ function splitContribution(totalCents: number, userIds: string[], periodNumber: 
 
 // ── Schedule mutability ───────────────────────────────────────
 // Changing the start date, frequency or duration regenerates every
-// contribution row, so it is only safe while nothing hangs off them. One
-// round trip establishes the whole picture, and the caller gets back the
-// specific reasons rather than a bare "locked" so the admin knows what to
-// undo if they need to.
-async function scheduleLock(clubId: string) {
-  const r = await sql(
-    `SELECT
-       (SELECT COUNT(*) FROM "GroceryContribution"
-         WHERE "clubId"=$1 AND ("fundsConfirmedAt" IS NOT NULL
-                             OR "fundsDeclinedAt"  IS NOT NULL))            AS "rollCall",
-       (SELECT COUNT(*) FROM "GroceryContribution"
-         WHERE "clubId"=$1 AND ("amountPaid" > 0 OR "arrearsCarriedAt" IS NOT NULL)) AS "payments",
-       (SELECT COUNT(*) FROM "GroceryAssignment"
-         WHERE "clubId"=$1 AND status <> 'CANCELLED')                       AS "assignments",
-       (SELECT COUNT(*) FROM "GrocerySettlementTransfer"
-         WHERE "clubId"=$1 AND status <> 'CANCELLED')                       AS "settlements",
-       (SELECT COUNT(*) FROM "GroceryCarryForward" WHERE "clubId"=$1)       AS "carry",
-       (SELECT COUNT(*) FROM "GroceryCycle"
-         WHERE "clubId"=$1 AND status NOT IN ('OPEN','REOPENED'))           AS "cyclesStarted",
-       (SELECT COUNT(*) FROM "GroceryItem"
-         WHERE "clubId"=$1 AND status IN ('PURCHASED','DISTRIBUTED'))       AS "purchases"`,
-    [clubId]
-  )
-  const c = r[0] || {}
-  const checks: [string, number, string][] = [
-    ['rollCall',      Number(c.rollCall      || 0), 'members have answered the roll-call'],
-    ['payments',      Number(c.payments      || 0), 'contributions have been paid or carried as arrears'],
-    ['assignments',   Number(c.assignments   || 0), 'items have been assigned to members'],
-    ['settlements',   Number(c.settlements   || 0), 'settlement instructions have been issued'],
-    ['carry',         Number(c.carry         || 0), 'carry-forward balances exist'],
-    ['cyclesStarted', Number(c.cyclesStarted || 0), 'a cycle has moved past the roll-call'],
-    ['purchases',     Number(c.purchases     || 0), 'items have been purchased or distributed'],
+// contribution row, so it is only safe while nothing hangs off them. The
+// caller gets back the specific reasons rather than a bare "locked" so the
+// admin knows what to undo if they need to.
+//
+// The counts are expressed once, here, as a jsonb fragment. The club detail
+// GET embeds this fragment directly in its single statement rather than
+// issuing a separate query for it; POST handlers call scheduleLock(), which
+// runs the same fragment standalone. Two call sites, one definition — if a new
+// kind of record starts hanging off contributions, adding it here covers both.
+function LOCK_COUNTS_JSON(clubRef: string): string {
+  return `jsonb_build_object(
+    'rollCall',     (SELECT COUNT(*) FROM "GroceryContribution"
+                      WHERE "clubId"=${clubRef} AND ("fundsConfirmedAt" IS NOT NULL
+                                                  OR "fundsDeclinedAt"  IS NOT NULL)),
+    'payments',     (SELECT COUNT(*) FROM "GroceryContribution"
+                      WHERE "clubId"=${clubRef} AND ("amountPaid" > 0 OR "arrearsCarriedAt" IS NOT NULL)),
+    'assignments',  (SELECT COUNT(*) FROM "GroceryAssignment"
+                      WHERE "clubId"=${clubRef} AND status <> 'CANCELLED'),
+    'settlements',  (SELECT COUNT(*) FROM "GrocerySettlementTransfer"
+                      WHERE "clubId"=${clubRef} AND status <> 'CANCELLED'),
+    'carry',        (SELECT COUNT(*) FROM "GroceryCarryForward" WHERE "clubId"=${clubRef}),
+    'cyclesStarted',(SELECT COUNT(*) FROM "GroceryCycle"
+                      WHERE "clubId"=${clubRef} AND status NOT IN ('OPEN','REOPENED')),
+    'purchases',    (SELECT COUNT(*) FROM "GroceryItem"
+                      WHERE "clubId"=${clubRef} AND status IN ('PURCHASED','DISTRIBUTED'))
+  )`
+}
+
+function lockFromCounts(c: any): { locked: boolean; reasons: string[] } {
+  const k = c || {}
+  const checks: [number, string][] = [
+    [Number(k.rollCall      || 0), 'members have answered the roll-call'],
+    [Number(k.payments      || 0), 'contributions have been paid or carried as arrears'],
+    [Number(k.assignments   || 0), 'items have been assigned to members'],
+    [Number(k.settlements   || 0), 'settlement instructions have been issued'],
+    [Number(k.carry         || 0), 'carry-forward balances exist'],
+    [Number(k.cyclesStarted || 0), 'a cycle has moved past the roll-call'],
+    [Number(k.purchases     || 0), 'items have been purchased or distributed'],
   ]
-  const reasons = checks.filter(([, n]) => n > 0).map(([, n, why]) => `${n} ${why}`)
+  const reasons = checks.filter(([n]) => n > 0).map(([n, why]) => `${n} ${why}`)
   return { locked: reasons.length > 0, reasons }
+}
+
+async function scheduleLock(clubId: string) {
+  const r = await sql(`SELECT ${LOCK_COUNTS_JSON('$1')} AS counts`, [clubId])
+  return lockFromCounts(r[0]?.counts)
 }
 
 // ── Reschedule ────────────────────────────────────────────────
