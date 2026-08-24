@@ -57,6 +57,14 @@
 // v1.11: Grocery List is CRUD + whole-period budget + purchase status only.
 //       Supplier and Assigned To leave the catalogue: supplier moves onto the
 //       Period Purchases line, assignment reads from the Assignments screen.
+// v1.13: RESPONSIVE. The Dashboard surface now has a real phone layout.
+//       Below 640px the club detail stops being an 820px centred modal and
+//       becomes a full-screen sheet; the 5-across KPI strip (55px per cell on
+//       a 380px phone, against figures needing ~75px) becomes a 2-column
+//       card grid; the 6 tabs become a 3x2 grid; the 4-across item-status
+//       strip becomes 2x2; and the club-info pairs become label/value rows.
+//       Nothing is hidden and nothing scrolls sideways — same data, laid out
+//       for the width that exists. Every control clears 44px.
 // v1.12: Assign removed from the Grocery List entirely. Allocation happens
 //       only under the Cycle umbrella, in stage order:
 //         Period Purchases -> Roll-call -> Assignments -> Settlement
@@ -88,6 +96,37 @@ const ITEM_STATUS: Record<string, any> = {
 const FREQ: Record<string,string> = { WEEKLY:'Weekly', FORTNIGHTLY:'Fortnightly', MONTHLY:'Monthly' }
 
 const fmt = (n: number) => new Intl.NumberFormat('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}).format(n)
+
+// ── Responsive ────────────────────────────────────────────────
+// Declared here rather than imported from the shared mobile hook: this file
+// had no mobile dependency and a wrong import path is a failed deploy, not a
+// failed render. If the shared hook is wired in later, swap the three call
+// sites (ClubDetail, CycleBar, GroceryClubPanel) and delete this.
+//
+// matchMedia, not a resize listener — resize fires on every keystroke that
+// opens the soft keyboard on Android, and each one would re-render the whole
+// club detail.
+const NARROW_QUERY = '(max-width: 640px)'
+
+function useIsNarrow() {
+  // Defaults false so the desktop layout is what server-renders; the effect
+  // corrects it before paint on a phone.
+  const [narrow, setNarrow] = useState(false)
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return undefined
+    const mq = window.matchMedia(NARROW_QUERY)
+    const apply = () => setNarrow(mq.matches)
+    apply()
+    if (typeof mq.addEventListener === 'function') {
+      mq.addEventListener('change', apply)
+      return () => mq.removeEventListener('change', apply)
+    }
+    const legacy = mq as any            // iOS Safari 13 and older
+    legacy.addListener(apply)
+    return () => legacy.removeListener(apply)
+  }, [])
+  return narrow
+}
 
 function Toast({ msg, type, onClose }: any) {
   useEffect(()=>{ const t=setTimeout(onClose,4000); return()=>clearTimeout(t) },[onClose])
@@ -1046,11 +1085,17 @@ const CYCLE_META: Record<string, any> = {
 }
 
 function CycleBar({ cycle, busy, onLockRollCall, onLockCycle, onSolve }: any) {
+  // Hook before the early return — a conditional hook is a crash the first
+  // time a club has no cycle.
+  const narrow = useIsNarrow()
   if (!cycle) return null
   const meta = CYCLE_META[cycle.status] || CYCLE_META.OPEN
+  // On a phone the action is the point of this bar, so it goes full width
+  // under the status rather than being squeezed beside it.
+  const btn = narrow ? { flex:'1 1 100%', fontSize:'13px' } : {}
   return (
-    <div style={{background:meta.bg,border:`1px solid ${meta.color}33`,borderRadius:'10px',padding:'12px 14px',display:'flex',flexWrap:'wrap',gap:'12px',alignItems:'center',justifyContent:'space-between'}}>
-      <div style={{minWidth:0}}>
+    <div style={{background:meta.bg,border:`1px solid ${meta.color}33`,borderRadius:'10px',padding:narrow?'12px':'12px 14px',display:'flex',flexWrap:'wrap',gap:narrow?'10px':'12px',alignItems:narrow?'stretch':'center',justifyContent:'space-between'}}>
+      <div style={{minWidth:0,flex:narrow?'1 1 100%':undefined}}>
         <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap'}}>
           <span style={{fontSize:'13px',fontWeight:'700',color:meta.color}}>Cycle {cycle.periodNumber} · {meta.label}</span>
           {cycle.confirmedMemberCount>0&&<span style={{fontSize:'11px',color:'#475569'}}>
@@ -1059,18 +1104,18 @@ function CycleBar({ cycle, busy, onLockRollCall, onLockCycle, onSolve }: any) {
         </div>
         <div style={{fontSize:'11px',color:'#64748B',marginTop:'2px'}}>{meta.hint}</div>
       </div>
-      <div style={{display:'flex',gap:'6px',flexWrap:'wrap'}}>
+      <div style={{display:'flex',gap:'6px',flexWrap:'wrap',flex:narrow?'1 1 100%':undefined}}>
         {['OPEN','REOPENED'].includes(cycle.status)&&<button onClick={onLockRollCall} disabled={busy}
-          style={{padding:'8px 14px',minHeight:'44px',background:'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          style={{padding:'8px 14px',minHeight:'44px',background:'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',...btn}}>
           {busy?'⏳ Working...':'🔒 Close roll-call'}</button>}
         {cycle.status==='FUNDED'&&<button onClick={onLockCycle} disabled={busy}
-          style={{padding:'8px 14px',minHeight:'44px',background:GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          style={{padding:'8px 14px',minHeight:'44px',background:GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',...btn}}>
           {busy?'⏳ Working...':'🔒 Lock assignments'}</button>}
         {cycle.status==='LOCKED'&&<button onClick={onSolve} disabled={busy}
-          style={{padding:'8px 14px',minHeight:'44px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          style={{padding:'8px 14px',minHeight:'44px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',...btn}}>
           {busy?'⏳ Solving...':'⚡ Solve settlement'}</button>}
         {cycle.status==='SETTLED'&&<button onClick={onSolve} disabled={busy}
-          style={{padding:'8px 14px',minHeight:'44px',background:'white',color:TEAL,border:`1px solid ${TEAL}`,borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+          style={{padding:'8px 14px',minHeight:'44px',background:'white',color:TEAL,border:`1px solid ${TEAL}`,borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer',...btn}}>
           ↻ Re-solve</button>}
       </div>
     </div>
@@ -1332,6 +1377,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [saving, setSaving]               = useState(false)
   const [busy, setBusy]                   = useState<{label:string;detail?:string}|null>(null)
   const [search, setSearch]               = useState('')
+  const narrow                            = useIsNarrow()
 
   const fetchClub = useCallback(async () => {
     // Client-side timing. The server's own numbers arrive in data._timings, but
@@ -1378,8 +1424,8 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   })
 
   if (loading) return (
-    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000}}>
-      <div style={{background:'white',borderRadius:'16px',padding:'40px',textAlign:'center'}}><div style={{fontSize:'32px',marginBottom:'12px'}}>⏳</div>Loading...</div>
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.55)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:narrow?'20px':0}}>
+      <div style={{background:'white',borderRadius:'16px',padding:narrow?'32px 24px':'40px',textAlign:'center',width:narrow?'100%':'auto'}}><div style={{fontSize:'32px',marginBottom:'12px'}}>⏳</div>Loading...</div>
     </div>
   )
   if (!club) return null
@@ -1421,8 +1467,11 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const canActivate = club.status==='SETUP' && members.length>0 && items.length>0
 
   return (
-    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:1000,padding:'16px'}}>
-      <div style={{background:'white',borderRadius:'16px',width:'100%',maxWidth:'820px',maxHeight:'95vh',display:'flex',flexDirection:'column',boxShadow:'0 25px 60px rgba(0,0,0,0.3)',overflow:'hidden'}}>
+    <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.6)',display:'flex',alignItems:narrow?'stretch':'center',justifyContent:'center',zIndex:1000,padding:narrow?0:'16px'}}>
+      {/* A phone gets the whole screen. A 95vh card inside a 16px gutter wastes
+          both edges and leaves a strip of dimmed backdrop that reads as a
+          mis-tap target. */}
+      <div style={{background:'white',borderRadius:narrow?0:'16px',width:'100%',maxWidth:narrow?'none':'820px',maxHeight:narrow?'none':'95vh',height:narrow?'100%':'auto',display:'flex',flexDirection:'column',boxShadow:narrow?'none':'0 25px 60px rgba(0,0,0,0.3)',overflow:'hidden'}}>
         {busy&&<BusyOverlay label={busy.label} detail={busy.detail}/>}
         {showItemModal&&<ItemModal clubId={clubId} item={editItem} memberCount={members.length||1}
           onClose={()=>{ setShowItemModal(false); setEditItem(null) }}
@@ -1447,38 +1496,44 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           onError={(msg:string)=>onAction(msg,'error')}/>}
 
         {/* Header */}
-        <div style={{background:`linear-gradient(135deg,${NAVY},#1A4A2E)`,padding:'20px 24px',flexShrink:0}}>
-          <div style={{display:'flex',alignItems:'flex-start',gap:'12px'}}>
-            <div style={{width:'44px',height:'44px',borderRadius:'10px',background:'rgba(255,255,255,0.15)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'22px',flexShrink:0}}>🛒</div>
-            <div style={{flex:1}}>
+        <div style={{background:`linear-gradient(135deg,${NAVY},#1A4A2E)`,padding:narrow?'14px 14px 16px':'20px 24px',flexShrink:0,paddingTop:narrow?'calc(14px + env(safe-area-inset-top))':undefined}}>
+          <div style={{display:'flex',alignItems:'flex-start',gap:narrow?'10px':'12px'}}>
+            <div style={{width:narrow?'38px':'44px',height:narrow?'38px':'44px',borderRadius:'10px',background:'rgba(255,255,255,0.15)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:narrow?'19px':'22px',flexShrink:0}}>🛒</div>
+            <div style={{flex:1,minWidth:0}}>
               <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom:'2px'}}>
-                <span style={{fontSize:'16px',fontWeight:'700',color:'white'}}>{club.name}</span>
+                <span style={{fontSize:narrow?'15px':'16px',fontWeight:'700',color:'white'}}>{club.name}</span>
                 <Pill bg={sm.bg} color={sm.color}>{sm.icon} {sm.label}</Pill>
               </div>
-              <div style={{fontSize:'12px',color:'rgba(255,255,255,0.6)'}}>
+              <div style={{fontSize:narrow?'11px':'12px',color:'rgba(255,255,255,0.6)',lineHeight:1.45}}>
                 {FREQ[club.contributionFrequency]} · {club.periodMonths} months · {members.length} members
                 {club.coordinatorName&&<span style={{marginLeft:'8px'}}>· 👤 {club.coordinatorName}</span>}
               </div>
             </div>
-            <button onClick={onClose} style={{width:'32px',height:'32px',background:'rgba(255,255,255,0.15)',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:'18px',color:'white'}}>×</button>
+            {/* 32px is under the 44px minimum, and this is the only way out of
+                a full-screen sheet. */}
+            <button onClick={onClose} aria-label="Close" style={{width:narrow?'44px':'32px',height:narrow?'44px':'32px',background:'rgba(255,255,255,0.15)',border:'none',borderRadius:'8px',cursor:'pointer',fontSize:narrow?'22px':'18px',color:'white',flexShrink:0,lineHeight:1}}>×</button>
           </div>
 
           {/* KPI strip */}
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:'10px',marginTop:'14px',paddingTop:'12px',borderTop:'1px solid rgba(255,255,255,0.1)'}}>
+          {/* Five figures across a 380px phone gives each one 55px, against
+              amounts that need ~75px — they wrapped mid-number. Two columns
+              of tinted cards instead, with the odd one out spanning the row
+              rather than sitting in a lopsided gap. No figure is dropped. */}
+          <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(5,1fr)',gap:narrow?'8px':'10px',marginTop:narrow?'12px':'14px',paddingTop:'12px',borderTop:'1px solid rgba(255,255,255,0.1)'}}>
             {[
               {l:'List Value',    v:`$${fmt(club.listValue ?? club.totalBudget)}`,   c:'white'},
               {l:'Collected',     v:`$${fmt(club.totalContributed)}`,                c:'#9FE1CB'},
               {l:'Advanced Out',  v:`$${fmt(club.advancedOut||0)}`,                  c:'#FCD34D'},
               {l:'Uncommitted',   v:`$${fmt(club.uncommittedCash||0)}`,              c:(club.uncommittedCash||0)>=0?'#9FE1CB':'#FCA5A5'},
               {l:'Unacquitted',   v:`$${fmt(club.unacquitted||0)}`,                  c:(club.unacquitted||0)>0?'#FCA5A5':'white'},
-            ].map(s=><div key={s.l}>
+            ].map((s,si,arr)=><div key={s.l} style={narrow?{background:'rgba(255,255,255,0.07)',borderRadius:'8px',padding:'8px 10px',gridColumn:(arr.length%2===1&&si===arr.length-1)?'1 / -1':undefined}:undefined}>
               <div style={{fontSize:'9px',color:'rgba(255,255,255,0.5)',textTransform:'uppercase',letterSpacing:'0.04em'}}>{s.l}</div>
               <div style={{fontSize:'15px',fontWeight:'700',color:s.c,marginTop:'2px'}}>{s.v}</div>
             </div>)}
           </div>
 
           {/* Budget progress */}
-          {club.totalBudget > 0 && <div style={{marginTop:'10px',display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+          {club.totalBudget > 0 && <div style={{marginTop:'10px',display:'grid',gridTemplateColumns:narrow?'1fr':'1fr 1fr',gap:'8px'}}>
             <div>
               <div style={{fontSize:'10px',color:'rgba(255,255,255,0.5)',marginBottom:'3px'}}>Contributions: {club.fundingPct}% funded</div>
               <div style={{height:'5px',background:'rgba(255,255,255,0.15)',borderRadius:'3px',overflow:'hidden'}}>
@@ -1494,32 +1549,38 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           </div>}
 
           {/* Action buttons */}
+          {/* 6px of vertical padding is a 26px target. On a phone these become
+              full-width rows at 44px. */}
           <div style={{display:'flex',gap:'8px',marginTop:'12px',flexWrap:'wrap'}}>
             {canActivate&&<button onClick={()=>doAction('ACTIVATE',{},activateBusy(members.length))} disabled={saving}
-              style={{padding:'6px 14px',background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'6px',fontSize:'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Club'}</button>}
+              style={{padding:narrow?'10px 14px':'6px 14px',minHeight:narrow?'44px':undefined,flex:narrow?'1 1 100%':undefined,background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:narrow?'8px':'6px',fontSize:narrow?'13px':'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Club'}</button>}
             {club.status==='ACTIVE'&&<button onClick={()=>setTab('items')}
-              style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>🛒 Manage Items</button>}
+              style={{padding:narrow?'10px 14px':'6px 14px',minHeight:narrow?'44px':undefined,flex:narrow?'1 1 100%':undefined,background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:narrow?'8px':'6px',fontSize:narrow?'13px':'12px',cursor:'pointer'}}>🛒 Manage Items</button>}
             {['PURCHASING','ACTIVE'].includes(club.status)&&<button onClick={()=>doAction('MARK_DISTRIBUTED',{},{label:'Updating items…',detail:'Marking all purchased items as distributed.'})} disabled={saving}
-              style={{padding:'6px 14px',background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:'6px',fontSize:'12px',cursor:'pointer'}}>📦 Mark All Distributed</button>}
+              style={{padding:narrow?'10px 14px':'6px 14px',minHeight:narrow?'44px':undefined,flex:narrow?'1 1 100%':undefined,background:'rgba(255,255,255,0.15)',color:'white',border:'none',borderRadius:narrow?'8px':'6px',fontSize:narrow?'13px':'12px',cursor:'pointer'}}>📦 Mark All Distributed</button>}
           </div>
         </div>
 
         {/* Tabs */}
         {/* Wraps rather than scrolls: a tab bar that runs off the edge hides
             destinations with no affordance that they exist. */}
-        <div style={{display:'flex',flexWrap:'wrap',borderBottom:'1px solid #E2E8F0',flexShrink:0}}>
+        {/* Wrapping flex puts two tabs on the first row and orphans the sixth.
+            A fixed 3x2 grid gives every destination the same target and keeps
+            the row structure predictable as tabs are added. Still no
+            horizontal scroll, at any width. */}
+        <div style={{display:narrow?'grid':'flex',gridTemplateColumns:narrow?'repeat(3,1fr)':undefined,flexWrap:'wrap',borderBottom:'1px solid #E2E8F0',flexShrink:0}}>
           {[['dashboard','📊 Dashboard'],['items','🛒 Grocery List'],['cycle','🔄 Cycle'],['members','👥 Members'],['contributions','💸 Contributions'],['settings','⚙️ Settings']].map(([id,label])=>(
             <button key={id} onClick={()=>{ setTab(id as any); if(id==='cycle') setStage(currentStage(cycle) as any) }}
-              style={{padding:'10px 16px',background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap'}}>{label}</button>
+              style={{padding:narrow?'11px 4px':'10px 16px',minHeight:narrow?'44px':undefined,background:'none',border:'none',borderBottom:tab===id?`2px solid ${TEAL}`:'2px solid transparent',color:tab===id?TEAL:'#64748B',fontWeight:tab===id?'600':'400',fontSize:narrow?'11px':'13px',cursor:'pointer',marginBottom:'-1px',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{label}</button>
           ))}
         </div>
 
         {/* Tab Content */}
-        <div style={{flex:1,overflowY:'auto',padding:'16px 20px'}}>
+        <div style={{flex:1,overflowY:'auto',WebkitOverflowScrolling:'touch',padding:narrow?'12px 12px':'16px 20px',paddingBottom:narrow?'calc(24px + env(safe-area-inset-bottom))':undefined}}>
 
           {/* DASHBOARD */}
           {tab==='dashboard'&&<div style={{display:'flex',flexDirection:'column',gap:'14px'}}>
-            {club.status==='SETUP'&&<div style={{background:'#EEF2FF',borderRadius:'12px',padding:'16px',border:'1px solid #C7D2FE'}}>
+            {club.status==='SETUP'&&<div style={{background:'#EEF2FF',borderRadius:'12px',padding:narrow?'14px':'16px',border:'1px solid #C7D2FE'}}>
               <div style={{fontSize:'13px',fontWeight:'600',color:'#3730A3',marginBottom:'10px'}}>📋 Setup Checklist</div>
               {[[members.length>0,`Members enrolled (${members.length})`],[items.length>0,`Grocery items added (${items.length})`],[club.coordinatorId,'Coordinator assigned']].map(([done,label],i)=>(
                 <div key={i} style={{display:'flex',alignItems:'center',gap:'8px',fontSize:'13px',color:done?GREEN:'#64748B',marginBottom:'5px'}}>
@@ -1527,14 +1588,16 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                 </div>
               ))}
               {canActivate&&<button onClick={()=>doAction('ACTIVATE',{},activateBusy(members.length))} disabled={saving}
-                style={{marginTop:'8px',padding:'8px 18px',background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Now'}</button>}
+                style={{marginTop:'8px',padding:narrow?'12px 18px':'8px 18px',minHeight:narrow?'44px':undefined,width:narrow?'100%':undefined,background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:narrow?'13px':'12px',fontWeight:'600',cursor:saving?'not-allowed':'pointer'}}>{saving?'⏳ Activating…':'▶️ Activate Now'}</button>}
               {!canActivate&&<p style={{fontSize:'12px',color:'#64748B',margin:'8px 0 0'}}>Add at least one member and one grocery item to activate.</p>}
             </div>}
 
             {/* Item status summary */}
-            {items.length>0&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'16px'}}>
+            {items.length>0&&<div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:narrow?'14px':'16px'}}>
               <div style={{fontSize:'13px',fontWeight:'600',color:NAVY,marginBottom:'12px'}}>🛒 Grocery List Summary</div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px',marginBottom:'12px'}}>
+              {/* Four across leaves 71px a tile, and DISTRIBUTED alone measures
+                  ~66px at 10px — it sat on the edge of wrapping. 2x2 instead. */}
+              <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(4,1fr)',gap:'8px',marginBottom:'12px'}}>
                 {['PENDING','ASSIGNED','PURCHASED','DISTRIBUTED'].map(s=>{
                   const cnt = items.filter((i:any)=>i.status===s).length
                   const sm2 = ITEM_STATUS[s]
@@ -1553,22 +1616,28 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                     <div style={{fontSize:'13px',fontWeight:'500',color:NAVY}}>{i.name}</div>
                     <div style={{fontSize:'11px',color:'#94A3B8'}}>{i.totalQty} {i.unit} · ${fmt(i.estimatedTotalPrice)}</div>
                   </div>
-                  <button onClick={()=>{ setTab('cycle'); setStage('assignments') }} style={{padding:'4px 10px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'5px',fontSize:'11px',cursor:'pointer'}}>Assignments →</button>
+                  <button onClick={()=>{ setTab('cycle'); setStage('assignments') }} style={{padding:narrow?'10px 12px':'4px 10px',minHeight:narrow?'44px':undefined,flexShrink:0,background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:narrow?'8px':'5px',fontSize:'11px',fontWeight:narrow?'600':'400',cursor:'pointer',whiteSpace:'nowrap'}}>{narrow?'Assign →':'Assignments →'}</button>
                 </div>
               ))}
             </div>}
 
             {/* Club info */}
-            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
-              {[['Start Date',new Date(club.startDate).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})],
-                ['End Date',new Date(club.endDate).toLocaleDateString('en-GB',{day:'numeric',month:'long',year:'numeric'})],
+            {/* Two 150px columns cannot hold "CONTRIBUTION/MEMBER" above
+                "1 December 2026". On a phone these become label-left /
+                value-right rows, matching the Overview convention used on the
+                group screens. Dates shorten so the value stays on one line. */}
+            <div style={{display:'grid',gridTemplateColumns:narrow?'1fr':'1fr 1fr',gap:narrow?'6px':'8px'}}>
+              {[['Start Date',new Date(club.startDate).toLocaleDateString('en-GB',narrow?{day:'numeric',month:'short',year:'numeric'}:{day:'numeric',month:'long',year:'numeric'})],
+                ['End Date',new Date(club.endDate).toLocaleDateString('en-GB',narrow?{day:'numeric',month:'short',year:'numeric'}:{day:'numeric',month:'long',year:'numeric'})],
                 ['Frequency',FREQ[club.contributionFrequency]],
                 ['Contribution/Member',`$${fmt(club.contributionAmount)}`],
                 ['Coordinator',club.coordinatorName||'—'],
                 ['Days Left',`${club.daysLeft} days`],
-              ].map(([l,v])=><div key={l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
-                <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:'3px'}}>{l}</div>
-                <div style={{fontSize:'13px',fontWeight:'500',color:NAVY}}>{v}</div>
+              ].map(([l,v])=><div key={l as string} style={narrow
+                  ? {background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:'12px'}
+                  : {background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+                <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:narrow?0:'3px',flexShrink:0}}>{l}</div>
+                <div style={{fontSize:'13px',fontWeight:'500',color:NAVY,textAlign:narrow?'right':'left',minWidth:0}}>{v}</div>
               </div>)}
             </div>
           </div>}
@@ -1957,6 +2026,7 @@ export default function GroceryClubPanel({ groupId, groupMembers }: { groupId: s
   const [selectedId, setSelectedId] = useState<string|null>(null)
   const [deletingId, setDeletingId] = useState<string|null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<string|null>(null)
+  const narrow = useIsNarrow()
 
   const showToast = (msg: string, type='success') => setToast({msg,type})
 
@@ -2000,19 +2070,19 @@ export default function GroceryClubPanel({ groupId, groupMembers }: { groupId: s
         onClose={()=>setSelectedId(null)}
         onAction={(msg:string,type='success')=>{ showToast(msg,type); fetchClubs() }}/>}
 
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+      <div style={{display:'flex',flexDirection:narrow?'column':'row',justifyContent:'space-between',alignItems:narrow?'stretch':'center',gap:narrow?'10px':0}}>
         <div>
           <h3 style={{fontSize:'16px',fontWeight:'700',color:NAVY,margin:'0 0 2px'}}>🛒 Grocery Clubs</h3>
           <p style={{fontSize:'12px',color:'#64748B',margin:0}}>Pool contributions to buy groceries in bulk at better prices</p>
         </div>
         <div style={{display:'flex',gap:'8px'}}>
-          <button onClick={fetchClubs} style={{padding:'7px 12px',background:'#F1F5F9',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',cursor:'pointer',color:'#475569'}}>↻</button>
-          <button onClick={()=>setShowCreate(true)} style={{padding:'8px 16px',background:TEAL,color:'white',border:'none',borderRadius:'7px',fontSize:'13px',fontWeight:'600',cursor:'pointer'}}>+ New Club</button>
+          <button onClick={fetchClubs} aria-label="Refresh" style={{padding:narrow?'0 16px':'7px 12px',minHeight:narrow?'44px':undefined,minWidth:narrow?'44px':undefined,background:'#F1F5F9',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'15px':'12px',cursor:'pointer',color:'#475569'}}>↻</button>
+          <button onClick={()=>setShowCreate(true)} style={{padding:narrow?'0 16px':'8px 16px',minHeight:narrow?'44px':undefined,flex:narrow?1:undefined,background:TEAL,color:'white',border:'none',borderRadius:'7px',fontSize:'13px',fontWeight:'600',cursor:'pointer'}}>+ New Club</button>
         </div>
       </div>
 
       {loading?<div style={{padding:'40px',textAlign:'center',color:'#94A3B8'}}>⏳ Loading...</div>
-      :clubs.length===0?<div style={{background:'white',borderRadius:'12px',border:'1px dashed #E2E8F0',padding:'48px',textAlign:'center'}}>
+      :clubs.length===0?<div style={{background:'white',borderRadius:'12px',border:'1px dashed #E2E8F0',padding:narrow?'36px 20px':'48px',textAlign:'center'}}>
         <div style={{fontSize:'48px',marginBottom:'12px'}}>🛒</div>
         <h4 style={{fontSize:'15px',fontWeight:'600',color:NAVY,margin:'0 0 8px'}}>No Grocery Clubs yet</h4>
         <p style={{fontSize:'13px',color:'#64748B',marginBottom:'16px'}}>Start a grocery club to pool members' contributions and buy in bulk.</p>
@@ -2023,11 +2093,11 @@ export default function GroceryClubPanel({ groupId, groupMembers }: { groupId: s
             const sm2 = STATUS_META[c.status]||STATUS_META.SETUP
             return (
               <div key={c.id} onClick={()=>setSelectedId(c.id)}
-                style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'16px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:'16px',flexWrap:'wrap',transition:'all 0.15s'}}
+                style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:narrow?'14px':'16px 20px',cursor:'pointer',display:'flex',alignItems:'center',gap:narrow?'12px':'16px',flexWrap:'wrap',transition:'all 0.15s'}}
                 onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.boxShadow='0 4px 16px rgba(0,0,0,0.08)'}}
                 onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.boxShadow='none'}}>
                 <div style={{width:'42px',height:'42px',borderRadius:'10px',background:`linear-gradient(135deg,${NAVY},#1A4A2E)`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'20px',flexShrink:0}}>🛒</div>
-                <div style={{flex:1,minWidth:'200px'}}>
+                <div style={{flex:1,minWidth:narrow?0:'200px'}}>
                   <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom:'2px'}}>
                     <span style={{fontSize:'14px',fontWeight:'700',color:NAVY}}>{c.name}</span>
                     <Pill bg={sm2.bg} color={sm2.color}>{sm2.icon} {sm2.label}</Pill>
@@ -2037,33 +2107,37 @@ export default function GroceryClubPanel({ groupId, groupMembers }: { groupId: s
                     {c.coordinatorName&&<span style={{marginLeft:'6px'}}>· 👤 {c.coordinatorName}</span>}
                   </div>
                 </div>
-                <div style={{display:'flex',gap:'16px',flexWrap:'wrap',flexShrink:0}}>
+                <div style={narrow
+                  ? {display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',flex:'1 1 100%',background:'#F8FAFC',borderRadius:'8px',padding:'10px 8px'}
+                  : {display:'flex',gap:'16px',flexWrap:'wrap',flexShrink:0}}>
                   {[{l:'Budget',v:`$${c.totalBudget>0?fmt(c.totalBudget):'TBD'}`},{l:'Collected',v:`$${fmt(c.totalContributed)}`},{l:'Spent',v:`$${fmt(c.totalSpent)}`}].map(s=>(
-                    <div key={s.l} style={{textAlign:'center'}}>
+                    <div key={s.l} style={{textAlign:'center',minWidth:0}}>
                       <div style={{fontSize:'13px',fontWeight:'700',color:NAVY}}>{s.v}</div>
                       <div style={{fontSize:'10px',color:'#94A3B8'}}>{s.l}</div>
                     </div>
                   ))}
                 </div>
-                {c.totalBudget>0&&<div style={{flexShrink:0,width:'80px'}}>
+                {c.totalBudget>0&&<div style={narrow?{flex:'1 1 100%'}:{flexShrink:0,width:'80px'}}>
                   <div style={{fontSize:'10px',color:'#94A3B8',marginBottom:'3px',textAlign:'right'}}>{c.fundingPct}% funded</div>
                   <div style={{height:'6px',background:'#F1F5F9',borderRadius:'3px',overflow:'hidden'}}>
                     <div style={{height:'100%',background:TEAL,borderRadius:'3px',width:`${c.fundingPct}%`}}/>
                   </div>
                 </div>}
-                <span style={{fontSize:'18px',color:'#CBD5E1',flexShrink:0}}>→</span>
+                {/* The whole card is the tap target on a phone; a 12px chevron
+                    competing for a row of its own is noise. */}
+                {!narrow&&<span style={{fontSize:'18px',color:'#CBD5E1',flexShrink:0}}>→</span>}
                 {deleteConfirm === c.id
-                  ? <div onClick={e=>e.stopPropagation()} style={{display:'flex',gap:'6px',alignItems:'center',flexShrink:0}}>
+                  ? <div onClick={e=>e.stopPropagation()} style={{display:'flex',gap:'6px',alignItems:'center',flexShrink:0,flex:narrow?'1 1 100%':undefined,justifyContent:narrow?'flex-end':undefined}}>
                       <span style={{fontSize:'11px',color:'#991B1B',fontWeight:'600'}}>Delete?</span>
                       <button onClick={()=>handleDelete(c.id)} disabled={!!deletingId}
-                        style={{padding:'4px 10px',background:'#DC2626',color:'white',border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'700',cursor:'pointer'}}>
+                        style={{padding:narrow?'0 16px':'4px 10px',minHeight:narrow?'44px':undefined,background:'#DC2626',color:'white',border:'none',borderRadius:'6px',fontSize:narrow?'12px':'11px',fontWeight:'700',cursor:'pointer'}}>
                         {deletingId===c.id?'…':'Yes'}
                       </button>
                       <button onClick={()=>setDeleteConfirm(null)}
-                        style={{padding:'4px 10px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>No</button>
+                        style={{padding:narrow?'0 16px':'4px 10px',minHeight:narrow?'44px':undefined,background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'6px',fontSize:narrow?'12px':'11px',cursor:'pointer'}}>No</button>
                     </div>
                   : <button onClick={e=>{e.stopPropagation();setDeleteConfirm(c.id)}}
-                      style={{padding:'4px 10px',background:'#FEF2F2',color:'#991B1B',border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer',flexShrink:0}}>
+                      style={{padding:narrow?'0 14px':'4px 10px',minHeight:narrow?'40px':undefined,marginLeft:narrow?'auto':undefined,background:'#FEF2F2',color:'#991B1B',border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer',flexShrink:0}}>
                       🗑 Delete
                     </button>
                 }
