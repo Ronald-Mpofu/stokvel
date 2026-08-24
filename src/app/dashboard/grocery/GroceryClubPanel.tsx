@@ -1,5 +1,5 @@
 'use client'
-// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.12
+// src/app/dashboard/grocery/GroceryClubPanel.tsx — v1.15
 // v1.1: blocking BusyOverlay with elapsed counter for long-running actions.
 // v1.2: Assign became a real member picker. The old button hard-coded
 //       members[0] — it silently assigned whoever sorted first and did
@@ -1599,6 +1599,10 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
               <div style={{display:'flex',alignItems:'center',gap:'8px',flexWrap:'wrap',marginBottom:'2px'}}>
                 <span style={{fontSize:narrow?'15px':'16px',fontWeight:'700',color:'white'}}>{club.name}</span>
                 <Pill bg={sm.bg} color={sm.color}>{sm.icon} {sm.label}</Pill>
+              </div>
+              {/* TEMPORARY — remove once the layout is confirmed. */}
+              <div style={{display:'inline-block',background:narrow?'#166534':'#991B1B',color:'white',fontSize:'10px',fontWeight:'700',padding:'2px 7px',borderRadius:'5px',marginBottom:'4px',fontFamily:'monospace'}}>
+                BUILD v1.15 · narrow={String(narrow)} · w={typeof window!=='undefined'?window.innerWidth:'?'}
               </div>
               <div style={{fontSize:narrow?'11px':'12px',color:'rgba(255,255,255,0.6)',lineHeight:1.45}}>
                 {FREQ[club.contributionFrequency]} · {club.periodMonths} months · {members.length} members
