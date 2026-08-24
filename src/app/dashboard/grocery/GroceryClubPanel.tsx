@@ -1382,15 +1382,24 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const rollCall  = contribs.filter((c:any)=>c.periodNumber===period)
   const cycleTx   = transfers.filter((t:any)=>t.periodNumber===period)
   const plan      = (club.periodPurchases||[]).filter((r:any)=>r.periodNumber===period)
-  // Contributions: current and previous cycle only. A club two years into a
-  // monthly run would otherwise render 24 periods x every member at once.
-  const visibleContribs = contribs.filter((c:any)=>c.periodNumber>=period-1)
-  const openAssigns = assigns.filter((a:any)=>['ASSIGNED','PURCHASED'].includes(a.status))
+  // Contributions: current and previous cycle only. Route v1.12 already scopes
+  // the payload to this window, so the filter is a no-op against a current
+  // server — it stays because it is the client's own statement of what it
+  // renders, and it keeps this component correct if it is ever handed a wider
+  // payload (a cached response, an older deployment, a future export path).
+  const windowFrom      = Math.max(1, Number(club.periodWindowFrom ?? period - 1))
+  const visibleContribs = contribs.filter((c:any)=>c.periodNumber>=windowFrom)
+  // Assignments are read per period everywhere they are shown, so scope once
+  // here rather than re-filtering the same array at three call sites.
+  const cycleAssigns = assigns.filter((a:any)=>a.periodNumber===period)
+  const openAssigns  = cycleAssigns.filter((a:any)=>['ASSIGNED','PURCHASED'].includes(a.status))
   const nonMembers = groupMembers.filter((m:any) => !members.find((cm:any)=>cm.userId===(m.userId||m.id)))
 
-  // Group contribs by period
+  // Group contribs by period — built from the visible window, not the raw
+  // array. Building it from `contribs` was what forced the route to ship every
+  // period ever written: the tab rendered them all.
   const byPeriod: Record<number,any[]> = {}
-  contribs.filter((c:any) => !search || c.memberName?.toLowerCase().includes(search.toLowerCase()))
+  visibleContribs.filter((c:any) => !search || c.memberName?.toLowerCase().includes(search.toLowerCase()))
     .forEach((c:any) => { if (!byPeriod[c.periodNumber]) byPeriod[c.periodNumber]=[]; byPeriod[c.periodNumber].push(c) })
 
   const now = new Date()
@@ -1408,12 +1417,12 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
           onSuccess={(msg:string)=>{ onAction(msg); fetchClub(); setPurchaseItem(null) }}/>}
         {assignItem&&<AssignItemModal item={assignItem} members={members} clubId={clubId}
           available={cycle?.confirmedPot!=null
-            ? Number(cycle.confirmedPot) - assigns.filter((a:any)=>a.periodNumber===period)
-                .reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0)
+            ? Number(cycle.confirmedPot)
+              - cycleAssigns.reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0)
             : club.uncommittedCash}
           periodNumber={period}
           suppliers={club.supplierAccounts||[]}
-          existing={assigns.find((a:any)=>a.itemId===assignItem.id&&a.status!=='ACQUITTED')}
+          existing={cycleAssigns.find((a:any)=>a.itemId===assignItem.id&&a.status!=='ACQUITTED')}
           onClose={()=>setAssignItem(null)}
           onSuccess={(msg:string)=>{ onAction(msg); fetchClub() }}
           onError={(msg:string)=>onAction(msg,'error')}/>}
@@ -1641,10 +1650,12 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
             onCloseRollCall={()=>doAction('LOCK_CONTRIBUTIONS',{periodNumber:period})}/>}
 
           {tab==='cycle'&&stage==='settlement'&&<SettlementPanel transfers={cycleTx}
-            assigns={assigns.filter((a:any)=>a.periodNumber===period)} busy={busy}
+            assigns={cycleAssigns} busy={busy}
             onState={(action:string,transferId:string)=>doAction(action,{transferId})}/>}
 
-          {tab==='cycle'&&stage==='assignments'&&<AssignmentsPanel plan={plan} assigns={assigns}
+          {/* Assignments are this cycle's, not the club's. Passing the whole
+              array made the totals row sum every period ever assigned. */}
+          {tab==='cycle'&&stage==='assignments'&&<AssignmentsPanel plan={plan} assigns={cycleAssigns}
             openAssigns={openAssigns} club={club} cycle={cycle} busy={busy}
             onAssign={(line:any)=>setAssignItem({ id:line.itemId, name:line.itemName, unit:line.unit,
               totalQty:Number(line.qty), qtyUnassigned:Number(line.qtyUnassigned),
@@ -1708,6 +1719,9 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                   ['Overdue',visibleContribs.filter((c:any)=>c.isOverdue).length,RED]].map(([l,v,c])=>(
                   <span key={l as string} style={{color:c as string,fontWeight:'600'}}>{l}: {v}</span>
                 ))}
+                <span style={{color:'#94A3B8',fontWeight:'400'}}>
+                  · showing period{windowFrom===period?'':'s'} {windowFrom===period?`#${period}`:`#${windowFrom}–#${period}`}
+                </span>
               </div>
               <input placeholder="Search member..." value={search} onChange={e=>setSearch(e.target.value)}
                 style={{padding:'6px 12px',border:'1.5px solid #E2E8F0',borderRadius:'6px',fontSize:'12px',outline:'none'}}/>

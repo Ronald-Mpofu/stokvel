@@ -115,6 +115,30 @@
 //           PENDING -> PURCHASED -> DISTRIBUTED, driven by acquittal and
 //           distribution rather than by allocation.
 //       Requires sql/18-grocery-supplier-to-cycle.sql.
+// v1.12: DETAIL READ PERFORMANCE. Three separate problems, all in GET:
+//         (a) The per-item assignment aggregate had NO "clubId" filter. It
+//             grouped the ENTIRE "GroceryAssignment" table — every club on the
+//             platform — and then joined the handful of rows that matched.
+//             Cost grew with total platform volume, not club size. This is a
+//             correctness-adjacent bug: it was only ever right because the
+//             join threw the other clubs away afterwards.
+//         (b) The club row was fetched, awaited, and only THEN did the
+//             Promise.all start. Two sequential Tokyo round trips (~320ms of
+//             pure latency) where one would do. The club query now sits inside
+//             the same Promise.all and the 404 check happens after.
+//         (c) The response carried the club's ENTIRE history — every
+//             contribution, assignment, transfer and period-purchase row ever
+//             written — while the panel renders only the current and previous
+//             period. A 12-month WEEKLY club with 10 members is 520
+//             contribution rows serialised, shipped over a mobile connection,
+//             parsed, and then filtered away on the phone. Worse, every single
+//             action refetched all of it. Those four reads are now scoped to
+//             the active period and the one before it, which is exactly what
+//             the UI shows.
+//       The period-purchase "qtyAssigned" correlated subquery became a scoped
+//       LEFT JOIN aggregate for the same reason as (a).
+//       Run sql/19-grocery-indexes.sql — without the composite indexes the
+//       period-scoped predicates fall back to sequential scans.
 import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import prisma from '@/lib/prisma/client'
@@ -255,6 +279,24 @@ function calcDueDate(start: Date, p: number, freq: string): Date {
 }
 
 // ── GET ───────────────────────────────────────────────────────
+// The period currently being worked: the lowest cycle that is not CLOSED,
+// falling back to the lowest cycle at all, falling back to 1 for a club that
+// has not been activated yet. This mirrors exactly what the panel computes
+// from the cycles array, so the rows we ship are the rows it renders.
+//
+// Inlined as a scalar rather than resolved in a preflight query — a preflight
+// would reintroduce the sequential round trip this version exists to remove.
+// Every query below already binds $1 = clubId, so it costs no extra parameter.
+const ACTIVE_PERIOD = `COALESCE(
+        (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1 AND status <> 'CLOSED'),
+        (SELECT MIN("periodNumber") FROM "GroceryCycle" WHERE "clubId"=$1),
+        1)`
+
+// Current period and the one before it. The Cycle stepper works the active
+// period; Contributions shows this period and last. Nothing in the panel reads
+// further back, so nothing further back is sent.
+const PERIOD_WINDOW = `${ACTIVE_PERIOD} - 1`
+
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url)
@@ -262,27 +304,29 @@ export async function GET(req: NextRequest) {
     const clubId  = searchParams.get('clubId')
 
     if (clubId) {
-      const clubs = await sql(
-        `SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
-          u."fullName" as "coordinatorName",
-          COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
-                     WHERE ga."clubId"=gc.id AND ga.status IN ('ASSIGNED','PURCHASED')),0) AS "advancedOut",
-          COALESCE((SELECT SUM(ga2."advanceAmount") FROM "GroceryAssignment" ga2
-                     WHERE ga2."clubId"=gc.id AND ga2.status IN ('ASSIGNED','PURCHASED')
-                       AND ga2."actualSpent" IS NULL),0)                                   AS "unacquitted",
-          COALESCE((SELECT COUNT(*) FROM "GroceryAssignment" ga3
-                     WHERE ga3."clubId"=gc.id AND ga3.status IN ('ASSIGNED','PURCHASED')),0) AS "openAssignments",
-          COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
-                     WHERE cf."clubId"=gc.id AND cf."appliedPeriod" IS NULL),0)            AS "carryForwardNet"
-         FROM "GroceryClub" gc
-         JOIN "Group" g ON g.id = gc."groupId"
-         LEFT JOIN "User" u ON u.id = gc."coordinatorId"
-         WHERE gc.id = $1`, [clubId]
-      )
-      if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
-      const club = clubs[0]
+      // Single hop. The club row is one of the ten, not a gate in front of
+      // them — a missing club costs one wasted parallel batch, which is far
+      // cheaper than making every successful read wait for the check.
+      const [clubs, items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
+        sql(`SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
+              u."fullName" as "coordinatorName",
+              COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
+                         WHERE ga."clubId"=gc.id AND ga.status IN ('ASSIGNED','PURCHASED')),0) AS "advancedOut",
+              COALESCE((SELECT SUM(ga2."advanceAmount") FROM "GroceryAssignment" ga2
+                         WHERE ga2."clubId"=gc.id AND ga2.status IN ('ASSIGNED','PURCHASED')
+                           AND ga2."actualSpent" IS NULL),0)                                   AS "unacquitted",
+              COALESCE((SELECT COUNT(*) FROM "GroceryAssignment" ga3
+                         WHERE ga3."clubId"=gc.id AND ga3.status IN ('ASSIGNED','PURCHASED')),0) AS "openAssignments",
+              COALESCE((SELECT SUM(cf.amount) FROM "GroceryCarryForward" cf
+                         WHERE cf."clubId"=gc.id AND cf."appliedPeriod" IS NULL),0)            AS "carryForwardNet"
+             FROM "GroceryClub" gc
+             JOIN "Group" g ON g.id = gc."groupId"
+             LEFT JOIN "User" u ON u.id = gc."coordinatorId"
+             WHERE gc.id = $1`, [clubId]),
 
-      const [items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
+        // The catalogue, with its assignment rollup. The inner aggregate is
+        // scoped to this club — without that filter it groups every
+        // assignment row on the platform before the join discards them.
         sql(`SELECT gi.*, pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
@@ -299,27 +343,39 @@ export async function GET(req: NextRequest) {
                       SUM(COALESCE("actualSpent",0))                        as "spentTotal",
                       COUNT(*) FILTER (WHERE status IN ('ASSIGNED','PURCHASED')) as "openCount"
                  FROM "GroceryAssignment"
-                WHERE status <> 'CANCELLED'
+                WHERE "clubId" = $1 AND status <> 'CANCELLED'
                 GROUP BY "itemId"
              ) a ON a."itemId" = gi.id
              WHERE gi."clubId" = $1 ORDER BY gi."createdAt" ASC`, [clubId]),
+
         sql(`SELECT gm.*, u."fullName", u.email, u.tier
              FROM "GroceryMember" gm
              JOIN "User" u ON u.id = gm."userId"
              WHERE gm."clubId" = $1 AND gm."isActive" = true
              ORDER BY u."fullName" ASC`, [clubId]),
+
+        // Current period and the previous one only.
         sql(`SELECT gc2.*, u."fullName" as "memberName"
              FROM "GroceryContribution" gc2
              JOIN "User" u ON u.id = gc2."userId"
              WHERE gc2."clubId" = $1
+               AND gc2."periodNumber" >= ${PERIOD_WINDOW}
              ORDER BY gc2."periodNumber" ASC, gc2."userId" ASC`, [clubId]),
+
+        // periodNumber is COALESCEd because rows written before v1.5 predate
+        // the column and read as NULL; the panel treats those as period 1.
         sql(`SELECT ga.*, u."fullName" as "memberName", gi.name as "itemName", gi.unit
              FROM "GroceryAssignment" ga
              JOIN "User" u        ON u.id  = ga."userId"
              JOIN "GroceryItem" gi ON gi.id = ga."itemId"
              WHERE ga."clubId" = $1 AND ga.status <> 'CANCELLED'
+               AND COALESCE(ga."periodNumber",1) >= ${PERIOD_WINDOW}
              ORDER BY gi.name ASC, u."fullName" ASC`, [clubId]),
+
+        // Cycles stay whole — one narrow row per period, and the panel needs
+        // the full list to work out which period is active.
         sql(`SELECT * FROM "GroceryCycle" WHERE "clubId" = $1 ORDER BY "periodNumber" ASC`, [clubId]),
+
         sql(`SELECT st.*, pu."fullName" as "payerName", ru."fullName" as "payeeName",
                     sa."supplierName", sa."bankName", sa."accountNumber", sa."referenceFormat"
              FROM "GrocerySettlementTransfer" st
@@ -327,23 +383,52 @@ export async function GET(req: NextRequest) {
              LEFT JOIN "User" ru ON ru.id = st."payeeUserId"
              LEFT JOIN "GrocerySupplierAccount" sa ON sa.id = st."payeeSupplierId"
              WHERE st."clubId" = $1 AND st.status <> 'CANCELLED'
+               AND st."periodNumber" >= ${PERIOD_WINDOW}
              ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId]),
+
         sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
              ORDER BY "supplierName" ASC`, [clubId]),
+
+        // qtyAssigned was a correlated subquery evaluated once per plan line.
+        // One scoped grouped aggregate joined on (itemId, periodNumber) gives
+        // the same numbers at constant cost.
         sql(`SELECT pp.*, gi.name AS "itemName", gi.unit, gi."estimatedUnitPrice",
-                    COALESCE((SELECT SUM(ga."qtyAssigned") FROM "GroceryAssignment" ga
-                               WHERE ga."itemId"=pp."itemId" AND ga."periodNumber"=pp."periodNumber"
-                                 AND ga.status <> 'CANCELLED'),0) AS "qtyAssigned"
+                    COALESCE(qa."qtyAssigned",0) AS "qtyAssigned"
              FROM "GroceryPeriodPurchase" pp
              JOIN "GroceryItem" gi ON gi.id = pp."itemId"
+             LEFT JOIN (
+               SELECT "itemId", COALESCE("periodNumber",1) AS "periodNumber",
+                      SUM("qtyAssigned") AS "qtyAssigned"
+                 FROM "GroceryAssignment"
+                WHERE "clubId" = $1 AND status <> 'CANCELLED'
+                GROUP BY "itemId", COALESCE("periodNumber",1)
+             ) qa ON qa."itemId" = pp."itemId" AND qa."periodNumber" = pp."periodNumber"
              WHERE pp."clubId" = $1
+               AND pp."periodNumber" >= ${PERIOD_WINDOW}
              ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId]),
+
         scheduleLock(clubId),
       ])
 
+      if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
+      const club = clubs[0]
+
+      // Recomputed here so the client is told which window it received rather
+      // than having to infer it. A panel that assumes it holds full history
+      // would silently render an empty Contributions tab otherwise.
+      const activePeriod = Number(
+        cycles.find((c: any) => c.status !== 'CLOSED')?.periodNumber
+        ?? cycles[0]?.periodNumber
+        ?? 1
+      )
       const now = new Date()
       return NextResponse.json({ success:true, data: {
         ...formatClub(club),
+        // contributions, assignments, settlementTransfers and periodPurchases
+        // below cover periods >= periodWindowFrom ONLY. Anything that needs
+        // older rows must ask for them; do not treat these arrays as history.
+        activePeriod,
+        periodWindowFrom: Math.max(1, activePeriod - 1),
         items:   items.map(formatItem),
         members: members.map(m => ({
           userId: m.userId, fullName: m.fullName, email: m.email, tier: m.tier,
