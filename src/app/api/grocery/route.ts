@@ -147,6 +147,59 @@ import { requireGroupManager } from '@/lib/auth'
 
 export const dynamic = 'force-dynamic'
 
+// ── Timing harness (v1.13) ────────────────────────────────────
+// Set GROCERY_TIMING=1 in the Vercel environment to have GET report where its
+// time went, both as a Server-Timing response header and as data._timings.
+// Costs nothing when the flag is off, and nothing but two Date.now() calls per
+// query when it is on.
+//
+// READ THE SHAPE, NOT JUST THE TOTAL. The queries below are issued together
+// via Promise.all, so their individual timings tell you which of three very
+// different problems you have:
+//
+//   ALL ROUGHLY EQUAL AND LARGE (say all ~9000ms, including the trivial
+//   `probe` query)          -> nothing to do with the queries. The cost is
+//                              establishing the connection: a cold serverless
+//                              function opening a fresh TLS session to Tokyo.
+//
+//   A RISING STAIRCASE (200, 400, 600, 800 ...) -> the queries are running
+//                              SEQUENTIALLY despite Promise.all, which happens
+//                              when the Prisma connection pool holds a single
+//                              connection. Check for connection_limit=1 in
+//                              DATABASE_URL.
+//
+//   ONE OUTLIER, REST FAST  -> a genuinely slow query. That one is missing an
+//                              index, and its name tells you which table.
+//
+// `probe` is the control. It is `SELECT 1` — it cannot be slow for any reason
+// intrinsic to it, so whatever time it reports is pure overhead that every
+// other query is also paying.
+const TIMING_ON = process.env.GROCERY_TIMING === '1'
+
+type Timing = { name: string; ms: number }
+
+function timed<T>(name: string, sink: Timing[], p: Promise<T>): Promise<T> {
+  if (!TIMING_ON) return p
+  const started = Date.now()
+  return p.then(
+    v => { sink.push({ name, ms: Date.now() - started }); return v },
+    e => { sink.push({ name: `${name}:ERROR`, ms: Date.now() - started }); throw e },
+  )
+}
+
+// Server-Timing renders in the browser devtools Network panel under the
+// Timing tab, so the numbers land next to the request they describe rather
+// than in a log the person debugging has to go and find.
+function timingHeader(sink: Timing[], totalMs: number): Record<string, string> {
+  if (!TIMING_ON) return {}
+  const parts = sink
+    .slice()
+    .sort((a, b) => b.ms - a.ms)
+    .map(t => `${t.name.replace(/[^a-zA-Z0-9_]/g, '_')};dur=${t.ms}`)
+  parts.push(`total;dur=${totalMs}`)
+  return { 'Server-Timing': parts.join(', ') }
+}
+
 async function sql(query: string, params: any[] = []) {
   return prisma.$queryRawUnsafe(query, ...params) as Promise<any[]>
 }
@@ -298,6 +351,8 @@ const ACTIVE_PERIOD = `COALESCE(
 const PERIOD_WINDOW = `${ACTIVE_PERIOD} - 1`
 
 export async function GET(req: NextRequest) {
+  const handlerStarted = Date.now()
+  const marks: Timing[] = []
   try {
     const { searchParams } = new URL(req.url)
     const groupId = searchParams.get('groupId')
@@ -308,7 +363,7 @@ export async function GET(req: NextRequest) {
       // them — a missing club costs one wasted parallel batch, which is far
       // cheaper than making every successful read wait for the check.
       const [clubs, items, members, contribs, assignments, cycles, transfers, suppliers, plan, lock] = await Promise.all([
-        sql(`SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
+        timed('club', marks, sql(`SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
               u."fullName" as "coordinatorName",
               COALESCE((SELECT SUM(ga."advanceAmount") FROM "GroceryAssignment" ga
                          WHERE ga."clubId"=gc.id AND ga.status IN ('ASSIGNED','PURCHASED')),0) AS "advancedOut",
@@ -322,12 +377,12 @@ export async function GET(req: NextRequest) {
              FROM "GroceryClub" gc
              JOIN "Group" g ON g.id = gc."groupId"
              LEFT JOIN "User" u ON u.id = gc."coordinatorId"
-             WHERE gc.id = $1`, [clubId]),
+             WHERE gc.id = $1`, [clubId])),
 
         // The catalogue, with its assignment rollup. The inner aggregate is
         // scoped to this club — without that filter it groups every
         // assignment row on the platform before the join discards them.
-        sql(`SELECT gi.*, pu."fullName" as "purchasedByLive",
+        timed('items', marks, sql(`SELECT gi.*, pu."fullName" as "purchasedByLive",
                     COALESCE(a."assignmentCount",0)   as "assignmentCount",
                     COALESCE(a."qtyAssigned",0)       as "qtyAssignedTotal",
                     COALESCE(a."advanceTotal",0)      as "advanceTotal",
@@ -346,37 +401,37 @@ export async function GET(req: NextRequest) {
                 WHERE "clubId" = $1 AND status <> 'CANCELLED'
                 GROUP BY "itemId"
              ) a ON a."itemId" = gi.id
-             WHERE gi."clubId" = $1 ORDER BY gi."createdAt" ASC`, [clubId]),
+             WHERE gi."clubId" = $1 ORDER BY gi."createdAt" ASC`, [clubId])),
 
-        sql(`SELECT gm.*, u."fullName", u.email, u.tier
+        timed('members', marks, sql(`SELECT gm.*, u."fullName", u.email, u.tier
              FROM "GroceryMember" gm
              JOIN "User" u ON u.id = gm."userId"
              WHERE gm."clubId" = $1 AND gm."isActive" = true
-             ORDER BY u."fullName" ASC`, [clubId]),
+             ORDER BY u."fullName" ASC`, [clubId])),
 
         // Current period and the previous one only.
-        sql(`SELECT gc2.*, u."fullName" as "memberName"
+        timed('contributions', marks, sql(`SELECT gc2.*, u."fullName" as "memberName"
              FROM "GroceryContribution" gc2
              JOIN "User" u ON u.id = gc2."userId"
              WHERE gc2."clubId" = $1
                AND gc2."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY gc2."periodNumber" ASC, gc2."userId" ASC`, [clubId]),
+             ORDER BY gc2."periodNumber" ASC, gc2."userId" ASC`, [clubId])),
 
         // periodNumber is COALESCEd because rows written before v1.5 predate
         // the column and read as NULL; the panel treats those as period 1.
-        sql(`SELECT ga.*, u."fullName" as "memberName", gi.name as "itemName", gi.unit
+        timed('assignments', marks, sql(`SELECT ga.*, u."fullName" as "memberName", gi.name as "itemName", gi.unit
              FROM "GroceryAssignment" ga
              JOIN "User" u        ON u.id  = ga."userId"
              JOIN "GroceryItem" gi ON gi.id = ga."itemId"
              WHERE ga."clubId" = $1 AND ga.status <> 'CANCELLED'
                AND COALESCE(ga."periodNumber",1) >= ${PERIOD_WINDOW}
-             ORDER BY gi.name ASC, u."fullName" ASC`, [clubId]),
+             ORDER BY gi.name ASC, u."fullName" ASC`, [clubId])),
 
         // Cycles stay whole — one narrow row per period, and the panel needs
         // the full list to work out which period is active.
-        sql(`SELECT * FROM "GroceryCycle" WHERE "clubId" = $1 ORDER BY "periodNumber" ASC`, [clubId]),
+        timed('cycles', marks, sql(`SELECT * FROM "GroceryCycle" WHERE "clubId" = $1 ORDER BY "periodNumber" ASC`, [clubId])),
 
-        sql(`SELECT st.*, pu."fullName" as "payerName", ru."fullName" as "payeeName",
+        timed('transfers', marks, sql(`SELECT st.*, pu."fullName" as "payerName", ru."fullName" as "payeeName",
                     sa."supplierName", sa."bankName", sa."accountNumber", sa."referenceFormat"
              FROM "GrocerySettlementTransfer" st
              JOIN "User" pu ON pu.id = st."payerId"
@@ -384,15 +439,15 @@ export async function GET(req: NextRequest) {
              LEFT JOIN "GrocerySupplierAccount" sa ON sa.id = st."payeeSupplierId"
              WHERE st."clubId" = $1 AND st.status <> 'CANCELLED'
                AND st."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId]),
+             ORDER BY st."periodNumber" ASC, st.amount DESC`, [clubId])),
 
-        sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
-             ORDER BY "supplierName" ASC`, [clubId]),
+        timed('suppliers', marks, sql(`SELECT * FROM "GrocerySupplierAccount" WHERE "clubId" = $1 AND "isActive" = true
+             ORDER BY "supplierName" ASC`, [clubId])),
 
         // qtyAssigned was a correlated subquery evaluated once per plan line.
         // One scoped grouped aggregate joined on (itemId, periodNumber) gives
         // the same numbers at constant cost.
-        sql(`SELECT pp.*, gi.name AS "itemName", gi.unit, gi."estimatedUnitPrice",
+        timed('periodPlan', marks, sql(`SELECT pp.*, gi.name AS "itemName", gi.unit, gi."estimatedUnitPrice",
                     COALESCE(qa."qtyAssigned",0) AS "qtyAssigned"
              FROM "GroceryPeriodPurchase" pp
              JOIN "GroceryItem" gi ON gi.id = pp."itemId"
@@ -405,9 +460,14 @@ export async function GET(req: NextRequest) {
              ) qa ON qa."itemId" = pp."itemId" AND qa."periodNumber" = pp."periodNumber"
              WHERE pp."clubId" = $1
                AND pp."periodNumber" >= ${PERIOD_WINDOW}
-             ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId]),
+             ORDER BY pp."periodNumber" ASC, gi.name ASC`, [clubId])),
 
-        scheduleLock(clubId),
+        timed('scheduleLock', marks, scheduleLock(clubId)),
+
+        // Control. `SELECT 1` has no table, no index and no rows to serialise.
+        // If this is slow, EVERYTHING is slow for a reason that has nothing to
+        // do with the queries above.
+        timed('probe', marks, sql(`SELECT 1 AS ok`)),
       ])
 
       if (!clubs.length) return NextResponse.json({ success:false, error:'Club not found' }, { status:404 })
@@ -422,8 +482,10 @@ export async function GET(req: NextRequest) {
         ?? 1
       )
       const now = new Date()
-      return NextResponse.json({ success:true, data: {
+      const serialiseStarted = Date.now()
+      const payload = { success:true, data: {
         ...formatClub(club),
+        _timings: TIMING_ON ? { marks, handlerMs: Date.now() - handlerStarted } : undefined,
         // contributions, assignments, settlementTransfers and periodPurchases
         // below cover periods >= periodWindowFrom ONLY. Anything that needs
         // older rows must ask for them; do not treat these arrays as history.
@@ -513,12 +575,25 @@ export async function GET(req: NextRequest) {
           arrearsCarriedAt: c.arrearsCarriedAt,
           isOverdue: c.status !== 'PAID' && c.status !== 'WAIVED' && new Date(c.dueDate) < now,
         })),
-      }})
+      }}
+      if (TIMING_ON) {
+        marks.push({ name: 'serialise', ms: Date.now() - serialiseStarted })
+        const totalMs = Date.now() - handlerStarted
+        ;(payload.data as any)._timings = { marks, handlerMs: totalMs }
+        console.log('GET /api/grocery timings',
+          JSON.stringify({ clubId, totalMs, marks,
+            rows: { items: items.length, members: members.length,
+                    contributions: contribs.length, assignments: assignments.length,
+                    cycles: cycles.length, transfers: transfers.length,
+                    periodPurchases: plan.length } }))
+        return NextResponse.json(payload, { headers: timingHeader(marks, totalMs) })
+      }
+      return NextResponse.json(payload)
     }
 
     if (!groupId) return NextResponse.json({ success:false, error:'groupId required' }, { status:400 })
 
-    const clubs = await sql(
+    const clubs = await timed('clubList', marks, sql(
       `SELECT gc.*, g.name as "groupName", g.currency as "groupCurrency",
         u."fullName" as "coordinatorName",
         (SELECT COUNT(*) FROM "GroceryMember" WHERE "clubId"=gc.id AND "isActive"=true) as "memberCount",
@@ -529,11 +604,19 @@ export async function GET(req: NextRequest) {
        LEFT JOIN "User" u ON u.id = gc."coordinatorId"
        WHERE gc."groupId" = $1
        ORDER BY gc."createdAt" DESC`, [groupId]
-    )
+    ))
 
+    if (TIMING_ON) {
+      const totalMs = Date.now() - handlerStarted
+      console.log('GET /api/grocery (list) timings',
+        JSON.stringify({ groupId, totalMs, marks, clubs: clubs.length }))
+      return NextResponse.json(
+        { success:true, data: clubs.map(formatClub), _timings: { marks, handlerMs: totalMs } },
+        { headers: timingHeader(marks, totalMs) })
+    }
     return NextResponse.json({ success:true, data: clubs.map(formatClub) })
   } catch (e: any) {
-    console.error('GET /api/grocery error:', e)
+    console.error('GET /api/grocery error:', e, TIMING_ON ? JSON.stringify(marks) : '')
     return NextResponse.json({ success:false, error:e.message }, { status:500 })
   }
 }

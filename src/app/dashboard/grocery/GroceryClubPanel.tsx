@@ -1334,10 +1334,25 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
   const [search, setSearch]               = useState('')
 
   const fetchClub = useCallback(async () => {
-    const res  = await fetch(`/api/grocery?clubId=${clubId}`)
-    const data = await res.json()
+    // Client-side timing. The server's own numbers arrive in data._timings, but
+    // they cannot see time spent before the handler starts (cold function boot,
+    // TLS, queueing) or after it returns (transfer, JSON.parse, React render).
+    // Comparing the two is what tells us which side of the wire the problem is
+    // on. Harmless in production: three timestamps and one console line.
+    const tStart = performance.now()
+    const res    = await fetch(`/api/grocery?clubId=${clubId}`)
+    const tHeaders = performance.now()
+    const data   = await res.json()
+    const tParsed  = performance.now()
     if (data.success) setClub(data.data)
     setLoading(false)
+    const server = data?.data?._timings
+    console.log('[grocery] club load',
+      `request→headers ${Math.round(tHeaders - tStart)}ms`,
+      `body+parse ${Math.round(tParsed - tHeaders)}ms`,
+      `total ${Math.round(tParsed - tStart)}ms`,
+      server ? `| server handler ${server.handlerMs}ms` : '| server timings off',
+      server?.marks ?? '')
   }, [clubId])
 
   useEffect(()=>{ fetchClub() },[fetchClub])
@@ -1958,10 +1973,18 @@ export default function GroceryClubPanel({ groupId, groupMembers }: { groupId: s
 
   const fetchClubs = useCallback(async () => {
     setLoading(true)
+    const tStart = performance.now()
     try {
       const res  = await fetch(`/api/grocery?groupId=${groupId}`)
+      const tHeaders = performance.now()
       const data = await res.json()
       if (data.success) setClubs(data.data)
+      const server = data?._timings
+      console.log('[grocery] club list',
+        `request→headers ${Math.round(tHeaders - tStart)}ms`,
+        `total ${Math.round(performance.now() - tStart)}ms`,
+        server ? `| server handler ${server.handlerMs}ms` : '| server timings off',
+        server?.marks ?? '')
     } catch {} finally { setLoading(false) }
   }, [groupId])
 
