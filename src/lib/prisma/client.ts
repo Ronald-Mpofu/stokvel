@@ -21,8 +21,10 @@
 //    then never again for the life of that instance. If it turns out to be the
 //    bulk of a slow first load, no amount of query tuning will touch it.
 //
-// 3. A one-time warning if DATABASE_URL looks like a DIRECT Postgres
-//    connection rather than a pooler endpoint. See the note at the bottom.
+// 3. A one-time report of the connection target (host, port, pooling, limits)
+//    with the password stripped, so the setup is visible in the logs rather
+//    than being re-guessed. Measured 2026-08: the pooling setup is correct;
+//    the cost is geographic. See the note at the bottom of this file.
 import { PrismaClient } from '@prisma/client'
 
 const globalForPrisma = globalThis as unknown as {
@@ -38,6 +40,18 @@ function createClient(): PrismaClient {
       : ['error'],
     datasources: { db: { url: process.env.DATABASE_URL } },
   })
+
+  // Do NOT connect during `next build`. Static generation spins up a worker
+  // per bundle, each of which evaluates this module in its own process, so an
+  // eager connect here opens one Postgres session per worker and adds its full
+  // handshake to every build. (That is exactly what the seven
+  // "cold-start connect" lines in the build log were — build workers, not
+  // runtime traffic.) At build time there is nothing to warm: the connection
+  // dies with the worker.
+  if (process.env.NEXT_PHASE === 'phase-production-build') {
+    globalForPrisma.prismaConnect = Promise.resolve()
+    return client
+  }
 
   // Prisma connects lazily on the first query. Kicking it off here means the
   // handshake overlaps with whatever else the request is doing rather than
@@ -80,7 +94,7 @@ function describeTarget(): string {
         'direct URL in DIRECT_URL for migrations.'
       )
     }
-    return `host=${u.hostname} port=${port} pooled=${pooled} connection_limit=${limit} pgbouncer=${pgb}`
+    return `host=${u.hostname} port=${port} pooled=${pooled} connection_limit=${limit} pgbouncer=${pgb} functionRegion=${process.env.VERCEL_REGION || 'local'}`
   } catch {
     return 'DATABASE_URL unparseable or unset'
   }
@@ -100,26 +114,27 @@ export const prismaReady: Promise<void> =
 export default prisma
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SUPABASE CONNECTION SETUP (read this before changing env vars)
+// CONNECTION SETUP — CONFIRMED GOOD, DO NOT "FIX" IT AGAIN
 //
-// prisma/schema.prisma already declares both `url` and `directUrl`, which is
-// the arrangement Prisma expects for a pooled deployment:
+// Measured 2026-08: DATABASE_URL points at
+//   aws-1-ap-northeast-1.pooler.supabase.com:6543
+//   pooled=true  connection_limit=1  pgbouncer=true
 //
-//   DATABASE_URL  -> transaction pooler, port 6543, used by the app at runtime
-//                    postgresql://USER:PASS@HOST.pooler.supabase.com:6543/postgres?pgbouncer=true&connection_limit=1
+// That is exactly right and needs no change. Recording it here because it is
+// the first thing anyone suspects when loads are slow, and re-investigating it
+// costs a day. prisma/schema.prisma keeps the 5432 direct connection in
+// DIRECT_URL for migrations, which must not run through the pooler.
 //
-//   DIRECT_URL    -> direct connection, port 5432, used by `prisma migrate`
-//                    postgresql://USER:PASS@HOST.supabase.com:5432/postgres
+// THE REMAINING COST IS DISTANCE, NOT CONFIGURATION.
 //
-// connection_limit=1 looks wrong and is not. Each serverless instance handles
-// one request at a time, so one connection per instance is all it can use; the
-// pooler multiplexes them on the server side. Raising it makes each instance
-// hold connections it cannot use while starving the others.
+// A measured connect of ~1950ms to a correctly pooled endpoint is not a
+// configuration fault — it is roughly ten network round trips (TCP handshake,
+// TLS negotiation, SCRAM authentication, pooler setup). Ten round trips at
+// ~190ms is ~1.9s, which is what we see. The round trip is that long because
+// the database is in Tokyo (ap-northeast-1) and the Vercel functions are not.
 //
-// pgbouncer=true tells Prisma to skip prepared statements, which a transaction
-// pooler cannot support. Omitting it produces intermittent
-// "prepared statement already exists" errors under load — the kind that look
-// random and are miserable to chase.
-//
-// Migrations must NOT run through the pooler, which is what DIRECT_URL is for.
+// Every cold serverless instance pays that ~2s before its first query, and
+// every query afterwards pays one further round trip. No amount of query
+// tuning touches either number. The fix is to co-locate the functions with the
+// database by pinning the Vercel region to Tokyo — see vercel.json.
 // ─────────────────────────────────────────────────────────────────────────────

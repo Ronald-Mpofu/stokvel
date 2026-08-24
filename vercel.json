@@ -1,7 +1,4 @@
 {
-  "framework": "nextjs",
-  "crons": [
-    { "path": "/api/cron/ledger", "schedule": "0 6 * * *" }
-  ]
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": ["hnd1"]
 }
-
