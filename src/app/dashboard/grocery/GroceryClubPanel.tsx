@@ -57,6 +57,16 @@
 // v1.11: Grocery List is CRUD + whole-period budget + purchase status only.
 //       Supplier and Assigned To leave the catalogue: supplier moves onto the
 //       Period Purchases line, assignment reads from the Assignments screen.
+// v1.14: PHONE LAYOUT FOR THE WHOLE CYCLE. The two remaining 8-column tables
+//       (Grocery List, Assignments) become card rows below 640px — same
+//       fields, same order, totals carried across as a footer card, no
+//       sideways scroll. The four cycle stages keep the desktop stepper
+//       (2x2 on a phone) rather than getting a separate mobile navigation:
+//       Period Purchases, Roll-call, Assignments and Settlement are one
+//       sequence gated by cycle status, and a second navigation model would
+//       be a second thing to keep in step with that gating. Roll-call answers
+//       and Save bars go full width; the sticky Save bar clears the iOS home
+//       indicator. An admin can now run an entire meeting from a phone.
 // v1.13: RESPONSIVE. The Dashboard surface now has a real phone layout.
 //       Below 640px the club detail stops being an 820px centred modal and
 //       becomes a full-screen sheet; the 5-across KPI strip (55px per cell on
@@ -136,6 +146,19 @@ function Toast({ msg, type, onClose }: any) {
   </div>
 }
 
+// Label/value line used by the phone card layouts that replace the desktop
+// tables. Module level, per the project rule: a component declared inside a
+// render is a new type on every render, so React remounts it and any focused
+// input loses the cursor.
+function CardStat({ label, value, color }: { label: string; value: any; color?: string }) {
+  return (
+    <div style={{minWidth:0}}>
+      <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{label}</div>
+      <div style={{fontSize:'13px',fontWeight:'600',color:color||NAVY,marginTop:'1px'}}>{value}</div>
+    </div>
+  )
+}
+
 function Pill({ bg, color, children }: any) {
   return <span style={{background:bg,color,fontSize:'11px',fontWeight:'600',padding:'3px 9px',borderRadius:'999px',whiteSpace:'nowrap',display:'inline-flex',alignItems:'center',gap:'4px'}}>{children}</span>
 }
@@ -167,6 +190,7 @@ function BusyOverlay({ label, detail }: { label: string; detail?: string }) {
 
 // ── Create Club Modal ─────────────────────────────────────────
 function CreateClubModal({ groupId, members, onClose, onSuccess }: any) {
+  const narrow = useIsNarrow()
   const [form, setForm] = useState({
     name:'', description:'', periodMonths:'3', contributionFrequency:'MONTHLY',
     startDate: new Date().toISOString().split('T')[0],
@@ -205,21 +229,21 @@ function CreateClubModal({ groupId, members, onClose, onSuccess }: any) {
           <div style={{marginBottom:'13px'}}>
             <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Club Name *</label>
             <input type="text" value={form.name} onChange={e=>set('name')(e.target.value)} required placeholder="e.g. Q1 2025 Grocery Club"
-              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
           </div>
 
           <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:'12px',marginBottom:'13px'}}>
             <div>
               <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Period *</label>
               <select value={form.periodMonths} onChange={e=>set('periodMonths')(e.target.value)}
-                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
                 {[1,2,3,6,12].map(m=><option key={m} value={m}>{m} month{m>1?'s':''}</option>)}
               </select>
             </div>
             <div>
               <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Frequency *</label>
               <select value={form.contributionFrequency} onChange={e=>set('contributionFrequency')(e.target.value)}
-                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
                 <option value="WEEKLY">Weekly</option>
                 <option value="FORTNIGHTLY">Fortnightly</option>
                 <option value="MONTHLY">Monthly</option>
@@ -228,14 +252,14 @@ function CreateClubModal({ groupId, members, onClose, onSuccess }: any) {
             <div>
               <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Start Date *</label>
               <input type="date" value={form.startDate} onChange={e=>set('startDate')(e.target.value)} required
-                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
           </div>
 
           <div style={{marginBottom:'13px'}}>
             <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Coordinator (Group Leader)</label>
             <select value={form.coordinatorId} onChange={e=>set('coordinatorId')(e.target.value)}
-              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
               <option value="">Select coordinator...</option>
               {members.map((m:any)=><option key={m.userId||m.id} value={m.userId||m.id}>{m.fullName}</option>)}
             </select>
@@ -268,7 +292,7 @@ function CreateClubModal({ groupId, members, onClose, onSuccess }: any) {
           <div style={{marginBottom:'14px'}}>
             <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Notes</label>
             <textarea value={form.notes} onChange={e=>set('notes')(e.target.value)} rows={2} placeholder="Any additional notes..."
-              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box',resize:'vertical'}}/>
+              style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box',resize:'vertical'}}/>
           </div>
 
           {error&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',borderRadius:'8px',padding:'10px',color:'#991B1B',fontSize:'12px',marginBottom:'12px'}}>❌ {error}</div>}
@@ -286,6 +310,7 @@ function CreateClubModal({ groupId, members, onClose, onSuccess }: any) {
 
 // ── Item Form Modal ───────────────────────────────────────────
 function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
+  const narrow = useIsNarrow()
   const editing = !!item
   const [form, setForm] = useState({
     name:               item?.name || '',
@@ -327,12 +352,12 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Item Name *</label>
               <input type="text" value={form.name} onChange={e=>set('name')(e.target.value)} required placeholder="e.g. Rice 5kg"
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit</label>
               <select value={form.unit} onChange={e=>set('unit')(e.target.value)}
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
                 {['units','kg','g','litres','ml','bags','boxes','cans','packs','bottles','dozen'].map(u=><option key={u} value={u}>{u}</option>)}
               </select>
             </div>
@@ -342,7 +367,7 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Qty / Member *</label>
               <input type="number" step="0.5" min="0.5" value={form.qtyPerMember} onChange={e=>set('qtyPerMember')(e.target.value)} required
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
             </div>
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Total Qty</label>
@@ -351,7 +376,7 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
             <div>
               <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Unit Price ($) *</label>
               <input type="number" step="0.01" min="0" value={form.estimatedUnitPrice} onChange={e=>set('estimatedUnitPrice')(e.target.value)} required placeholder="0.00"
-                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
+                style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'13px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
             </div>
           </div>
 
@@ -367,7 +392,7 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
           <div style={{marginBottom:'14px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Notes</label>
             <input type="text" value={form.notes} onChange={e=>set('notes')(e.target.value)} placeholder="Brand preference, quality notes..."
-              style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+              style={{width:'100%',padding:'10px 12px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
           </div>
 
           {error&&<div style={{background:'#FEF2F2',border:'1px solid #FECACA',borderRadius:'7px',padding:'10px 12px',color:'#991B1B',fontSize:'12px',marginBottom:'10px'}}>❌ {error}</div>}
@@ -385,6 +410,7 @@ function ItemModal({ clubId, item, memberCount, onClose, onSuccess }: any) {
 
 // ── Purchase Modal ────────────────────────────────────────────
 function PurchaseModal({ item, members, clubId, onClose, onSuccess }: any) {
+  const narrow = useIsNarrow()
   const [form, setForm] = useState({
     actualUnitPrice:  item.estimatedUnitPrice?.toString() || '',
     purchasedById:    item.assignedToId || '',
@@ -427,13 +453,13 @@ function PurchaseModal({ item, members, clubId, onClose, onSuccess }: any) {
           <div style={{marginBottom:'10px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Actual Unit Price ($) *</label>
             <input type="number" step="0.01" min="0" value={form.actualUnitPrice} onChange={e=>setForm(f=>({...f,actualUnitPrice:e.target.value}))} required
-              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'14px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
+              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'14px',fontWeight:'600',outline:'none',boxSizing:'border-box'}}/>
             {actualTotal>0&&<p style={{fontSize:'11px',color:TEAL,margin:'3px 0 0'}}>Total: ${fmt(actualTotal)} {item.estimatedTotalPrice>0&&`(${actualTotal>item.estimatedTotalPrice?'+':''} ${fmt(actualTotal-item.estimatedTotalPrice)} vs estimate)`}</p>}
           </div>
           <div style={{marginBottom:'10px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Purchased By</label>
             <select value={form.purchasedById} onChange={e=>setForm(f=>({...f,purchasedById:e.target.value}))}
-              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',outline:'none',background:'white',boxSizing:'border-box'}}>
+              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'12px',outline:'none',background:'white',boxSizing:'border-box'}}>
               <option value="">Select member...</option>
               {members.map((m:any)=><option key={m.userId} value={m.userId}>{m.fullName}</option>)}
             </select>
@@ -441,7 +467,7 @@ function PurchaseModal({ item, members, clubId, onClose, onSuccess }: any) {
           <div style={{marginBottom:'10px'}}>
             <label style={{display:'block',fontSize:'11px',fontWeight:'600',color:'#374151',marginBottom:'4px',textTransform:'uppercase'}}>Receipt / Notes</label>
             <input type="text" value={form.notes} onChange={e=>setForm(f=>({...f,notes:e.target.value}))} placeholder="Receipt reference or notes..."
-              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:'12px',outline:'none',boxSizing:'border-box'}}/>
+              style={{width:'100%',padding:'8px 10px',border:'1.5px solid #E2E8F0',borderRadius:'7px',fontSize:narrow?'16px':'12px',outline:'none',boxSizing:'border-box'}}/>
           </div>
           <div style={{display:'flex',gap:'8px'}}>
             <button type="button" onClick={onClose} style={{flex:1,padding:'9px',background:'#F1F5F9',border:'none',borderRadius:'7px',fontSize:'12px',cursor:'pointer'}}>Cancel</button>
@@ -712,6 +738,7 @@ function AcquitModal({ assignment, clubId, onClose, onSuccess, onError }: any) {
 // period, with the quantity still unallocated.
 function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
                             onAssign, onAcquit, onWithdraw }: any) {
+  const narrow      = useIsNarrow()
   const canAssign   = cycle?.status === 'FUNDED'
   const outstanding = plan.filter((r: any) => Number(r.qtyUnassigned) > 0.0001)
   const covered     = plan.length > 0 && outstanding.length === 0
@@ -746,8 +773,8 @@ function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
               </div>
             : <div>
                 {outstanding.map((r: any, idx: number) => (
-                  <div key={r.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 13px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9'}}>
-                    <div style={{flex:1,minWidth:'160px'}}>
+                  <div key={r.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:narrow?'12px':'10px 13px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9'}}>
+                    <div style={{flex:1,minWidth:narrow?'100%':'160px'}}>
                       <div style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{r.itemName}</div>
                       <div style={{fontSize:'11px',color:'#64748B'}}>
                         {r.qtyUnassigned} of {r.qty} {r.unit} unallocated · ${fmt(r.unitPrice)} each
@@ -756,7 +783,7 @@ function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
                     </div>
                     <div style={{fontSize:'13px',fontWeight:'700',color:GOLD}}>${fmt(Number(r.qtyUnassigned)*Number(r.unitPrice))}</div>
                     <button onClick={()=>onAssign(r)} disabled={busy}
-                      style={{padding:'8px 14px',minHeight:'44px',background:PURPLE,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
+                      style={{padding:'8px 14px',minHeight:'44px',flex:narrow?1:undefined,background:PURPLE,color:'white',border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:busy?'not-allowed':'pointer'}}>
                       👤 Assign
                     </button>
                   </div>
@@ -764,12 +791,12 @@ function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
               </div>}
       </div>}
 
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(3,1fr)',gap:'8px'}}>
         {[
           {l:'Advanced out',    v:`$${fmt(club.advancedOut||0)}`,     c:GOLD},
           {l:'Not yet acquitted',v:`$${fmt(club.unacquitted||0)}`,    c:(club.unacquitted||0)>0?RED:GREEN},
           {l:'Cash uncommitted',v:`$${fmt(club.uncommittedCash||0)}`, c:(club.uncommittedCash||0)>=0?TEAL:RED},
-        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+        ].map((k,ki)=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px',gridColumn:(narrow&&ki===2)?'1 / -1':undefined}}>
           <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
           <div style={{fontSize:'15px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
         </div>)}
@@ -781,8 +808,58 @@ function AssignmentsPanel({ plan, assigns, openAssigns, club, cycle, busy,
 
       {assigns.length===0?<div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
         <div style={{fontSize:'32px',marginBottom:'8px'}}>🧾</div>
-        <p>No assignments yet. Assign items on the Grocery List tab.</p>
-      </div>:(
+        <p>No assignments yet. Assign items above, once the roll-call is closed.</p>
+      </div>:narrow?(
+        /* Eight columns cannot be shrunk into 320px without a sideways
+           scroll, and a horizontally scrolling ledger hides the money.
+           One card per assignment instead — same fields, same order. */
+        <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+          {assigns.map((a:any)=>{
+            const done = a.status==='ACQUITTED'
+            return (
+              <div key={a.id} style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px'}}>
+                <div style={{display:'flex',alignItems:'flex-start',gap:'8px',marginBottom:'8px'}}>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontSize:'14px',fontWeight:'600',color:NAVY}}>{a.itemName}</div>
+                    <div style={{fontSize:'11px',color:'#64748B',marginTop:'2px'}}>{a.memberName} · {a.qtyAssigned} {a.unit}</div>
+                  </div>
+                  <Pill bg={done?'#DCFCE7':'#FEF9C3'} color={done?GREEN:GOLD}>{done?'✅ Acquitted':'⏳ Open'}</Pill>
+                </div>
+
+                <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',background:'#F8FAFC',borderRadius:'8px',padding:'9px 10px',marginBottom:done&&!a.receiptUrl?0:'8px'}}>
+                  <CardStat label="Advance" value={`$${fmt(a.advanceAmount)}`}/>
+                  <CardStat label="Spent"   value={a.actualSpent!=null?`$${fmt(a.actualSpent)}`:'—'} color={a.actualSpent!=null?NAVY:'#94A3B8'}/>
+                  <CardStat label="Variance"
+                    value={a.variance==null?'—':a.variance===0?'exact':`${a.variance>0?'+':'−'}$${fmt(Math.abs(a.variance))}`}
+                    color={a.variance==null?'#94A3B8':a.variance===0?GREEN:a.variance>0?GOLD:'#3730A3'}/>
+                </div>
+                {a.variance!=null&&a.variance!==0&&<div style={{fontSize:'10px',color:'#94A3B8',marginTop:'-4px',marginBottom:'8px'}}>
+                  {a.variance>0?'Holds change':'Out of pocket'}
+                </div>}
+
+                {!done&&<div style={{display:'flex',gap:'6px'}}>
+                  <button onClick={()=>onAcquit(a)}
+                    style={{flex:1,padding:'10px',minHeight:'44px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'8px',fontSize:'12px',cursor:'pointer',fontWeight:'600'}}>Acquit</button>
+                  <button onClick={()=>onWithdraw(a)}
+                    style={{flex:1,padding:'10px',minHeight:'44px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'8px',fontSize:'12px',cursor:'pointer'}}>Withdraw</button>
+                </div>}
+                {done&&a.receiptUrl&&<div style={{fontSize:'10px',color:'#94A3B8'}}>{a.receiptUrl}</div>}
+              </div>
+            )
+          })}
+
+          {/* The table's tfoot, which a card list would otherwise lose. */}
+          <div style={{background:'#F8FAFC',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px'}}>
+            <div style={{fontSize:'11px',fontWeight:'700',color:NAVY,textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:'8px'}}>
+              Totals · {openAssigns.length} open
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+              <CardStat label="Advanced" value={`$${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.advanceAmount||0),0))}`}/>
+              <CardStat label="Spent"    value={`$${fmt(assigns.reduce((t:number,a:any)=>t+Number(a.actualSpent||0),0))}`} color={TEAL}/>
+            </div>
+          </div>
+        </div>
+      ):(
         <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
           <table style={{width:'100%',borderCollapse:'collapse'}}>
             <thead><tr style={{background:'#F8FAFC'}}>
@@ -873,15 +950,19 @@ function currentStage(cycle: any) {
 }
 
 function StageNav({ stage, setStage, cycle }: any) {
-  const done = stageProgress(cycle)
+  const done   = stageProgress(cycle)
+  const narrow = useIsNarrow()
+  // Four full-width buttons would push the stage content a screen and a half
+  // down on a phone. 2x2 keeps the whole stepper — and therefore the sense of
+  // where the group is in the meeting — above the fold.
   return (
-    <div style={{display:'flex',flexWrap:'wrap',gap:'6px',marginBottom:'12px'}}>
+    <div style={{display:narrow?'grid':'flex',gridTemplateColumns:narrow?'1fr 1fr':undefined,flexWrap:'wrap',gap:'6px',marginBottom:'12px'}}>
       {STAGES.map(([id, icon, label], i) => {
         const active = stage === id
         const ok     = done[id]
         return (
           <button key={id} onClick={()=>setStage(id)}
-            style={{display:'flex',alignItems:'center',gap:'7px',padding:'8px 13px',minHeight:'44px',borderRadius:'8px',cursor:'pointer',fontSize:'12px',fontWeight:active?'700':'500',border:`1.5px solid ${active?TEAL:ok?'#BBF7D0':'#E2E8F0'}`,background:active?'#E1F5EE':ok?'#F6FFFB':'white',color:active?TEAL:ok?GREEN:'#64748B'}}>
+            style={{display:'flex',alignItems:'center',gap:narrow?'6px':'7px',padding:narrow?'8px 8px':'8px 13px',minHeight:'44px',borderRadius:'8px',cursor:'pointer',fontSize:narrow?'11px':'12px',fontWeight:active?'700':'500',textAlign:'left',border:`1.5px solid ${active?TEAL:ok?'#BBF7D0':'#E2E8F0'}`,background:active?'#E1F5EE':ok?'#F6FFFB':'white',color:active?TEAL:ok?GREEN:'#64748B'}}>
             <span style={{width:'20px',height:'20px',minWidth:'20px',borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',fontSize:'10px',fontWeight:'700',background:ok?GREEN:active?TEAL:'#E2E8F0',color:ok||active?'white':'#94A3B8'}}>
               {ok?'✓':i+1}
             </span>
@@ -917,6 +998,7 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
 
   const [rows, setRows]   = useState(serverRows)
   const [search, setSearch] = useState('')
+  const narrow            = useIsNarrow()
 
   // Reseed when the server view changes underneath us (a save, or a switch
   // to another cycle). Keyed on the plan's own content so local edits are not
@@ -957,7 +1039,7 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(4,1fr)',gap:'8px'}}>
         {[
           {l:'Items chosen',      v:`${chosen.length}/${items.length}`, c:NAVY},
           {l:'Buying this period',v:`$${fmt(planned)}`,                 c:GOLD},
@@ -996,13 +1078,17 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
               const moved = on && wasOn && (num(r.qty) !== num(base[i.id].qty) || num(r.price) !== num(base[i.id].price)
                 || (r.supplier||'') !== (base[i.id].supplier||'') || (r.contact||'') !== (base[i.id].contact||''))
               return (
-                <div key={i.id} style={{display:'flex',alignItems:'center',gap:'10px',padding:'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9',background:on?'#F6FFFB':'white'}}>
+                <div key={i.id} style={{display:'flex',alignItems:narrow?'flex-start':'center',gap:'10px',padding:narrow?'12px':'10px 12px',flexWrap:'wrap',borderTop:idx===0?'none':'1px solid #F1F5F9',background:on?'#F6FFFB':'white'}}>
+                  {/* 24px is a 24px target. The tick is the single most-used
+                      control on this screen and it is pressed in a room full
+                      of people waiting, so on a phone it gets 32px inside a
+                      44px column. */}
                   <button onClick={()=>setRow(i.id,{on:!on})} disabled={!open}
-                    style={{width:'24px',height:'24px',minWidth:'24px',borderRadius:'6px',flexShrink:0,cursor:open?'pointer':'not-allowed',border:`2px solid ${on?TEAL:'#CBD5E1'}`,background:on?TEAL:'white',color:'white',fontSize:'13px',fontWeight:'700',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
+                    style={{width:narrow?'32px':'24px',height:narrow?'32px':'24px',minWidth:narrow?'32px':'24px',marginTop:narrow?'2px':0,borderRadius:narrow?'8px':'6px',flexShrink:0,cursor:open?'pointer':'not-allowed',border:`2px solid ${on?TEAL:'#CBD5E1'}`,background:on?TEAL:'white',color:'white',fontSize:narrow?'16px':'13px',fontWeight:'700',display:'flex',alignItems:'center',justifyContent:'center',padding:0}}>
                     {on?'✓':''}
                   </button>
 
-                  <div style={{flex:1,minWidth:'130px'}}>
+                  <div style={{flex:1,minWidth:narrow?'120px':'130px'}}>
                     <div style={{fontSize:'13px',fontWeight:'600',color:on?NAVY:'#64748B'}}>
                       {i.name}
                       {(on!==wasOn||moved)&&<span style={{fontSize:'10px',color:GOLD,marginLeft:'6px'}}>• unsaved</span>}
@@ -1010,20 +1096,20 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
                     <div style={{fontSize:'10px',color:'#94A3B8'}}>catalogue: {i.totalQty} {i.unit} @ ${fmt(i.estimatedUnitPrice)}</div>
                   </div>
 
-                  <div style={{display:'flex',gap:'8px',alignItems:'center'}}>
-                    <div style={{width:'82px'}}>
+                  <div style={{display:'flex',gap:'8px',alignItems:'center',width:narrow?'100%':undefined,marginTop:narrow?'8px':0}}>
+                    <div style={{width:narrow?'auto':'82px',flex:narrow?1:undefined}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Qty</div>
                       <input type="number" step="0.5" min="0" disabled={!on||!open} value={r.qty}
                         onChange={e=>setRow(i.id,{qty:e.target.value})}
                         style={{width:'100%',padding:'8px',border:`1.5px solid ${bad?'#FECACA':'#E2E8F0'}`,borderRadius:'7px',fontSize:'16px',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
                     </div>
-                    <div style={{width:'94px'}}>
+                    <div style={{width:narrow?'auto':'94px',flex:narrow?1:undefined}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Price $</div>
                       <input type="number" step="0.01" min="0" disabled={!on||!open} value={r.price}
                         onChange={e=>setRow(i.id,{price:e.target.value})}
                         style={{width:'100%',padding:'8px',border:`1.5px solid ${bad?'#FECACA':'#E2E8F0'}`,borderRadius:'7px',fontSize:'16px',fontWeight:'600',outline:'none',boxSizing:'border-box',background:on?'white':'#F8FAFC',color:on?NAVY:'#94A3B8'}}/>
                     </div>
-                    <div style={{width:'86px',textAlign:'right'}}>
+                    <div style={{width:narrow?'auto':'86px',flex:narrow?1:undefined,textAlign:'right'}}>
                       <div style={{fontSize:'9px',color:'#94A3B8',textTransform:'uppercase',marginBottom:'2px'}}>Line</div>
                       <div style={{fontSize:'14px',fontWeight:'700',color:on?TEAL:'#CBD5E1'}}>{on?`$${fmt(line)}`:'—'}</div>
                     </div>
@@ -1047,17 +1133,21 @@ function PeriodPurchasePanel({ plan, items, cycle, members, busy, onSavePlan, on
             })}
           </div>}
 
-      {open&&<div style={{position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+      {open&&<div style={narrow
+        // Bleeds to the screen edges and clears the home indicator, so the
+        // Save button is never sitting under the iOS gesture bar.
+        ? {position:'sticky',bottom:0,zIndex:2,background:'white',borderTop:'1px solid #E2E8F0',margin:'0 -12px',padding:'10px 12px',paddingBottom:'calc(10px + env(safe-area-inset-bottom))',display:'flex',gap:'8px',alignItems:'center',flexWrap:'wrap'}
+        : {position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
         <button onClick={save} disabled={busy||!dirty||invalid.length>0}
-          style={{padding:'10px 18px',minHeight:'44px',background:(busy||!dirty||invalid.length>0)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty||invalid.length>0)?'not-allowed':'pointer'}}>
+          style={{padding:'10px 18px',minHeight:'44px',flex:narrow?'1 1 40%':undefined,background:(busy||!dirty||invalid.length>0)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty||invalid.length>0)?'not-allowed':'pointer'}}>
           {busy?'⏳ Saving...':dirty?'💾 Save plan':'Saved'}
         </button>
         {dirty&&<button onClick={()=>setRows(serverRows())} disabled={busy}
-          style={{padding:'10px 14px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
+          style={{padding:'10px 14px',minHeight:'44px',flex:narrow?'1 1 40%':undefined,background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
         {/* Publishing tells members what to bring, so it must reflect a saved
             plan — never unsaved edits sitting in the browser. */}
         <button onClick={onSetBudget} disabled={busy||dirty||chosen.length===0}
-          style={{padding:'10px 18px',minHeight:'44px',background:(busy||dirty||chosen.length===0)?'#CBD5E1':GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||chosen.length===0)?'not-allowed':'pointer'}}>
+          style={{padding:'10px 18px',minHeight:'44px',flex:narrow?'1 1 100%':undefined,background:(busy||dirty||chosen.length===0)?'#CBD5E1':GOLD,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||chosen.length===0)?'not-allowed':'pointer'}}>
           📢 Publish — ${fmt(perMember)} each
         </button>
         {dirty&&<span style={{fontSize:'11px',color:GOLD}}>Save the plan before publishing.</span>}
@@ -1145,6 +1235,7 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
   }
 
   const [draft, setDraft] = useState(serverState)
+  const narrow            = useIsNarrow()
   const rowsKey = rows.map((r: any) => `${r.userId}:${r.fundsConfirmedAt?1:r.fundsDeclinedAt?0:'-'}:${r.declineReason||''}`).join('|')
   useEffect(() => { setDraft(serverState()) }, [rowsKey])
 
@@ -1178,7 +1269,7 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(4,1fr)',gap:'8px'}}>
         {[
           {l:'Answered',   v:`${answered.length}/${rows.length}`, c:answered.length===rows.length?GREEN:'#475569'},
           {l:'Has money',  v:String(confirmed.length),            c:GREEN},
@@ -1204,7 +1295,7 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
           const yes = d.has === true, no = d.has === false
           const moved = d.has !== base[r.userId]?.has
           return (
-            <div key={r.id} style={{padding:'10px 12px',borderTop:idx===0?'none':'1px solid #F1F5F9',background:yes?'#F6FFFB':no?'#FFFBFB':'white'}}>
+            <div key={r.id} style={{padding:narrow?'12px':'10px 12px',borderTop:idx===0?'none':'1px solid #F1F5F9',background:yes?'#F6FFFB':no?'#FFFBFB':'white'}}>
               <div style={{display:'flex',alignItems:'center',gap:'10px',flexWrap:'wrap'}}>
                 <div style={{width:'32px',height:'32px',borderRadius:'50%',flexShrink:0,background:'#E1F5EE',color:TEAL,display:'flex',alignItems:'center',justifyContent:'center',fontSize:'11px',fontWeight:'700'}}>
                   {(r.memberName||'?').split(' ').map((n:string)=>n[0]).join('').slice(0,2)}
@@ -1221,11 +1312,11 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
                   {r.arrearsCarriedAt&&<div style={{fontSize:'10px',color:GOLD,marginTop:'2px'}}>Previously carried as arrears</div>}
                 </div>
                 {open
-                  ? <div style={{display:'flex',gap:'6px'}}>
+                  ? <div style={{display:'flex',gap:'6px',width:narrow?'100%':undefined,marginTop:narrow?'8px':0}}>
                       <button onClick={()=>answer(r.userId,true)}
-                        style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${yes?GREEN:'#E2E8F0'}`,background:yes?'#DCFCE7':'white',color:yes?GREEN:'#64748B'}}>✓ Has money</button>
+                        style={{padding:'7px 12px',minHeight:'44px',flex:narrow?1:undefined,borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${yes?GREEN:'#E2E8F0'}`,background:yes?'#DCFCE7':'white',color:yes?GREEN:'#64748B'}}>✓ Has money</button>
                       <button onClick={()=>answer(r.userId,false)}
-                        style={{padding:'7px 12px',minHeight:'44px',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${no?RED:'#E2E8F0'}`,background:no?'#FEF2F2':'white',color:no?RED:'#64748B'}}>✗ Not yet</button>
+                        style={{padding:'7px 12px',minHeight:'44px',flex:narrow?1:undefined,borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer',border:`1.5px solid ${no?RED:'#E2E8F0'}`,background:no?'#FEF2F2':'white',color:no?RED:'#64748B'}}>✗ Not yet</button>
                     </div>
                   : <Pill bg={yes?'#DCFCE7':no?'#FEF2F2':'#F1F5F9'} color={yes?GREEN:no?RED:'#64748B'}>
                       {yes?'✓ Confirmed':no?'✗ Declined':'— No answer'}
@@ -1240,17 +1331,21 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
         })}
       </div>
 
-      {open&&<div style={{position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
+      {open&&<div style={narrow
+        // Bleeds to the screen edges and clears the home indicator, so the
+        // Save button is never sitting under the iOS gesture bar.
+        ? {position:'sticky',bottom:0,zIndex:2,background:'white',borderTop:'1px solid #E2E8F0',margin:'0 -12px',padding:'10px 12px',paddingBottom:'calc(10px + env(safe-area-inset-bottom))',display:'flex',gap:'8px',alignItems:'center',flexWrap:'wrap'}
+        : {position:'sticky',bottom:0,background:'white',borderTop:'1px solid #E2E8F0',padding:'10px 0',display:'flex',gap:'10px',alignItems:'center',flexWrap:'wrap'}}>
         <button onClick={save} disabled={busy||!dirty}
-          style={{padding:'10px 18px',minHeight:'44px',background:(busy||!dirty)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty)?'not-allowed':'pointer'}}>
+          style={{padding:'10px 18px',minHeight:'44px',flex:narrow?'1 1 40%':undefined,background:(busy||!dirty)?'#CBD5E1':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||!dirty)?'not-allowed':'pointer'}}>
           {busy?'⏳ Saving...':dirty?'💾 Save roll-call':'Saved'}
         </button>
         {dirty&&<button onClick={()=>setDraft(serverState())} disabled={busy}
-          style={{padding:'10px 14px',minHeight:'44px',background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
+          style={{padding:'10px 14px',minHeight:'44px',flex:narrow?'1 1 40%':undefined,background:'#F1F5F9',color:'#475569',border:'none',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>Discard changes</button>}
         {/* Closing fixes who is in the cycle, so it must act on saved answers
             rather than whatever is sitting unsent in the browser. */}
         <button onClick={onCloseRollCall} disabled={busy||dirty||silent.length>0||confirmed.length===0}
-          style={{padding:'10px 18px',minHeight:'44px',background:(busy||dirty||silent.length>0||confirmed.length===0)?'#CBD5E1':'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||silent.length>0||confirmed.length===0)?'not-allowed':'pointer'}}>
+          style={{padding:'10px 18px',minHeight:'44px',flex:narrow?'1 1 100%':undefined,background:(busy||dirty||silent.length>0||confirmed.length===0)?'#CBD5E1':'#3730A3',color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:(busy||dirty||silent.length>0||confirmed.length===0)?'not-allowed':'pointer'}}>
           🔒 Close roll-call
         </button>
         {dirty
@@ -1269,6 +1364,7 @@ function RollCallPanel({ rows, cycle, busy, onSaveRollCall, onCloseRollCall }: a
 // Only CONFIRMED money counts toward a buyer's funded bar. A payer marking
 // their own transfer as sent is a claim, not cash in the buyer's hand.
 function SettlementPanel({ transfers, assigns, busy, onState }: any) {
+  const narrow = useIsNarrow()   // before the early return — hook order is fixed
   if (!transfers.length) return (
     <div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
       <div style={{fontSize:'32px',marginBottom:'8px'}}>⚡</div>
@@ -1293,12 +1389,12 @@ function SettlementPanel({ transfers, assigns, busy, onState }: any) {
 
   return (
     <div style={{display:'flex',flexDirection:'column',gap:'12px'}}>
-      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px'}}>
+      <div style={{display:'grid',gridTemplateColumns:narrow?'repeat(2,1fr)':'repeat(3,1fr)',gap:'8px'}}>
         {[
           {l:'Payments',      v:String(transfers.length),   c:NAVY},
           {l:'Total to move', v:`$${fmt(totalMoved)}`,      c:GOLD},
           {l:'Confirmed',     v:`$${fmt(settled)}`,         c:settled>=totalMoved?GREEN:TEAL},
-        ].map(k=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px'}}>
+        ].map((k,ki)=><div key={k.l} style={{background:'#F8FAFC',borderRadius:'8px',padding:'10px 12px',gridColumn:(narrow&&ki===2)?'1 / -1':undefined}}>
           <div style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>{k.l}</div>
           <div style={{fontSize:'16px',fontWeight:'700',color:k.c,marginTop:'2px'}}>{k.v}</div>
         </div>)}
@@ -1334,8 +1430,8 @@ function SettlementPanel({ transfers, assigns, busy, onState }: any) {
           }
           const m = meta[t.status] || meta.INSTRUCTED
           return (
-            <div key={t.id} style={{padding:'11px 13px',borderTop:idx===0?'none':'1px solid #F1F5F9',display:'flex',gap:'10px',flexWrap:'wrap',alignItems:'center'}}>
-              <div style={{flex:1,minWidth:'180px'}}>
+            <div key={t.id} style={{padding:narrow?'12px':'11px 13px',borderTop:idx===0?'none':'1px solid #F1F5F9',display:'flex',gap:narrow?'8px':'10px',flexWrap:'wrap',alignItems:'center'}}>
+              <div style={{flex:1,minWidth:narrow?'100%':'180px'}}>
                 <div style={{fontSize:'13px',color:NAVY}}>
                   <strong>{t.payerName}</strong> pays <strong>{t.payeeName}</strong>
                   {t.payeeType==='SUPPLIER'&&<span style={{fontSize:'10px',color:PURPLE,marginLeft:'5px'}}>SUPPLIER</span>}
@@ -1347,13 +1443,13 @@ function SettlementPanel({ transfers, assigns, busy, onState }: any) {
                 </div>
               </div>
               <Pill bg={m.bg} color={m.color}>{m.label}</Pill>
-              <div style={{display:'flex',gap:'5px'}}>
+              <div style={{display:'flex',gap:'5px',width:narrow?'100%':undefined}}>
                 {t.status==='INSTRUCTED'&&<button onClick={()=>onState('CLAIM_TRANSFER',t.id)} disabled={busy}
-                  style={{padding:'6px 10px',minHeight:'44px',background:'#FEF9C3',color:GOLD,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Mark sent</button>}
+                  style={{padding:'6px 10px',minHeight:'44px',flex:narrow?1:undefined,background:'#FEF9C3',color:GOLD,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Mark sent</button>}
                 {!done&&<button onClick={()=>onState('CONFIRM_TRANSFER',t.id)} disabled={busy}
-                  style={{padding:'6px 10px',minHeight:'44px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Confirm received</button>}
+                  style={{padding:'6px 10px',minHeight:'44px',flex:narrow?1:undefined,background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'6px',fontSize:'11px',fontWeight:'600',cursor:'pointer'}}>Confirm received</button>}
                 {done&&<button onClick={()=>onState('DISPUTE_TRANSFER',t.id)} disabled={busy}
-                  style={{padding:'6px 10px',minHeight:'44px',background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>Dispute</button>}
+                  style={{padding:'6px 10px',minHeight:'44px',flex:narrow?1:undefined,background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'6px',fontSize:'11px',cursor:'pointer'}}>Dispute</button>}
               </div>
             </div>
           )
@@ -1644,20 +1740,77 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
 
           {/* GROCERY LIST */}
           {tab==='items'&&<div>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:'14px'}}>
+            <div style={{display:'flex',flexDirection:narrow?'column':'row',justifyContent:'space-between',alignItems:narrow?'stretch':'center',gap:narrow?'10px':0,marginBottom:'14px'}}>
               <div>
                 <span style={{fontSize:'13px',fontWeight:'600',color:NAVY}}>{items.length} items</span>
-                <span style={{fontSize:'12px',color:'#64748B',marginLeft:'8px'}}>· Total budget: ${fmt(club.totalBudget)} · Spent: ${fmt(club.totalSpent)}</span>
+                <span style={{fontSize:'12px',color:'#64748B',marginLeft:narrow?0:'8px',display:narrow?'block':'inline'}}>{narrow?'':'· '}Total budget: ${fmt(club.totalBudget)} · Spent: ${fmt(club.totalSpent)}</span>
               </div>
               {['SETUP','ACTIVE','PURCHASING'].includes(club.status)&&<button onClick={()=>{ setEditItem(null); setShowItemModal(true) }}
-                style={{padding:'7px 14px',background:TEAL,color:'white',border:'none',borderRadius:'7px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>+ Add Item</button>}
+                style={{padding:narrow?'0 14px':'7px 14px',minHeight:narrow?'44px':undefined,background:TEAL,color:'white',border:'none',borderRadius:'7px',fontSize:narrow?'13px':'12px',fontWeight:'600',cursor:'pointer'}}>+ Add Item</button>}
             </div>
 
-            {items.length===0?<div style={{textAlign:'center',padding:'48px',color:'#94A3B8'}}>
+            {items.length===0?<div style={{textAlign:'center',padding:narrow?'36px 16px':'48px',color:'#94A3B8'}}>
               <div style={{fontSize:'40px',marginBottom:'10px'}}>🧺</div>
               <p>No items yet. Add grocery items to build your shopping list.</p>
               <button onClick={()=>{ setEditItem(null); setShowItemModal(true) }} style={{padding:'9px 20px',background:TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:'pointer'}}>+ Add First Item</button>
-            </div>:(
+            </div>:narrow?(
+              /* Item, Unit, Qty/Member, Total Qty, Est. Price, Actual, Status
+                 and Actions is 8 columns — roughly 40px each on a phone. Each
+                 item becomes a card carrying the same eight fields: identity
+                 and status on top, the numbers in a strip, the verbs at the
+                 bottom where a thumb reaches them. */
+              <div style={{display:'flex',flexDirection:'column',gap:'8px'}}>
+                {items.map((item:any)=>{
+                  const sm2  = ITEM_STATUS[item.status]||ITEM_STATUS.PENDING
+                  const editable = ['PENDING','ASSIGNED'].includes(item.status)
+                  return (
+                    <div key={item.id} style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px'}}>
+                      <div style={{display:'flex',alignItems:'flex-start',gap:'8px',marginBottom:'8px'}}>
+                        <div style={{flex:1,minWidth:0}}>
+                          <div style={{fontSize:'14px',fontWeight:'600',color:NAVY}}>{item.name}</div>
+                          {item.notes&&<div style={{fontSize:'11px',color:'#94A3B8',marginTop:'2px'}}>{item.notes}</div>}
+                        </div>
+                        <Pill bg={sm2.bg} color={sm2.color}>{sm2.icon} {sm2.label}</Pill>
+                      </div>
+
+                      <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:'8px',background:'#F8FAFC',borderRadius:'8px',padding:'9px 10px',marginBottom:'8px'}}>
+                        <CardStat label="Qty/member" value={item.qtyPerMember}/>
+                        <CardStat label="Total qty"  value={`${item.totalQty} ${item.unit}`}/>
+                        <CardStat label="Estimated"  value={`$${fmt(item.estimatedTotalPrice)}`}/>
+                      </div>
+
+                      {item.actualTotalPrice!=null&&<div style={{display:'flex',alignItems:'baseline',justifyContent:'space-between',gap:'10px',padding:'0 2px',marginBottom:'8px'}}>
+                        <span style={{fontSize:'10px',color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.04em'}}>Actual</span>
+                        <span>
+                          <span style={{fontSize:'14px',fontWeight:'700',color:item.actualTotalPrice>item.estimatedTotalPrice?RED:GREEN}}>${fmt(item.actualTotalPrice)}</span>
+                          {item.priceDiff!=null&&<span style={{fontSize:'11px',marginLeft:'6px',color:item.priceDiff>0?RED:GREEN}}>{item.priceDiff>0?'+':''}{fmt(item.priceDiff)}</span>}
+                        </span>
+                      </div>}
+
+                      <div style={{display:'flex',gap:'6px'}}>
+                        {editable&&<button onClick={()=>{ setEditItem(item); setShowItemModal(true) }}
+                          style={{flex:1,padding:'10px',minHeight:'44px',background:'#EEF2FF',color:PURPLE,border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>Edit</button>}
+                        {editable&&<button onClick={()=>setPurchaseItem(item)}
+                          style={{flex:1,padding:'10px',minHeight:'44px',background:'#DCFCE7',color:GREEN,border:'none',borderRadius:'8px',fontSize:'12px',cursor:'pointer',fontWeight:'600'}}>Buy ✓</button>}
+                        {item.status==='PURCHASED'&&<button onClick={()=>doAction('MARK_DISTRIBUTED',{itemId:item.id})}
+                          style={{flex:1,padding:'10px',minHeight:'44px',background:'#F0FDF4',color:GREEN,border:'none',borderRadius:'8px',fontSize:'12px',fontWeight:'600',cursor:'pointer'}}>📦 Distributed</button>}
+                        {editable&&<button onClick={()=>doAction('DELETE_ITEM',{itemId:item.id})} aria-label="Delete item"
+                          style={{width:'44px',minHeight:'44px',flexShrink:0,background:'#FEF2F2',color:RED,border:'1px solid #FECACA',borderRadius:'8px',fontSize:'13px',cursor:'pointer'}}>✕</button>}
+                      </div>
+                    </div>
+                  )
+                })}
+
+                {/* Carries the table's tfoot across. */}
+                <div style={{background:'#F8FAFC',borderRadius:'12px',border:'1px solid #E2E8F0',padding:'12px'}}>
+                  <div style={{fontSize:'11px',fontWeight:'700',color:NAVY,textTransform:'uppercase',letterSpacing:'0.04em',marginBottom:'8px'}}>Totals · {items.length} items</div>
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:'8px'}}>
+                    <CardStat label="Estimated" value={`$${fmt(items.reduce((sum:number,i:any)=>sum+i.estimatedTotalPrice,0))}`}/>
+                    <CardStat label="Actual"    value={`$${fmt(items.filter((i:any)=>i.actualTotalPrice!=null).reduce((sum:number,i:any)=>sum+(i.actualTotalPrice||0),0))}`} color={TEAL}/>
+                  </div>
+                </div>
+              </div>
+            ):(
               <div style={{background:'white',borderRadius:'12px',border:'1px solid #E2E8F0',overflow:'hidden'}}>
                 <table style={{width:'100%',borderCollapse:'collapse'}}>
                   <thead><tr style={{background:'#F8FAFC'}}>
@@ -1808,7 +1961,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
                 </span>
               </div>
               <input placeholder="Search member..." value={search} onChange={e=>setSearch(e.target.value)}
-                style={{padding:'6px 12px',border:'1.5px solid #E2E8F0',borderRadius:'6px',fontSize:'12px',outline:'none'}}/>
+                style={{padding:'6px 12px',border:'1.5px solid #E2E8F0',borderRadius:'6px',fontSize:narrow?'16px':'12px',outline:'none'}}/>
             </div>
 
             {Object.keys(byPeriod).length===0?<div style={{textAlign:'center',padding:'40px',color:'#94A3B8'}}>
@@ -1879,7 +2032,7 @@ function ClubDetail({ clubId, groupMembers, onClose, onAction }: any) {
               <textarea defaultValue={club.surplusNotes||''} rows={3} placeholder="Record how any surplus or deficit was handled by the coordinator..."
                 onChange={e=>{ /* debounce if needed */ }}
                 id="surplus-notes"
-                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #FCD34D',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box',resize:'vertical',background:'white'}}/>
+                style={{width:'100%',padding:'9px 12px',border:'1.5px solid #FCD34D',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box',resize:'vertical',background:'white'}}/>
               <button onClick={()=>{
                 const notes = (document.getElementById('surplus-notes') as HTMLTextAreaElement)?.value
                 doAction('UPDATE_CLUB',{name:club.name,description:club.description,coordinatorId:club.coordinatorId,surplusNotes:notes,notes:club.notes})
@@ -1986,6 +2139,7 @@ function ScheduleForm({ club, locked, reasons, onReschedule, saving }: any) {
 }
 
 function SettingsForm({ club, members, onSave, saving }: any) {
+  const narrow = useIsNarrow()
   const [form, setForm] = useState({ name:club.name, description:club.description||'', coordinatorId:club.coordinatorId||'', notes:club.notes||'' })
   const set = (k:string) => (v:string) => setForm(p=>({...p,[k]:v}))
   return (
@@ -1994,12 +2148,12 @@ function SettingsForm({ club, members, onSave, saving }: any) {
       <div style={{marginBottom:'12px'}}>
         <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Club Name</label>
         <input type="text" value={form.name} onChange={e=>set('name')(e.target.value)}
-          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box'}}/>
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box'}}/>
       </div>
       <div style={{marginBottom:'12px'}}>
         <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Coordinator</label>
         <select value={form.coordinatorId} onChange={e=>set('coordinatorId')(e.target.value)}
-          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',background:'white',boxSizing:'border-box'}}>
           <option value="">None</option>
           {members.map((m:any)=><option key={m.userId} value={m.userId}>{m.fullName}</option>)}
         </select>
@@ -2007,7 +2161,7 @@ function SettingsForm({ club, members, onSave, saving }: any) {
       <div style={{marginBottom:'14px'}}>
         <label style={{display:'block',fontSize:'12px',fontWeight:'600',color:'#374151',marginBottom:'5px'}}>Notes</label>
         <textarea value={form.notes} onChange={e=>set('notes')(e.target.value)} rows={2}
-          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:'13px',outline:'none',boxSizing:'border-box',resize:'vertical'}}/>
+          style={{width:'100%',padding:'9px 12px',border:'1.5px solid #E2E8F0',borderRadius:'8px',fontSize:narrow?'16px':'13px',outline:'none',boxSizing:'border-box',resize:'vertical'}}/>
       </div>
       <button onClick={()=>onSave({...form, clubId:club.id})} disabled={saving}
         style={{padding:'9px 20px',background:saving?'#94A3B8':TEAL,color:'white',border:'none',borderRadius:'8px',fontSize:'13px',fontWeight:'600',cursor:'pointer'}}>
