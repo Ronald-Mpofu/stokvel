@@ -9,11 +9,38 @@
 //   to add an item from a phone — so the club sat in setup forever and its
 //   passbook stayed permanently empty. This is the screen that unblocks it.
 //
-// SCOPE
-//   Items, members, club details, activation. Purchasing (actual prices,
-//   receipts) and payment recording are deliberately absent: buying needs
-//   a receipt-capture surface of its own, and recording payments needs the
-//   attestation flow that is still pending. Both stay on desktop for now.
+// SCOPE — phase 1 of 3
+//   Items, members, club details, activation, plus (new) an at-a-glance
+//   Summary, the contribution register, and Mark all distributed.
+//
+//   Everything the new sections render already arrives in the single
+//   GET /api/grocery?clubId= this screen has always made — cycles,
+//   contributions, periodPurchases, assignments and settlementTransfers
+//   are all in that payload and were previously discarded. So three more
+//   sections cost no extra request and no extra round trip.
+//
+//   Phase 2 adds the first two cycle stages: Period purchases (what the
+//   club is buying this meeting, at what price) and Roll-call (who has
+//   their money in hand). Both are editable lists with a dirty-state save
+//   bar, and both are gated on cycle status exactly as the API gates them
+//   — OPEN or REOPENED and no later.
+//
+//   Phase 3 adds the last two stages: Assignments (who is buying what, and
+//   how much cash they are advanced) and Settlement (who hands money to
+//   whom). Receipt IMAGE capture remains desktop-only — acquittal here
+//   records the amount spent, not a photograph of the till slip.
+//
+// ADVANCES LEAVE THE CLUB'S HANDS
+//   An advance is cash handed to a named member or paid into a named
+//   supplier account. The club holds nothing. So the assign sheet is
+//   capped by uncommitted cash, and an acquittal that comes back under the
+//   advance leaves the member holding change the settlement must place.
+//
+// A TICK IS NOT A PAYMENT
+//   The roll-call records whether a member physically HAS the money, not
+//   that they have handed it over. Nothing here moves cash. Closing the
+//   roll-call locks the confirmed pot and carries declines forward as
+//   arrears — that is the only thing that writes.
 //
 // TRUST
 //   Every action here is a POST to /api/grocery, and that route guards
@@ -42,6 +69,42 @@ const STATUS_LABEL: Record<string, string> = {
   CLOSED:      'Closed',
   CANCELLED:   'Cancelled',
 }
+
+// A contribution's standing, in one place. Overdue outranks the stored
+// status: a PENDING row past its due date is a debt, and colouring it the
+// same neutral grey as one that is merely not due yet hides that.
+function contribTone(c: any): { label: string; bg: string; fg: string } {
+  if (String(c?.status).toUpperCase() === 'PAID') return { label: 'Paid',    bg: C.tealBg,  fg: C.tealDark }
+  if (c?.isOverdue)                               return { label: 'Overdue', bg: C.redBg,   fg: '#7F1D1D' }
+  return { label: 'Due', bg: '#EEF2F7', fg: '#475569' }
+}
+
+// What each cycle status means to someone standing in the meeting. Kept in
+// the same words the desktop uses so a treasurer moving between the two is
+// not learning a second vocabulary.
+const CYCLE_LABEL: Record<string, string> = {
+  OPEN:     'Roll-call open',
+  REOPENED: 'Roll-call reopened',
+  FUNDED:   'Pot confirmed',
+  LOCKED:   'Assignments locked',
+  SETTLED:  'Settled',
+  CLOSED:   'Closed',
+}
+
+// Settlement transfer states, in the words a member would use. The machine
+// itself lives in handleTransferState: INSTRUCTED → CLAIMED → CONFIRMED,
+// with DISPUTED reachable from either of the last two.
+const TRANSFER_LABEL: Record<string, { text: string; bg: string; fg: string }> = {
+  INSTRUCTED: { text: 'To pay',    bg: '#EEF2F7', fg: '#475569' },
+  CLAIMED:    { text: 'Sent',      bg: C.amberBg, fg: C.amberText },
+  CONFIRMED:  { text: 'Received',  bg: C.tealBg,  fg: C.tealDark },
+  DISPUTED:   { text: 'Disputed',  bg: C.redBg,   fg: '#7F1D1D' },
+}
+
+// The API accepts plan and roll-call edits only while the cycle is OPEN or
+// REOPENED. Mirrored here so the UI never offers a control that would come
+// back a 409 — an admin should not learn a rule from an error toast.
+const CYCLE_EDITABLE = new Set(['OPEN', 'REOPENED'])
 
 // Statuses during which the roster and item list may still be edited.
 // After buying starts, changing an item would move the budget under
@@ -522,6 +585,241 @@ function DetailsSheet({
   )
 }
 
+// ── Assignment sheets ─────────────────────────────────────────
+//
+// Hands one item to one member with an advance. Mirrors the desktop modal's
+// rules exactly: quantity cannot exceed what is unassigned, and the advance
+// cannot exceed the club's uncommitted cash — the money is leaving to a
+// named person, so there is nothing to overdraw against.
+function AssignSheet({
+  item, members, clubId, available, existing, periodNumber, suppliers, currency, onClose, onSaved,
+}: any) {
+  const mine      = existing || null
+  // An existing assignment's own quantity is not "taken" from itself when
+  // it is being edited, so it is added back to the headroom.
+  const remaining = Number(item.qtyUnassigned ?? item.totalQty) + Number(mine?.qtyAssigned || 0)
+  const headroom  = Number(available || 0) + Number(mine?.advanceAmount || 0)
+
+  const [search, setSearch] = useState('')
+  const [picked, setPicked] = useState<string>(mine?.userId || '')
+  const [qty, setQty]       = useState<string>(String(mine?.qtyAssigned || remaining || ''))
+  const [advance, setAdv]   = useState<string>(String(mine?.advanceAmount || ''))
+  const [touched, setTouched] = useState(Boolean(mine))
+  const [mode, setMode]     = useState<string>(mine?.fundingMode || 'MEMBER_CASH')
+  const [supplier, setSup]  = useState<string>(mine?.supplierAccountId || '')
+  const [saving, setSaving] = useState(false)
+  const [error, setError]   = useState<string | null>(null)
+
+  const qtyNum = parseFloat(qty || '0')
+  const advNum = parseFloat(advance || '0')
+  // The advance follows the estimate until the admin types their own figure,
+  // then stops moving — otherwise editing quantity would silently overwrite
+  // a number they deliberately chose.
+  const suggested = Number((qtyNum * Number(item.estimatedUnitPrice || 0)).toFixed(2))
+  const effAdv    = touched ? advNum : suggested
+
+  const qtyBad = !(qtyNum > 0) || qtyNum > remaining + 0.0001
+  const advBad = !(effAdv >= 0) || effAdv > headroom + 0.0001
+  const supBad = mode === 'SUPPLIER_DIRECT' && !supplier
+  const blocked = saving || !picked || qtyBad || advBad || supBad
+
+  const term = search.trim().toLowerCase()
+  const visible = term
+    ? members.filter((m: any) => (m.fullName || '').toLowerCase().includes(term))
+    : members
+
+  async function submit() {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/grocery', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'ASSIGN_ITEM', clubId, itemId: item.id,
+          assignedToId: picked, qtyAssigned: qtyNum, advanceAmount: effAdv,
+          periodNumber: periodNumber || 1, fundingMode: mode,
+          supplierAccountId: mode === 'SUPPLIER_DIRECT' ? supplier : null,
+        }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.success) throw new Error(json?.error || 'Could not assign this item.')
+      onSaved(json.message || 'Item assigned.')
+    } catch (e: any) {
+      setError(e?.message || 'Could not assign this item.')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Sheet
+      title={`Assign ${item.name}`}
+      onClose={onClose}
+      disabled={saving}
+      footer={<PrimaryButton label={saving ? 'Assigning…' : 'Assign item'} disabled={blocked} onClick={submit} />}
+    >
+      <Field label="Who is buying it">
+        <input
+          value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search members" style={inputStyle}
+        />
+        <div style={{ marginTop: S.sm, border: `1px solid ${C.border}`, borderRadius: 10, overflow: 'hidden' }}>
+          {visible.length === 0 ? (
+            <p style={{ fontSize: T.small.fontSize, color: C.textMuted, margin: 0, padding: S.md }}>
+              No members match.
+            </p>
+          ) : visible.map((m: any) => (
+            <button
+              key={m.userId}
+              onClick={() => setPicked(m.userId)}
+              style={{
+                display: 'flex', alignItems: 'center', gap: S.md, width: '100%',
+                minHeight: TOUCH.min, padding: `10px ${S.md}px`, textAlign: 'left',
+                background: picked === m.userId ? C.tealBg : C.surface,
+                border: 'none', borderTop: `1px solid ${C.borderLight}`,
+                cursor: 'pointer', fontFamily: FONT_STACK,
+              }}
+            >
+              <span style={{
+                width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                border: `2px solid ${picked === m.userId ? C.teal : C.border}`,
+                background: picked === m.userId ? C.teal : 'transparent',
+                color: '#fff', fontSize: 13, lineHeight: '19px', textAlign: 'center',
+              }}>{picked === m.userId ? '✓' : ''}</span>
+              <span style={{
+                flex: 1, minWidth: 0, fontSize: T.body.fontSize, color: C.text,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>{m.fullName || 'Member'}</span>
+            </button>
+          ))}
+        </div>
+      </Field>
+
+      <Field label="Quantity" hint={`${remaining} ${item.unit} unassigned`}>
+        <input
+          type="text" inputMode="decimal" value={qty}
+          onChange={e => setQty(e.target.value)}
+          style={{ ...inputStyle, textAlign: 'right' }}
+        />
+        {qtyBad && qty ? <ErrorNote message={`Enter between 0 and ${remaining} ${item.unit}.`} /> : null}
+      </Field>
+
+      <Field label="Cash advance" hint={`${money(headroom, currency)} uncommitted`}>
+        <input
+          type="text" inputMode="decimal"
+          value={touched ? advance : String(suggested)}
+          onChange={e => { setTouched(true); setAdv(e.target.value) }}
+          style={{ ...inputStyle, textAlign: 'right' }}
+        />
+        {advBad ? (
+          <ErrorNote message={`The club has ${money(headroom, currency)} uncommitted. An advance cannot exceed it.`} />
+        ) : null}
+      </Field>
+
+      <Field label="Where the money goes">
+        <div style={{ display: 'flex', gap: S.sm }}>
+          {[['MEMBER_CASH', 'To the member'], ['SUPPLIER_DIRECT', 'To a supplier']].map(([v, label]) => (
+            <button
+              key={v} onClick={() => setMode(v)}
+              style={{
+                flex: 1, minHeight: TOUCH.min, borderRadius: 10, fontSize: 14,
+                fontFamily: FONT_STACK, cursor: 'pointer',
+                border: `1.5px solid ${mode === v ? C.teal : C.border}`,
+                background: mode === v ? C.tealBg : C.surface,
+                color: mode === v ? C.tealDark : C.textMuted,
+              }}
+            >{label}</button>
+          ))}
+        </div>
+      </Field>
+
+      {mode === 'SUPPLIER_DIRECT' ? (
+        <Field label="Supplier account">
+          {suppliers.length === 0 ? (
+            <p style={{ fontSize: T.small.fontSize, color: C.textMuted, margin: 0, lineHeight: 1.5 }}>
+              No supplier accounts are set up for this club yet. Add one on the desktop, or pay the member instead.
+            </p>
+          ) : (
+            <select value={supplier} onChange={e => setSup(e.target.value)} style={inputStyle}>
+              <option value="">Choose an account…</option>
+              {suppliers.map((x: any) => (
+                <option key={x.id} value={x.id}>{x.supplierName} · {x.bankName || 'bank'}</option>
+              ))}
+            </select>
+          )}
+        </Field>
+      ) : null}
+
+      {error ? <ErrorNote message={error} /> : null}
+    </Sheet>
+  )
+}
+
+// Records what was actually spent against an advance. The difference is the
+// whole point: over means the member is out of pocket, under means they are
+// holding the club's change, and settlement places both.
+function AcquitSheet({ assign, clubId, currency, onClose, onSaved }: any) {
+  const [spent, setSpent] = useState<string>(String(assign.actualSpent ?? assign.advanceAmount ?? ''))
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const spentNum = parseFloat(spent || '0')
+  const bad      = !Number.isFinite(spentNum) || spentNum < 0
+  const variance = Number((Number(assign.advanceAmount || 0) - spentNum).toFixed(2))
+
+  async function submit() {
+    setSaving(true)
+    setError(null)
+    try {
+      const res = await fetch('/api/grocery', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'ACQUIT_ASSIGNMENT', clubId, assignmentId: assign.id, actualSpent: spentNum }),
+      })
+      const json = await res.json()
+      if (!res.ok || !json?.success) throw new Error(json?.error || 'Could not record this.')
+      onSaved(json.message || 'Acquitted.')
+    } catch (e: any) {
+      setError(e?.message || 'Could not record this.')
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Sheet
+      title={`Acquit ${assign.itemName}`}
+      onClose={onClose}
+      disabled={saving}
+      footer={<PrimaryButton label={saving ? 'Recording…' : 'Record spend'} disabled={saving || bad} onClick={submit} />}
+    >
+      <StatLine label="Bought by"  value={assign.memberName || 'Member'} />
+      <StatLine label="Advanced"   value={money(assign.advanceAmount, currency)} />
+
+      <div style={{ marginTop: S.lg }}>
+        <Field label="Actually spent">
+          <input
+            type="text" inputMode="decimal" value={spent}
+            onChange={e => setSpent(e.target.value)}
+            style={{ ...inputStyle, textAlign: 'right' }}
+          />
+        </Field>
+      </div>
+
+      {!bad && variance !== 0 ? (
+        <div style={{
+          background: variance > 0 ? C.amberBg : '#EEF2FF',
+          color: variance > 0 ? C.amberText : '#3730A3',
+          borderRadius: 10, padding: S.md, fontSize: T.small.fontSize, lineHeight: 1.5,
+        }}>
+          {variance > 0
+            ? `${assign.memberName || 'They'} is holding ${money(variance, currency)} of the club's change. Settlement will tell them who to pass it to.`
+            : `The club owes ${assign.memberName || 'them'} ${money(Math.abs(variance), currency)} — they spent more than they were advanced.`}
+        </div>
+      ) : null}
+
+      {error ? <ErrorNote message={error} /> : null}
+    </Sheet>
+  )
+}
+
 // ── Rows ──────────────────────────────────────────────────────
 function ItemRow({
   item, currency, editable, onEdit, onDelete,
@@ -603,6 +901,401 @@ function MemberRow({
   )
 }
 
+// A label/value pair. The whole summary is built from these rather than a
+// grid: at 360px a two-column grid gives each cell ~150px, and
+// "Contribution per member" over a formatted amount does not fit that.
+function StatLine({ label, value, tone }: { label: string; value: string; tone?: string }) {
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+      gap: S.md, padding: `9px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}`,
+    }}>
+      <span style={{ fontSize: T.small.fontSize, color: C.textMuted, flexShrink: 0 }}>{label}</span>
+      <span style={{ ...MONEY_STYLE, fontSize: 14, color: tone || C.text, textAlign: 'right', minWidth: 0 }}>
+        {value}
+      </span>
+    </div>
+  )
+}
+
+// Four counts across is 90px a tile at 360px, and "Distributed" alone needs
+// most of that. Two by two instead.
+function ItemStatusGrid({ items }: { items: any[] }) {
+  const count = (st: string) => items.filter((i: any) => String(i.status).toUpperCase() === st).length
+  const tiles = [
+    { label: 'To buy',      n: count('PENDING'),     fg: C.textMuted },
+    { label: 'Assigned',    n: count('ASSIGNED'),    fg: C.amberText },
+    { label: 'Bought',      n: count('PURCHASED'),   fg: C.tealDark },
+    { label: 'Distributed', n: count('DISTRIBUTED'), fg: C.teal },
+  ]
+  return (
+    <div style={{
+      display: 'grid', gridTemplateColumns: '1fr 1fr', gap: S.sm,
+      padding: `${S.md}px ${S.screenX}px`,
+    }}>
+      {tiles.map(t => (
+        <div key={t.label} style={{
+          background: C.surfaceAlt, borderRadius: 10, padding: `${S.sm}px ${S.md}px`, minWidth: 0,
+        }}>
+          <div style={{ ...MONEY_STYLE, fontSize: 20, color: t.fg }}>{t.n}</div>
+          <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 1 }}>{t.label}</div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// One member's contribution for one period.
+function ContribRow({ c, currency, canManage, onPay }: {
+  c: any; currency: string; canManage: boolean; onPay: () => void
+}) {
+  const tone = contribTone(c)
+  const paid = String(c.status).toUpperCase() === 'PAID'
+  return (
+    <div style={{
+      display: 'flex', alignItems: 'center', gap: S.md,
+      padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}`,
+      minHeight: TOUCH.min,
+    }}>
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{
+          fontSize: T.body.fontSize, color: C.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{c.memberName || 'Member'}</div>
+        <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 2 }}>
+          <span style={{
+            background: tone.bg, color: tone.fg, padding: '1px 6px',
+            borderRadius: 20, marginRight: 6,
+          }}>{tone.label}</span>
+          {/* Carried arrears change what is actually owed this period, so the
+              base and the adjustment are both shown rather than just a total
+              the member cannot reconcile. */}
+          {c.carryAdjustment
+            ? `${money(c.amountDue, currency)} base ${c.carryAdjustment < 0 ? '−' : '+'} ${money(Math.abs(c.carryAdjustment), currency)} carried`
+            : `Due ${c.dueDate ? new Date(c.dueDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : '—'}`}
+        </div>
+      </div>
+      <div style={{ textAlign: 'right', flexShrink: 0 }}>
+        <div style={{ ...MONEY_STYLE, fontSize: 14, color: paid ? C.teal : C.text }}>
+          {money(c.amountPayable ?? c.amountDue, currency)}
+        </div>
+      </div>
+      {!paid && canManage ? (
+        <button onClick={onPay} style={{
+          flexShrink: 0, minHeight: TOUCH.icon, padding: `0 ${S.md}px`,
+          background: C.tealBg, color: C.tealDark, border: 'none', borderRadius: 9,
+          fontSize: T.small.fontSize, fontWeight: 500, fontFamily: FONT_STACK, cursor: 'pointer',
+        }}>Mark paid</button>
+      ) : null}
+    </div>
+  )
+}
+
+// A save bar that pins to the bottom of the screen while there are unsaved
+// edits. Sits above the app's bottom nav and clears the home indicator.
+function SaveBar({
+  label, onSave, onDiscard, busy, blocked,
+}: { label: string; onSave: () => void; onDiscard: () => void; busy: boolean; blocked?: string | null }) {
+  return (
+    <div style={{
+      position: 'sticky', bottom: 0, zIndex: 5, background: C.surface,
+      borderTop: `1px solid ${C.border}`,
+      padding: `${S.md}px ${S.screenX}px calc(${S.md}px + env(safe-area-inset-bottom, 0px))`,
+    }}>
+      {blocked ? (
+        <div style={{ fontSize: T.caption.fontSize, color: C.red, marginBottom: S.sm, lineHeight: 1.45 }}>
+          {blocked}
+        </div>
+      ) : null}
+      <div style={{ display: 'flex', gap: S.sm }}>
+        <button onClick={onDiscard} disabled={busy} style={{
+          flex: '0 0 auto', minHeight: TOUCH.min, padding: `0 ${S.lg}px`,
+          background: C.surfaceAlt, color: C.textMuted, border: 'none', borderRadius: 12,
+          fontSize: 15, fontFamily: FONT_STACK, cursor: busy ? 'default' : 'pointer',
+        }}>Discard</button>
+        <button onClick={onSave} disabled={busy || Boolean(blocked)} style={{
+          flex: 1, minHeight: TOUCH.min,
+          background: (busy || blocked) ? C.textFaint : C.teal, color: '#fff',
+          border: 'none', borderRadius: 12, fontSize: 16, fontWeight: 500,
+          fontFamily: FONT_STACK, cursor: (busy || blocked) ? 'default' : 'pointer',
+        }}>{label}</button>
+      </div>
+    </div>
+  )
+}
+
+// One catalogue item in the period plan. The tick decides whether it is
+// being bought this period; quantity and price sit underneath rather than
+// beside, because three numeric fields on one 360px line leaves each about
+// 70px.
+function PlanRow({
+  item, on, qty, price, editable, onToggle, onQty, onPrice, currency, assignedQty,
+}: {
+  item: any; on: boolean; qty: string; price: string; editable: boolean
+  onToggle: () => void; onQty: (v: string) => void; onPrice: (v: string) => void
+  currency: string; assignedQty: number
+}) {
+  const line = (Number(qty) || 0) * (Number(price) || 0)
+  return (
+    <div style={{
+      padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}`,
+      background: on ? C.tealBg : 'transparent',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: S.md }}>
+        <button
+          onClick={editable ? onToggle : undefined}
+          aria-label={`${on ? 'Remove' : 'Add'} ${item.name}`}
+          aria-pressed={on}
+          disabled={!editable}
+          style={{
+            width: 32, height: 32, marginTop: 1, flexShrink: 0, borderRadius: 9,
+            border: `2px solid ${on ? C.teal : C.border}`, background: on ? C.teal : C.surface,
+            color: '#fff', fontSize: 17, lineHeight: 1, padding: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            cursor: editable ? 'pointer' : 'default', fontFamily: FONT_STACK,
+          }}
+        >{on ? '✓' : ''}</button>
+
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{
+            fontSize: T.body.fontSize, color: C.text,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{item.name}</div>
+          <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 2 }}>
+            {item.unit} · list price {money(item.estimatedUnitPrice, currency)}
+            {assignedQty > 0 ? (
+              <span style={{ color: C.amberText }}> · {assignedQty} already assigned</span>
+            ) : null}
+          </div>
+        </div>
+
+        {on ? (
+          <div style={{ ...MONEY_STYLE, fontSize: 14, color: C.tealDark, flexShrink: 0, textAlign: 'right' }}>
+            {money(line, currency)}
+          </div>
+        ) : null}
+      </div>
+
+      {on ? (
+        <div style={{ display: 'flex', gap: S.sm, marginTop: S.sm, paddingLeft: 32 + S.md }}>
+          <label style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: 'block', fontSize: T.caption.fontSize, color: C.textFaint, marginBottom: 3 }}>
+              Quantity
+            </span>
+            <input
+              type="text" inputMode="decimal" value={qty} disabled={!editable}
+              onChange={e => onQty(e.target.value)}
+              style={{ ...inputStyle, textAlign: 'right' }}
+            />
+          </label>
+          <label style={{ flex: 1, minWidth: 0 }}>
+            <span style={{ display: 'block', fontSize: T.caption.fontSize, color: C.textFaint, marginBottom: 3 }}>
+              Price each
+            </span>
+            <input
+              type="text" inputMode="decimal" value={price} disabled={!editable}
+              onChange={e => onPrice(e.target.value)}
+              style={{ ...inputStyle, textAlign: 'right' }}
+            />
+          </label>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// One member in the roll-call. Has money / not yet, as a pair of equal
+// targets under the name — the coordinator goes down the list one-handed
+// while the room waits.
+function RollCallRow({ row, currency, editable, onAnswer }: {
+  row: any; currency: string; editable: boolean; onAnswer: (has: boolean) => void
+}) {
+  const yes = row.answer === true
+  const no  = row.answer === false
+  const btn = (active: boolean, tone: 'yes' | 'no'): React.CSSProperties => ({
+    flex: 1, minHeight: TOUCH.min, borderRadius: 10, fontSize: 14, fontWeight: 500,
+    fontFamily: FONT_STACK, cursor: editable ? 'pointer' : 'default',
+    border: `1.5px solid ${active ? (tone === 'yes' ? C.teal : C.red) : C.border}`,
+    background: active ? (tone === 'yes' ? C.tealBg : C.redBg) : C.surface,
+    color: active ? (tone === 'yes' ? C.tealDark : '#7F1D1D') : C.textMuted,
+  })
+  return (
+    <div style={{
+      padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}`,
+      background: yes ? C.tealBg : no ? C.redBg : 'transparent',
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: S.md }}>
+        <div style={{
+          flex: 1, minWidth: 0, fontSize: T.body.fontSize, color: C.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{row.memberName || 'Member'}</div>
+        <div style={{ ...MONEY_STYLE, fontSize: 14, color: C.text, flexShrink: 0 }}>
+          {money(row.payable, currency)}
+        </div>
+      </div>
+      {row.carryAdjustment ? (
+        <div style={{ fontSize: T.caption.fontSize, color: C.amberText, marginTop: 2 }}>
+          {money(row.amountDue, currency)} base {row.carryAdjustment < 0 ? '−' : '+'} {money(Math.abs(row.carryAdjustment), currency)} carried
+        </div>
+      ) : null}
+      {editable ? (
+        <div style={{ display: 'flex', gap: S.sm, marginTop: S.sm }}>
+          <button onClick={() => onAnswer(true)}  style={btn(yes, 'yes')}>✓ Has money</button>
+          <button onClick={() => onAnswer(false)} style={btn(no, 'no')}>✗ Not yet</button>
+        </div>
+      ) : (
+        <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 4 }}>
+          {yes ? 'Confirmed' : no ? 'Declined — carried forward' : 'No answer'}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// One line of the period plan awaiting assignment.
+function UnassignedRow({ row, currency, editable, onAssign }: any) {
+  const value = Number(row.qtyUnassigned) * Number(row.unitPrice)
+  return (
+    <div style={{
+      padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}`,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: S.md }}>
+        <div style={{
+          flex: 1, minWidth: 0, fontSize: T.body.fontSize, color: C.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{row.itemName}</div>
+        <div style={{ ...MONEY_STYLE, fontSize: 14, color: C.amberText, flexShrink: 0 }}>
+          {money(value, currency)}
+        </div>
+      </div>
+      <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 2 }}>
+        {row.qtyUnassigned} of {row.qty} {row.unit} still to allocate
+      </div>
+      {editable ? (
+        <button onClick={onAssign} style={{
+          width: '100%', minHeight: TOUCH.min, marginTop: S.sm,
+          background: '#EEF2FF', color: '#3730A3', border: 'none', borderRadius: 10,
+          fontSize: 14, fontWeight: 500, fontFamily: FONT_STACK, cursor: 'pointer',
+        }}>Assign to a member</button>
+      ) : null}
+    </div>
+  )
+}
+
+// One member's advance, and what became of it.
+function AssignmentRow({ a, currency, canAct, onAcquit, onWithdraw }: any) {
+  const done = String(a.status).toUpperCase() === 'ACQUITTED'
+  return (
+    <div style={{ padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}` }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: S.md }}>
+        <div style={{
+          flex: 1, minWidth: 0, fontSize: T.body.fontSize, color: C.text,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{a.itemName}</div>
+        <span style={{
+          flexShrink: 0, fontSize: T.micro.fontSize, padding: '2px 8px', borderRadius: 20,
+          background: done ? C.tealBg : C.amberBg, color: done ? C.tealDark : C.amberText,
+        }}>{done ? 'Acquitted' : 'Open'}</span>
+      </div>
+      <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 2 }}>
+        {a.memberName} · {a.qtyAssigned} {a.unit}
+      </div>
+
+      <div style={{
+        display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: S.sm,
+        background: C.surfaceAlt, borderRadius: 10, padding: `${S.sm}px ${S.md}px`, marginTop: S.sm,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: T.caption.fontSize, color: C.textFaint }}>Advanced</div>
+          <div style={{ ...MONEY_STYLE, fontSize: 13, color: C.text }}>{money(a.advanceAmount, currency)}</div>
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: T.caption.fontSize, color: C.textFaint }}>Spent</div>
+          <div style={{ ...MONEY_STYLE, fontSize: 13, color: a.actualSpent != null ? C.text : C.textFaint }}>
+            {a.actualSpent != null ? money(a.actualSpent, currency) : '—'}
+          </div>
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: T.caption.fontSize, color: C.textFaint }}>
+            {a.variance == null ? 'Variance' : a.variance > 0 ? 'Change held' : a.variance < 0 ? 'Out of pocket' : 'Variance'}
+          </div>
+          <div style={{
+            ...MONEY_STYLE, fontSize: 13,
+            color: a.variance == null ? C.textFaint : a.variance === 0 ? C.teal : a.variance > 0 ? C.amberText : '#3730A3',
+          }}>
+            {a.variance == null ? '—' : a.variance === 0 ? 'exact' : money(Math.abs(a.variance), currency)}
+          </div>
+        </div>
+      </div>
+
+      {!done && canAct ? (
+        <div style={{ display: 'flex', gap: S.sm, marginTop: S.sm }}>
+          <button onClick={onAcquit} style={{
+            flex: 1, minHeight: TOUCH.min, background: C.tealBg, color: C.tealDark,
+            border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 500,
+            fontFamily: FONT_STACK, cursor: 'pointer',
+          }}>Acquit</button>
+          <button onClick={onWithdraw} style={{
+            flex: 1, minHeight: TOUCH.min, background: C.surface, color: C.red,
+            border: `1px solid ${C.redBg}`, borderRadius: 10, fontSize: 14,
+            fontFamily: FONT_STACK, cursor: 'pointer',
+          }}>Withdraw</button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+// One payment instruction. The verbs are deliberately full width: confirming
+// receipt of money by mis-tap is not a recoverable mistake.
+function TransferRow({ t, currency, busy, onState }: any) {
+  const st   = String(t.status).toUpperCase()
+  const tone = TRANSFER_LABEL[st] || TRANSFER_LABEL.INSTRUCTED
+  const done = st === 'CONFIRMED'
+  return (
+    <div style={{ padding: `11px ${S.screenX}px`, borderTop: `1px solid ${C.borderLight}` }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: S.md }}>
+        <div style={{ flex: 1, minWidth: 0, fontSize: T.body.fontSize, color: C.text, lineHeight: 1.4 }}>
+          {t.payerName} <span style={{ color: C.textFaint }}>pays</span> {t.payeeName}
+        </div>
+        <div style={{ ...MONEY_STYLE, fontSize: 14, color: C.text, flexShrink: 0 }}>
+          {money(t.amount, currency)}
+        </div>
+      </div>
+      <div style={{ marginTop: 3, fontSize: T.caption.fontSize, color: C.textFaint }}>
+        <span style={{ background: tone.bg, color: tone.fg, padding: '1px 6px', borderRadius: 20, marginRight: 6 }}>
+          {tone.text}
+        </span>
+        {t.payeeType === 'SUPPLIER' && t.accountNumber
+          ? `${t.bankName || 'Bank'} · ${t.accountNumber}`
+          : t.reference || 'Hand to hand'}
+      </div>
+      <div style={{ display: 'flex', gap: S.sm, marginTop: S.sm }}>
+        {st === 'INSTRUCTED' ? (
+          <button onClick={() => onState('CLAIM_TRANSFER', t.id)} disabled={busy} style={{
+            flex: 1, minHeight: TOUCH.min, background: C.amberBg, color: C.amberText,
+            border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 500,
+            fontFamily: FONT_STACK, cursor: busy ? 'default' : 'pointer',
+          }}>Mark sent</button>
+        ) : null}
+        {!done ? (
+          <button onClick={() => onState('CONFIRM_TRANSFER', t.id)} disabled={busy} style={{
+            flex: 1, minHeight: TOUCH.min, background: C.tealBg, color: C.tealDark,
+            border: 'none', borderRadius: 10, fontSize: 14, fontWeight: 500,
+            fontFamily: FONT_STACK, cursor: busy ? 'default' : 'pointer',
+          }}>Confirm received</button>
+        ) : (
+          <button onClick={() => onState('DISPUTE_TRANSFER', t.id)} disabled={busy} style={{
+            flex: 1, minHeight: TOUCH.min, background: C.surface, color: C.red,
+            border: `1px solid ${C.redBg}`, borderRadius: 10, fontSize: 14,
+            fontFamily: FONT_STACK, cursor: busy ? 'default' : 'pointer',
+          }}>Dispute</button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 function AddRow({ label, onClick }: { label: string; onClick: () => void }) {
   return (
     <button onClick={onClick} style={{
@@ -639,6 +1332,14 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
   const [itemSheet, setItemSheet] = useState<{ item: any | null } | null>(null)
   const [showPicker, setShowPicker] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
+  // Draft edits for the two cycle stages. Null means "not yet touched this
+  // load" — the row values are read straight from the server payload until
+  // the admin changes something, so a background refetch cannot clobber a
+  // draft that does not exist yet.
+  const [planDraft, setPlanDraft] = useState<Record<string, { on: boolean; qty: string; price: string }> | null>(null)
+  const [rollDraft, setRollDraft] = useState<Record<string, boolean> | null>(null)
+  const [assignFor, setAssignFor] = useState<any | null>(null)
+  const [acquitFor, setAcquitFor] = useState<any | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -665,6 +1366,13 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
     setItemSheet(null)
     setShowPicker(false)
     setShowDetails(false)
+    // Drops both drafts. The reload that follows is the new truth, and
+    // keeping edits on top of it would show a dirty bar over data that
+    // already contains those very changes.
+    setPlanDraft(null)
+    setRollDraft(null)
+    setAssignFor(null)
+    setAcquitFor(null)
     setNotice(msg)
     load()
     if (onChanged) onChanged()
@@ -692,6 +1400,119 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
   const members = Array.isArray(club?.members) ? club.members : []
   const currency = club?.currency || club?.groupCurrency || 'USD'
   const status = String(club?.status || 'SETUP').toUpperCase()
+
+  // Already in the payload — previously fetched and thrown away.
+  const contribs = Array.isArray(club?.contributions) ? club.contributions : []
+  const cycles   = Array.isArray(club?.cycles) ? club.cycles : []
+  const cycle    = cycles.find((c: any) => String(c.status).toUpperCase() !== 'CLOSED') || cycles[0] || null
+  const period   = cycle?.periodNumber ?? 1
+
+  // Only the current period, newest first. The desktop shows a rolling
+  // window across periods; on a phone that becomes an unreadable wall, and
+  // the period an admin is standing in is the one they need.
+  const periodContribs = contribs.filter((c: any) => c.periodNumber === period)
+  const paidCount      = periodContribs.filter((c: any) => String(c.status).toUpperCase() === 'PAID').length
+  const overdueCount   = periodContribs.filter((c: any) => c.isOverdue).length
+
+  // Collected against the whole list, which is what the progress bar means.
+  const listValue   = Number(club?.listValue ?? club?.totalBudget ?? 0)
+  const collected   = Number(club?.totalContributed ?? 0)
+  const collectedPct = listValue > 0 ? Math.min(100, Math.round((collected / listValue) * 100)) : 0
+
+  const canDistribute = ['ACTIVE', 'PURCHASING'].includes(status)
+    && items.some((i: any) => String(i.status).toUpperCase() === 'PURCHASED')
+
+  // ── Cycle stages ────────────────────────────────────────────
+  const cycleStatus  = String(cycle?.status || '').toUpperCase()
+  const cycleOpen    = CYCLE_EDITABLE.has(cycleStatus)
+  const plan         = (Array.isArray(club?.periodPurchases) ? club.periodPurchases : [])
+    .filter((r: any) => r.periodNumber === period)
+
+  // Server truth for the plan, keyed by item. The draft overlays this.
+  const planServer: Record<string, { on: boolean; qty: string; price: string }> = {}
+  items.forEach((i: any) => {
+    const line = plan.find((r: any) => r.itemId === i.id)
+    planServer[i.id] = line
+      ? { on: true, qty: String(line.qty), price: String(line.unitPrice) }
+      : { on: false, qty: String(i.qtyPerMember ?? 1), price: String(i.estimatedUnitPrice ?? 0) }
+  })
+  const planRows = planDraft || planServer
+  const planDirty = planDraft !== null && items.some((i: any) => {
+    const a = planRows[i.id], b = planServer[i.id]
+    return a.on !== b.on || (a.on && (a.qty !== b.qty || a.price !== b.price))
+  })
+  const planChosen  = items.filter((i: any) => planRows[i.id]?.on)
+  const plannedTotal = planChosen.reduce((t: number, i: any) =>
+    t + (Number(planRows[i.id].qty) || 0) * (Number(planRows[i.id].price) || 0), 0)
+  // Mirrors the route's own validation so a bad line is caught before the
+  // request, not after a round trip to Tokyo.
+  const planInvalid = planChosen.find((i: any) => {
+    const r = planRows[i.id]
+    return !(Number(r.qty) > 0) || !(Number(r.price) >= 0)
+  })
+
+  // Roll-call rows: one per contribution in this period, with the draft
+  // answer overlaid on whatever the server already recorded.
+  const rollRows = periodContribs.map((c: any) => {
+    const stored = c.fundsConfirmedAt ? true : c.fundsDeclinedAt ? false : null
+    const draft  = rollDraft ? rollDraft[c.userId] : undefined
+    return {
+      id: c.id, userId: c.userId, memberName: c.memberName,
+      amountDue: c.amountDue, carryAdjustment: c.carryAdjustment,
+      payable: c.amountPayable ?? c.amountDue,
+      answer: draft === undefined ? stored : draft,
+      stored,
+    }
+  })
+  const rollDirty     = rollRows.some((r: any) => r.answer !== r.stored)
+  const rollAnswered  = rollRows.filter((r: any) => r.answer !== null)
+  const rollConfirmed = rollRows.filter((r: any) => r.answer === true)
+  const rollSilent    = rollRows.filter((r: any) => r.answer === null)
+  const confirmedPot  = rollConfirmed.reduce((t: number, r: any) => t + Number(r.payable || 0), 0)
+
+  // ── Assignments and settlement ──────────────────────────────
+  const assigns   = (Array.isArray(club?.assignments) ? club.assignments : [])
+    .filter((a: any) => a.periodNumber === period && String(a.status).toUpperCase() !== 'CANCELLED')
+  const transfers = (Array.isArray(club?.settlementTransfers) ? club.settlementTransfers : [])
+    .filter((t: any) => t.periodNumber === period)
+  const suppliers = Array.isArray(club?.supplierAccounts) ? club.supplierAccounts : []
+
+  // Items in this period's plan that still have quantity nobody is buying.
+  const unassigned = plan.filter((r: any) => Number(r.qtyUnassigned) > 0)
+  const openAssigns = assigns.filter((a: any) => String(a.status).toUpperCase() !== 'ACQUITTED')
+
+  // Allocation happens once the pot is confirmed and stops when the cycle
+  // locks — the same window handleAssignItem enforces.
+  const canAssign  = cycleStatus === 'FUNDED'
+  const uncommitted = Number(club?.uncommittedCash || 0)
+
+  const settledTotal = transfers
+    .filter((t: any) => String(t.status).toUpperCase() === 'CONFIRMED')
+    .reduce((sum: number, t: any) => sum + Number(t.amount || 0), 0)
+  const movedTotal = transfers.reduce((sum: number, t: any) => sum + Number(t.amount || 0), 0)
+
+  const setPlanRow = (itemId: string, patch: Partial<{ on: boolean; qty: string; price: string }>) => {
+    setPlanDraft(prev => {
+      const base = prev || planServer
+      return { ...base, [itemId]: { ...base[itemId], ...patch } }
+    })
+  }
+  const setRollAnswer = (userId: string, has: boolean) => {
+    setRollDraft(prev => {
+      const base = prev || {}
+      // Tapping the same answer again undoes an unsaved change, so a
+      // mis-tap is recoverable without a third "unanswered" button. An
+      // answer already saved on the server is cleared by the API, not
+      // here — this only rolls back the draft.
+      const current = base[userId] !== undefined
+        ? base[userId]
+        : (rollRows.find((r: any) => r.userId === userId)?.stored ?? null)
+      const next = { ...base }
+      if (current === has) delete next[userId]
+      else next[userId] = has
+      return next
+    })
+  }
   const editable = EDITABLE.has(status)
   const canActivate = status === 'SETUP' && members.length > 0 && items.length > 0
   const existingIds = new Set<string>(members.map((m: any) => m.userId))
@@ -734,6 +1555,31 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
 
       {showDetails && club ? (
         <DetailsSheet club={club} onClose={() => setShowDetails(false)} onSaved={afterChange} />
+      ) : null}
+
+      {assignFor ? (
+        <AssignSheet
+          item={assignFor}
+          members={members}
+          clubId={clubId}
+          currency={currency}
+          available={uncommitted}
+          existing={assigns.find((a: any) => a.itemId === assignFor.itemId || a.itemId === assignFor.id) || null}
+          periodNumber={period}
+          suppliers={suppliers}
+          onClose={() => setAssignFor(null)}
+          onSaved={afterChange}
+        />
+      ) : null}
+
+      {acquitFor ? (
+        <AcquitSheet
+          assign={acquitFor}
+          clubId={clubId}
+          currency={currency}
+          onClose={() => setAcquitFor(null)}
+          onSaved={afterChange}
+        />
       ) : null}
 
       <div style={{ background: C.navy, padding: `14px ${S.screenX}px 18px` }}>
@@ -811,6 +1657,403 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
         </div>
       ) : null}
 
+      {/* ── Summary ─────────────────────────────────────────── */}
+      {status !== 'SETUP' ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Summary"
+            hint={collectedPct > 0 ? `${collectedPct}% collected` : undefined}
+            open={open.includes('summary')}
+            onToggle={() => toggle('summary')}
+          />
+          {open.includes('summary') ? (
+            <div>
+              <ItemStatusGrid items={items} />
+
+              <div style={{ padding: `0 ${S.screenX}px ${S.md}px` }}>
+                <div style={{
+                  height: 6, borderRadius: 3, background: C.borderLight, overflow: 'hidden',
+                }}>
+                  <div style={{
+                    width: `${collectedPct}%`, height: '100%', background: C.teal,
+                    borderRadius: 3, transition: 'width 200ms',
+                  }} />
+                </div>
+                <div style={{ fontSize: T.caption.fontSize, color: C.textFaint, marginTop: 6 }}>
+                  {money(collected, currency)} collected of {money(listValue, currency)}
+                </div>
+              </div>
+
+              <StatLine label="Spent so far"  value={money(club?.totalSpent, currency)} />
+              {Number(club?.advancedOut || 0) > 0 ? (
+                <StatLine label="Advanced out" value={money(club?.advancedOut, currency)} tone={C.amberText} />
+              ) : null}
+              {Number(club?.unacquitted || 0) > 0 ? (
+                <StatLine label="Not yet acquitted" value={money(club?.unacquitted, currency)} tone={C.red} />
+              ) : null}
+              <StatLine label="Each member" value={money(club?.contributionAmount, currency)} />
+              {typeof club?.daysLeft === 'number' ? (
+                <StatLine label="Days left" value={`${club.daysLeft}`} tone={club.daysLeft < 0 ? C.red : undefined} />
+              ) : null}
+
+              {/* The bulk hand-over. Only offered once something has actually
+                  been bought — before that it would post a no-op. */}
+              {canDistribute ? (
+                <div style={{ padding: `${S.md}px ${S.screenX}px ${S.lg}px` }}>
+                  <button
+                    onClick={() => act({ action: 'MARK_DISTRIBUTED' }, 'Marking items as handed over…')}
+                    style={{
+                      width: '100%', minHeight: TOUCH.min, background: C.surface, color: C.teal,
+                      border: `1px solid ${C.teal}`, borderRadius: 12, fontSize: 15, fontWeight: 500,
+                      fontFamily: FONT_STACK, cursor: 'pointer',
+                    }}
+                  >Mark all bought items as handed over</button>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── Cycle: period purchases ─────────────────────────── */}
+      {cycle ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Period purchases"
+            hint={planChosen.length ? `${planChosen.length} chosen` : CYCLE_LABEL[cycleStatus] || undefined}
+            open={open.includes('plan')}
+            onToggle={() => toggle('plan')}
+          />
+          {open.includes('plan') ? (
+            <div>
+              <p style={{
+                fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                margin: 0, padding: `${S.md}px ${S.screenX}px`,
+              }}>
+                {cycleOpen
+                  ? 'Tick what the club is buying this period and set the price you expect to pay. This is the plan the target contribution is worked out from.'
+                  : `Cycle ${period} is ${(CYCLE_LABEL[cycleStatus] || cycleStatus).toLowerCase()} — the plan is closed.`}
+              </p>
+
+              {items.length === 0 ? (
+                <p style={{
+                  fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                  margin: 0, padding: `0 ${S.screenX}px ${S.lg}px`,
+                }}>
+                  There are no items to choose from yet. Add them under Items first.
+                </p>
+              ) : (
+                <>
+                  {items.map((i: any) => {
+                    const line = plan.find((r: any) => r.itemId === i.id)
+                    return (
+                      <PlanRow
+                        key={i.id}
+                        item={i}
+                        currency={currency}
+                        editable={cycleOpen}
+                        on={planRows[i.id]?.on || false}
+                        qty={planRows[i.id]?.qty ?? ''}
+                        price={planRows[i.id]?.price ?? ''}
+                        assignedQty={Number(line?.qtyAssigned || 0)}
+                        onToggle={() => setPlanRow(i.id, { on: !planRows[i.id]?.on })}
+                        onQty={v => setPlanRow(i.id, { qty: v })}
+                        onPrice={v => setPlanRow(i.id, { price: v })}
+                      />
+                    )
+                  })}
+
+                  <StatLine label="Planned total" value={money(plannedTotal, currency)} tone={C.tealDark} />
+                  {cycle?.targetContribution ? (
+                    <StatLine label="Target each" value={money(cycle.targetContribution, currency)} />
+                  ) : null}
+
+                  {/* Publishing turns the planned total into everyone's
+                      target contribution. Offered only once the plan is
+                      saved, because publishing a dirty plan would set a
+                      target from figures nobody has committed. */}
+                  {cycleOpen && !planDirty && planChosen.length > 0 ? (
+                    <div style={{ padding: `${S.md}px ${S.screenX}px ${S.lg}px` }}>
+                      <button
+                        onClick={() => act({ action: 'SET_PERIOD_BUDGET', periodNumber: period }, 'Setting the target…')}
+                        style={{
+                          width: '100%', minHeight: TOUCH.min, background: C.surface, color: C.teal,
+                          border: `1px solid ${C.teal}`, borderRadius: 12, fontSize: 15, fontWeight: 500,
+                          fontFamily: FONT_STACK, cursor: 'pointer',
+                        }}
+                      >Set target contribution from this plan</button>
+                    </div>
+                  ) : null}
+
+                  {planDirty ? (
+                    <SaveBar
+                      label="Save plan"
+                      busy={Boolean(busy)}
+                      blocked={planInvalid
+                        ? `${planInvalid.name} needs a quantity above zero and a price that is not negative.`
+                        : null}
+                      onDiscard={() => setPlanDraft(null)}
+                      onSave={() => act({
+                        action: 'SAVE_PERIOD_PLAN',
+                        periodNumber: period,
+                        lines: planChosen.map((i: any) => ({
+                          itemId: i.id,
+                          qty: Number(planRows[i.id].qty),
+                          unitPrice: Number(planRows[i.id].price),
+                        })),
+                      }, 'Saving the plan…')}
+                    />
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── Cycle: roll-call ────────────────────────────────── */}
+      {cycle ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Roll-call"
+            hint={rollRows.length ? `${rollConfirmed.length}/${rollRows.length} confirmed` : undefined}
+            open={open.includes('rollcall')}
+            onToggle={() => toggle('rollcall')}
+          />
+          {open.includes('rollcall') ? (
+            <div>
+              <p style={{
+                fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                margin: 0, padding: `${S.md}px ${S.screenX}px`,
+              }}>
+                {cycleOpen
+                  ? 'Ask each member whether they have their money with them now. A tick is not a payment — nothing moves until settlement.'
+                  : `Cycle ${period} is ${(CYCLE_LABEL[cycleStatus] || cycleStatus).toLowerCase()}. Reopen it to change an answer.`}
+              </p>
+
+              {rollRows.length === 0 ? (
+                <p style={{
+                  fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                  margin: 0, padding: `0 ${S.screenX}px ${S.lg}px`,
+                }}>
+                  Nobody has a contribution raised for this period yet.
+                </p>
+              ) : (
+                <>
+                  {rollRows.map((r: any) => (
+                    <RollCallRow
+                      key={r.id}
+                      row={r}
+                      currency={currency}
+                      editable={cycleOpen}
+                      onAnswer={has => setRollAnswer(r.userId, has)}
+                    />
+                  ))}
+
+                  <StatLine label="Confirmed pot" value={money(confirmedPot, currency)} tone={C.tealDark} />
+                  {rollSilent.length > 0 ? (
+                    <StatLine label="No answer yet" value={`${rollSilent.length}`} tone={C.amberText} />
+                  ) : null}
+
+                  {/* Closing locks the pot and carries every decline forward
+                      as arrears. Held back until everyone has answered: a
+                      silent member closed out is a debt raised against
+                      somebody who was never asked. */}
+                  {cycleOpen && !rollDirty && rollAnswered.length > 0 ? (
+                    <div style={{ padding: `${S.md}px ${S.screenX}px ${S.lg}px` }}>
+                      <PrimaryButton
+                        label="Close roll-call"
+                        disabled={rollSilent.length > 0 || rollConfirmed.length === 0}
+                        onClick={() => act({ action: 'LOCK_CONTRIBUTIONS', periodNumber: period }, 'Closing the roll-call…')}
+                      />
+                      {rollSilent.length > 0 ? (
+                        <p style={{ fontSize: T.caption.fontSize, color: C.textFaint, lineHeight: 1.5, margin: `${S.sm}px 0 0` }}>
+                          {rollSilent.length} member{rollSilent.length === 1 ? ' has' : 's have'} not answered yet.
+                        </p>
+                      ) : (
+                        <p style={{ fontSize: T.caption.fontSize, color: C.textFaint, lineHeight: 1.5, margin: `${S.sm}px 0 0` }}>
+                          Locks {money(confirmedPot, currency)} for this cycle. Anyone who declined carries their amount forward.
+                        </p>
+                      )}
+                    </div>
+                  ) : null}
+
+                  {rollDirty ? (
+                    <SaveBar
+                      label="Save roll-call"
+                      busy={Boolean(busy)}
+                      onDiscard={() => setRollDraft(null)}
+                      onSave={() => act({
+                        action: 'SAVE_ROLL_CALL',
+                        periodNumber: period,
+                        responses: rollRows
+                          .filter((r: any) => r.answer !== r.stored)
+                          .map((r: any) => ({ userId: r.userId, hasFunds: r.answer })),
+                      }, 'Saving the roll-call…')}
+                    />
+                  ) : null}
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── Cycle: assignments ──────────────────────────────── */}
+      {cycle && ['FUNDED', 'LOCKED', 'SETTLED', 'CLOSED'].includes(cycleStatus) ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Assignments"
+            hint={assigns.length ? `${assigns.length - openAssigns.length}/${assigns.length} acquitted` : undefined}
+            open={open.includes('assigns')}
+            onToggle={() => toggle('assigns')}
+          />
+          {open.includes('assigns') ? (
+            <div>
+              <p style={{
+                fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                margin: 0, padding: `${S.md}px ${S.screenX}px`,
+              }}>
+                {canAssign
+                  ? 'Hand each item to whoever is buying it, with the cash they need. The club holds nothing — advances go straight to the member or the supplier.'
+                  : `Cycle ${period} is ${(CYCLE_LABEL[cycleStatus] || cycleStatus).toLowerCase()} — allocation is closed.`}
+              </p>
+
+              <StatLine label="Uncommitted cash" value={money(uncommitted, currency)}
+                tone={uncommitted < 0 ? C.red : C.tealDark} />
+              {Number(club?.unacquitted || 0) > 0 ? (
+                <StatLine label="Not yet acquitted" value={money(club?.unacquitted, currency)} tone={C.amberText} />
+              ) : null}
+
+              {unassigned.length > 0 ? (
+                <>
+                  <div style={{
+                    padding: `${S.sm}px ${S.screenX}px`, fontSize: T.caption.fontSize,
+                    color: C.textFaint, borderTop: `1px solid ${C.borderLight}`,
+                  }}>Still to allocate</div>
+                  {unassigned.map((r: any) => (
+                    <UnassignedRow
+                      key={r.id} row={r} currency={currency} editable={canAssign}
+                      onAssign={() => setAssignFor({
+                        // The sheet works in item terms; the plan line carries
+                        // the period's agreed price and remaining quantity.
+                        id: r.itemId, itemId: r.itemId, name: r.itemName, unit: r.unit,
+                        totalQty: r.qty, qtyUnassigned: r.qtyUnassigned,
+                        estimatedUnitPrice: r.unitPrice,
+                      })}
+                    />
+                  ))}
+                </>
+              ) : null}
+
+              {assigns.length === 0 ? (
+                <p style={{
+                  fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                  margin: 0, padding: `${S.lg}px ${S.screenX}px`,
+                }}>
+                  Nothing assigned yet for this period.
+                </p>
+              ) : (
+                <>
+                  <div style={{
+                    padding: `${S.sm}px ${S.screenX}px`, fontSize: T.caption.fontSize,
+                    color: C.textFaint, borderTop: `1px solid ${C.borderLight}`,
+                  }}>Assigned</div>
+                  {assigns.map((a: any) => (
+                    <AssignmentRow
+                      key={a.id} a={a} currency={currency} canAct={canAssign}
+                      onAcquit={() => setAcquitFor(a)}
+                      onWithdraw={() => act({
+                        action: 'CANCEL_ASSIGNMENT', itemId: a.itemId, assignedToId: a.userId,
+                      }, 'Withdrawing…')}
+                    />
+                  ))}
+                </>
+              )}
+
+              {/* Locking freezes allocation so the solver has a fixed graph
+                  to work from. Held back while anything is unallocated —
+                  locking with quantity outstanding strands that money. */}
+              {canAssign && assigns.length > 0 ? (
+                <div style={{ padding: `${S.md}px ${S.screenX}px ${S.lg}px` }}>
+                  <PrimaryButton
+                    label="Lock assignments"
+                    disabled={unassigned.length > 0}
+                    onClick={() => act({ action: 'LOCK_CYCLE', periodNumber: period }, 'Locking assignments…')}
+                  />
+                  {unassigned.length > 0 ? (
+                    <p style={{ fontSize: T.caption.fontSize, color: C.textFaint, lineHeight: 1.5, margin: `${S.sm}px 0 0` }}>
+                      {unassigned.length} item{unassigned.length === 1 ? '' : 's'} still to allocate.
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {/* ── Cycle: settlement ───────────────────────────────── */}
+      {cycle && ['LOCKED', 'SETTLED', 'CLOSED'].includes(cycleStatus) ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Settlement"
+            hint={transfers.length ? `${transfers.filter((t: any) => String(t.status).toUpperCase() === 'CONFIRMED').length}/${transfers.length} done` : undefined}
+            open={open.includes('settle')}
+            onToggle={() => toggle('settle')}
+          />
+          {open.includes('settle') ? (
+            <div>
+              {transfers.length === 0 ? (
+                <>
+                  <p style={{
+                    fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                    margin: 0, padding: `${S.md}px ${S.screenX}px`,
+                  }}>
+                    Work out who hands money to whom. Nobody pays the club — every
+                    payment goes directly to the member or supplier who needs it.
+                  </p>
+                  <div style={{ padding: `0 ${S.screenX}px ${S.lg}px` }}>
+                    <PrimaryButton
+                      label="Work out the payments"
+                      onClick={() => act({ action: 'SOLVE_SETTLEMENT', periodNumber: period }, 'Working out the payments…')}
+                    />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <StatLine label="To move"   value={money(movedTotal, currency)} />
+                  <StatLine label="Confirmed" value={money(settledTotal, currency)}
+                    tone={settledTotal >= movedTotal ? C.teal : C.tealDark} />
+
+                  {transfers.map((t: any) => (
+                    <TransferRow
+                      key={t.id} t={t} currency={currency} busy={Boolean(busy)}
+                      onState={(action: string, transferId: string) =>
+                        act({ action, transferId }, 'Updating payment…')}
+                    />
+                  ))}
+
+                  <div style={{ padding: `${S.md}px ${S.screenX}px ${S.lg}px` }}>
+                    <button
+                      onClick={() => act({ action: 'SOLVE_SETTLEMENT', periodNumber: period }, 'Re-working the payments…')}
+                      style={{
+                        width: '100%', minHeight: TOUCH.min, background: C.surface, color: C.teal,
+                        border: `1px solid ${C.teal}`, borderRadius: 12, fontSize: 15, fontWeight: 500,
+                        fontFamily: FONT_STACK, cursor: 'pointer',
+                      }}
+                    >Work them out again</button>
+                    <p style={{ fontSize: T.caption.fontSize, color: C.textFaint, lineHeight: 1.5, margin: `${S.sm}px 0 0` }}>
+                      Use this if an acquittal changed after the payments were worked out.
+                    </p>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
       <div style={{ background: C.surface, marginTop: S.md }}>
         <SectionHeader label="Items" hint={String(items.length)} open={open.includes('items')} onToggle={() => toggle('items')} />
         {open.includes('items') ? (
@@ -860,6 +2103,59 @@ export default function MobileGroceryClubManage({ clubId, onBack, onChanged }: P
           </div>
         ) : null}
       </div>
+
+      {/* ── Contributions ───────────────────────────────────── */}
+      {status !== 'SETUP' ? (
+        <div style={{ background: C.surface, marginTop: S.md }}>
+          <SectionHeader
+            label="Contributions"
+            hint={periodContribs.length ? `${paidCount}/${periodContribs.length} paid` : undefined}
+            open={open.includes('contribs')}
+            onToggle={() => toggle('contribs')}
+          />
+          {open.includes('contribs') ? (
+            <div>
+              {periodContribs.length === 0 ? (
+                <p style={{
+                  fontSize: T.small.fontSize, color: C.textMuted, lineHeight: 1.5,
+                  margin: 0, padding: `${S.lg}px ${S.screenX}px`,
+                }}>
+                  No contributions raised yet. Activating the club builds the schedule.
+                </p>
+              ) : (
+                <>
+                  <div style={{
+                    padding: `${S.sm}px ${S.screenX}px`, fontSize: T.caption.fontSize,
+                    color: C.textFaint, borderTop: `1px solid ${C.borderLight}`,
+                  }}>
+                    Period {period}
+                    {overdueCount > 0 ? (
+                      <span style={{ color: C.red }}> · {overdueCount} overdue</span>
+                    ) : null}
+                  </div>
+                  {periodContribs.map((c: any) => (
+                    <ContribRow
+                      key={c.id}
+                      c={c}
+                      currency={currency}
+                      canManage
+                      // Records the full amount owed, carried arrears
+                      // included — the same figure the row displays, so a
+                      // part payment is never silently booked as settled.
+                      onPay={() => act({
+                        action: 'PAY_CONTRIBUTION',
+                        contributionId: c.id,
+                        amountPaid: c.amountPayable ?? c.amountDue,
+                        paymentMethod: 'BANK_TRANSFER',
+                      }, 'Recording payment…')}
+                    />
+                  ))}
+                </>
+              )}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       <div style={{ background: C.surface, marginTop: S.md }}>
         <SectionHeader label="Club details" open={open.includes('details')} onToggle={() => toggle('details')} />

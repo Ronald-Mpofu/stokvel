@@ -2351,27 +2351,63 @@ async function handleMarkDistributed(body: any): Promise<NextResponse> {
 }
 
 // ── Contributions ─────────────────────────────────────────────
+//
+// SETTLEMENT IS JUDGED AGAINST "amountPayable", NOT "amountDue".
+//
+// applyCarryForward folds arrears and credits INTO the current row by adding
+// to its "carryAdjustment", so the cash a member actually hands over is
+// amountDue + carryAdjustment — the same figure the roll-call pot, the
+// settlement solver and the GET serialiser all use. Comparing against
+// amountDue alone was wrong in both directions:
+//
+//   arrears carried in (+15 on a 40 base): paying 40 flipped the row to PAID
+//   and the 15 vanished — the GroceryCarryForward row had already been
+//   stamped "appliedPeriod", so the debt left the ledger with no trace.
+//
+//   change held (−15 on a 40 base): paying the correct 25 left newPaid below
+//   amountDue, so the row stuck at PARTIAL forever and the member looked
+//   like a defaulter.
+//
+// Compared in integer cents. Decimal(18,4) round-trips through JS floats,
+// and a member handing over exactly what is owed must never land a cent
+// short of settled.
 async function handlePayContrib(body: any): Promise<NextResponse> {
   const { contributionId, amountPaid, paymentMethod, paymentRef } = body
   const contribs = await sql(`SELECT * FROM "GroceryContribution" WHERE id=$1`, [contributionId])
   if (!contribs.length) return NextResponse.json({ success:false, error:'Contribution not found' }, { status:404 })
   const c = contribs[0]
 
+  const payable = c.amountPayable != null
+    ? Number(c.amountPayable)
+    : Number(c.amountDue) + Number(c.carryAdjustment || 0)
+
   const newPaid = Number(c.amountPaid) + Number(amountPaid)
-  const isPaid  = newPaid >= Number(c.amountDue)
+  const isPaid  = cents(newPaid) >= cents(payable)
 
   await exec(
     `UPDATE "GroceryContribution" SET "amountPaid"=$1,status=$2::"GroceryContribStatus","paidAt"=$3,"paymentMethod"=$4,"paymentRef"=$5,"updatedAt"=NOW() WHERE id=$6`,
     [newPaid, isPaid?'PAID':'PARTIAL', isPaid?new Date():null, paymentMethod||null, paymentRef||null, contributionId]
   )
   await recalcTotals(c.clubId)
-  return NextResponse.json({ success:true, message: isPaid ? `✅ Period #${c.periodNumber} paid` : 'Partial payment recorded' })
+  return NextResponse.json({ success:true, message: isPaid
+    ? `✅ Period #${c.periodNumber} paid`
+    : `Partial payment recorded — $${fmtAmt(Math.max(0, payable - newPaid))} still to come` })
 }
 
+// Same correction as handlePayContrib: settling a whole period must record
+// what each member actually hands over, not the base obligation. Writing
+// "amountDue" here forgave every carried arrear in the period at one tap.
+//
+// GREATEST(...,0) guards the case where a credit exceeds the period's own
+// contribution: the member owes nothing and the club owes them, which is a
+// cash settlement, not a negative payment.
 async function handleMarkPeriodPaid(body: any): Promise<NextResponse> {
   const { clubId, periodNumber } = body
   await exec(
-    `UPDATE "GroceryContribution" SET status='PAID'::"GroceryContribStatus","amountPaid"="amountDue","paidAt"=NOW(),"updatedAt"=NOW()
+    `UPDATE "GroceryContribution"
+        SET status='PAID'::"GroceryContribStatus",
+            "amountPaid"=GREATEST(COALESCE("amountPayable", "amountDue" + COALESCE("carryAdjustment",0)), 0),
+            "paidAt"=NOW(),"updatedAt"=NOW()
      WHERE "clubId"=$1 AND "periodNumber"=$2 AND status != 'PAID'`,
     [clubId, periodNumber]
   )
