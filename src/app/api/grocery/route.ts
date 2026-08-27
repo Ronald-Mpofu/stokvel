@@ -1,4 +1,26 @@
-// src/app/api/grocery/route.ts — v1.11
+// src/app/api/grocery/route.ts — v1.14
+// v1.14: ASSIGN_ITEM upserts on ("itemId","userId","periodNumber") instead
+//       of ("itemId","userId"). The old target had no period in it, so
+//       assigning an item to a member who already held that item in an
+//       EARLIER period took the DO UPDATE branch: it dragged the existing
+//       row forward via "periodNumber" = EXCLUDED."periodNumber" and reset
+//       "actualSpent"/"acquittedAt" to NULL. The earlier period's purchase
+//       record was overwritten in place, while the GroceryCarryForward row
+//       that acquittal had produced stayed behind, still referencing it.
+//       The next acquittal then hit the partial unique index
+//       "GroceryCarryForward_assignment_origin_key" and failed with a raw
+//       23505. A grocery club buys the same items every period, so this
+//       was the normal path from period 2 onward, not an edge case.
+//       "periodNumber" also leaves the SET list: it is part of the conflict
+//       target now, so on the DO UPDATE branch it already matches.
+//       REQUIRES sql/22-grocery-integrity-fix.sql. That migration drops the
+//       index this version no longer names, so deploy the two together —
+//       v1.12 against the new schema cannot find its ON CONFLICT target.
+//       22 also converts "GroceryContribution"."amountPayable" from a
+//       column DEFAULT (evaluated once at INSERT, maintained by nothing)
+//       into a STORED generated column. No code change is needed for that
+//       half: the reads below already prefer the column, and neither
+//       INSERT names it — which is what makes it safe to generate.
 // v1.1: handleActivate no longer issues one INSERT per (member × period) —
 //       schedule rows are written in batched multi-row INSERTs. Club creation
 //       batches its member INSERTs. recalcTotals is now two set-based
@@ -2169,12 +2191,11 @@ async function handleAssignItem(body: any): Promise<NextResponse> {
        (id,"clubId","itemId","userId","qtyAssigned","advanceAmount",status,notes,
         "periodNumber","fundingMode","supplierAccountId","createdAt","updatedAt")
      VALUES ($1,$2,$3,$4,$5,$6,'ASSIGNED',$7,$8,$9,$10,NOW(),NOW())
-     ON CONFLICT ("itemId","userId") DO UPDATE
+     ON CONFLICT ("itemId","userId","periodNumber") DO UPDATE
        SET "qtyAssigned"       = EXCLUDED."qtyAssigned",
            "advanceAmount"     = EXCLUDED."advanceAmount",
            status              = 'ASSIGNED',
            notes               = EXCLUDED.notes,
-           "periodNumber"      = EXCLUDED."periodNumber",
            "fundingMode"       = EXCLUDED."fundingMode",
            "supplierAccountId" = EXCLUDED."supplierAccountId",
            "actualSpent"   = NULL,
