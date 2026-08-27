@@ -131,6 +131,29 @@ function fmtDate(v: any): string {
   return d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
 }
 
+// Every response goes through here rather than straight to res.json().
+//
+// A missing or crashed API route does not return JSON — it returns Next's
+// HTML error page, and res.json() on that throws "Unexpected token '<'",
+// which tells a member nothing and tells a developer only that something
+// somewhere returned markup. Checking the content type first turns the two
+// common causes into two different sentences.
+async function readJson(res: Response): Promise<any> {
+  const type = res.headers.get('content-type') || ''
+  if (!type.includes('application/json')) {
+    const body = await res.text().catch(() => '')
+    const looksLikeHtml = body.trim().slice(0, 15).toLowerCase().includes('<!doctype')
+      || body.trim().startsWith('<')
+    if (res.status === 404 || looksLikeHtml) {
+      throw new Error(
+        'This screen cannot reach the server (/api/grocery/member). If you are testing, check the route file is named route.ts.'
+      )
+    }
+    throw new Error(`The server returned an unexpected response (${res.status}).`)
+  }
+  return res.json()
+}
+
 // ── Primitives ────────────────────────────────────────────────
 // Deliberately redeclared rather than imported from MobileGroceryClubManage.
 // Those are private to that module, and reaching into a 2,000-line component
@@ -550,7 +573,7 @@ function ReportSheet({
           notes: note.trim() || null,
         }),
       })
-      const json = await res.json()
+      const json = await readJson(res)
       if (!res.ok || !json?.success) throw new Error(json?.error || 'Could not record this.')
       onSaved(json.message || 'Thank you — recorded.')
     } catch (e: any) {
@@ -673,7 +696,7 @@ function ClaimSheet({
           reason: reason.trim() || null,
         }),
       })
-      const json = await res.json()
+      const json = await readJson(res)
       if (!res.ok || !json?.success) throw new Error(json?.error || 'That did not work.')
       onSaved(json.message || 'Recorded.')
     } catch (e: any) {
@@ -855,7 +878,7 @@ export default function MobileGroceryMyPeriod({ clubId, onBack, onChanged, heade
         `/api/grocery/member?clubId=${encodeURIComponent(clubId)}`,
         { cache: 'no-store' }
       )
-      const json = await res.json()
+      const json = await readJson(res)
       if (!res.ok || !json?.success) throw new Error(json?.error || 'Could not load your period.')
       setData(json.data)
     } catch (e: any) {
@@ -889,7 +912,7 @@ export default function MobileGroceryMyPeriod({ clubId, onBack, onChanged, heade
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
-      const json = await res.json()
+      const json = await readJson(res)
       if (!res.ok || !json?.success) throw new Error(json?.error || 'That did not work.')
       afterWrite(json.message || 'Done.')
     } catch (e: any) {
