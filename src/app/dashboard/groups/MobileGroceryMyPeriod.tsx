@@ -830,9 +830,13 @@ type Props = {
   clubId: string
   onBack: () => void
   onChanged?: () => void
+  // Rendered at the right of the header. The passbook container puts the
+  // ledger toggle here so a member can reach their contribution history,
+  // which is what this screen replaced for them.
+  headerAction?: ReactNode
 }
 
-export default function MobileGroceryMyPeriod({ clubId, onBack, onChanged }: Props) {
+export default function MobileGroceryMyPeriod({ clubId, onBack, onChanged, headerAction }: Props) {
   const [data, setData] = useState<any>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -984,6 +988,7 @@ export default function MobileGroceryMyPeriod({ clubId, onBack, onChanged }: Pro
               {contrib?.dueDate ? ` · due ${fmtDate(contrib.dueDate)}` : ''}
             </div>
           </div>
+          {headerAction}
         </div>
 
         {contrib ? <MoneyCard data={data} currency={currency} /> : null}

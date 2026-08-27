@@ -38,6 +38,7 @@ import type { PassbookView } from '@/lib/mobile/passbook'
 import PassbookShell from '@/components/mobile/PassbookShell'
 import MobileGroceryClubSheet from './MobileGroceryClubSheet'
 import MobileGroceryClubManage from './MobileGroceryClubManage'
+import MobileGroceryMyPeriod from './MobileGroceryMyPeriod'
 
 // One ledger the member could open. Grocery clubs and savings pools both
 // arrive in this shape; only the noun in the copy differs.
@@ -394,6 +395,52 @@ const CREATE_LABEL: Record<string, string> = {
   GROCERY_CLUB: 'New grocery club',
 }
 
+// ── Two books, one club ───────────────────────────────────────
+// A grocery club has two member-facing views and they answer different
+// questions:
+//
+//   LEDGER  the passbook. What have I paid, over time. History.
+//   PERIOD  MobileGroceryMyPeriod. What do I owe RIGHT NOW, who do I hand
+//           it to, and what am I buying. The current meeting.
+//
+// The default differs by role rather than the view differing by role.
+// A member opens the club to act, so they land on PERIOD. An officer opens
+// it to check on things, so they land on LEDGER exactly as before — the
+// screen they already know, with Manage where they expect it.
+//
+// Both roles can switch. An officer is also a member who owes money and may
+// have been assigned shopping, and a member still needs their contribution
+// history. Sending either role to one book with no way out would take away
+// something they have today.
+type BookView = 'LEDGER' | 'PERIOD'
+
+// Header buttons for the passbook and period screens. Module level so the
+// toggle does not remount and swallow the tap that triggered it.
+function HeaderButton({
+  label, onClick, ariaLabel,
+}: { label: string; onClick: () => void; ariaLabel: string }) {
+  return (
+    <button
+      onClick={onClick}
+      aria-label={ariaLabel}
+      style={{
+        minHeight: TOUCH.icon,
+        padding: `0 ${S.md}px`,
+        flexShrink: 0,
+        background: 'rgba(255,255,255,0.14)',
+        border: 'none',
+        borderRadius: 8,
+        color: '#fff',
+        fontSize: T.caption.fontSize,
+        fontFamily: FONT_STACK,
+        cursor: 'pointer',
+      }}
+    >
+      {label}
+    </button>
+  )
+}
+
 type Props = {
   schemeId: string
   schemeName: string
@@ -403,10 +450,14 @@ type Props = {
   onPay?: (view: PassbookView) => void
   canManage?: boolean
   onStartCycle?: () => void
+  // Optional. Supplied when the caller already knows the type, which saves
+  // waiting for the route to say so. Absent is fine — the type is learned
+  // from the chooser payload before a ledger can be picked.
+  schemeType?: string
 }
 
 export default function MobileSchemePassbook({
-  schemeId, schemeName, onBack, onPay, canManage, onStartCycle,
+  schemeId, schemeName, onBack, onPay, canManage, onStartCycle, schemeType,
 }: Props) {
   const [view, setView] = useState<PassbookView | null>(null)
   const [unavailable, setUnavailable] = useState<Unavailable | null>(null)
@@ -421,6 +472,12 @@ export default function MobileSchemePassbook({
   // when the club is not theirs — there is no passbook of theirs to open.
   const [manageId, setManageId] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  // Learned from the chooser payload. The route returns the list even for a
+  // single ledger, so this is always set before a ledger can be picked.
+  const [learnedType, setLearnedType] = useState<string | null>(null)
+  // Null means "no explicit choice yet" — fall back to the role default.
+  // Kept out of `load` so switching books does not refetch.
+  const [book, setBook] = useState<BookView | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -445,6 +502,9 @@ export default function MobileSchemePassbook({
 
       if (json.data?.unavailable) {
         setUnavailable(json.data.unavailable)
+        if (typeof json.data.unavailable.schemeType === 'string') {
+          setLearnedType(json.data.unavailable.schemeType)
+        }
         setView(null)
         return
       }
@@ -467,6 +527,10 @@ export default function MobileSchemePassbook({
   const backFromBook = useCallback(() => {
     if (ledgerId) {
       setLedgerId(null)
+      // Leaving the club drops the book choice too, so opening the next one
+      // starts at that role's default rather than wherever the last one was
+      // left. Two clubs are two different places.
+      setBook(null)
       return
     }
     onBack()
@@ -486,6 +550,30 @@ export default function MobileSchemePassbook({
         clubId={manageId}
         onBack={() => { setManageId(null); load() }}
         onChanged={load}
+      />
+    )
+  }
+
+  // Grocery is the only scheme with a period screen today. Anything else
+  // falls through to the passbook, which is what it did before.
+  const isGrocery = (schemeType || learnedType) === 'GROCERY_CLUB'
+  // An officer lands on the ledger, a member on their period. Either can
+  // switch, and an explicit choice wins over the default.
+  const activeBook: BookView = book ?? (canManage ? 'LEDGER' : 'PERIOD')
+
+  if (isGrocery && ledgerId && activeBook === 'PERIOD') {
+    return (
+      <MobileGroceryMyPeriod
+        clubId={ledgerId}
+        onBack={backFromBook}
+        onChanged={load}
+        headerAction={
+          <HeaderButton
+            label="Passbook"
+            ariaLabel="See your contribution history"
+            onClick={() => setBook('LEDGER')}
+          />
+        }
       />
     )
   }
@@ -543,25 +631,33 @@ export default function MobileSchemePassbook({
 
   // Manage sits in the passbook header for an admin looking at their own
   // book. The list carries the same action for clubs they are not in.
+  //
+  // "This period" sits beside it for everyone, because the ledger answers a
+  // history question and the period screen answers a today question. Two
+  // buttons at 44px still leave room for the title on a 360px screen; a
+  // third would not, which is why Manage stays officer-only rather than
+  // becoming a menu.
+  const periodAction = isGrocery && ledgerId ? (
+    <HeaderButton
+      label="This period"
+      ariaLabel="See what you owe and what you are buying this period"
+      onClick={() => setBook('PERIOD')}
+    />
+  ) : null
+
   const manageAction = canManage && ledgerId ? (
-    <button
+    <HeaderButton
+      label="Manage"
+      ariaLabel="Manage this club"
       onClick={() => setManageId(ledgerId)}
-      aria-label="Manage this club"
-      style={{
-        minHeight: TOUCH.icon,
-        padding: `0 ${S.md}px`,
-        flexShrink: 0,
-        background: 'rgba(255,255,255,0.14)',
-        border: 'none',
-        borderRadius: 8,
-        color: '#fff',
-        fontSize: T.caption.fontSize,
-        fontFamily: FONT_STACK,
-        cursor: 'pointer',
-      }}
-    >
-      Manage
-    </button>
+    />
+  ) : null
+
+  const headerActions = periodAction || manageAction ? (
+    <div style={{ display: 'flex', gap: S.sm, flexShrink: 0 }}>
+      {periodAction}
+      {manageAction}
+    </div>
   ) : null
 
   return (
@@ -576,7 +672,7 @@ export default function MobileSchemePassbook({
       emptyBody={canStart ? copy.admin : copy.member}
       emptyActionLabel={canStart ? 'Set up first cycle' : undefined}
       onEmptyAction={canStart ? onStartCycle : undefined}
-      headerAction={manageAction}
+      headerAction={headerActions}
     />
   )
 }
